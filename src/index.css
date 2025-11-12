@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  background-color: #0b1526;
+}
+
+body {
+  @apply bg-[#0b1526] text-slate-100;
+}
