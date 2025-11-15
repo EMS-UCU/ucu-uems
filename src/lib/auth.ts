@@ -13,6 +13,7 @@ export function authUserToAppUser(authUser: any, profile: any): User {
     isSuperAdmin: profile?.is_super_admin || false,
     campus: profile?.campus,
     department: profile?.department,
+    lecturerCategory: profile?.lecturer_category as 'Undergraduate' | 'Postgraduate' | undefined,
   };
 }
 
@@ -28,6 +29,7 @@ export function dbUserToAppUser(dbUser: DatabaseUser): User {
     isSuperAdmin: dbUser.is_super_admin || false,
     campus: dbUser.campus,
     department: dbUser.department,
+    lecturerCategory: dbUser.lecturer_category,
   };
 }
 
@@ -238,6 +240,7 @@ export async function getAllUsers(): Promise<User[]> {
       isSuperAdmin: profile.is_super_admin || false,
       campus: profile.campus,
       department: profile.department,
+      lecturerCategory: profile.lecturer_category as 'Undergraduate' | 'Postgraduate' | undefined,
     }));
 
     return users;
@@ -255,6 +258,7 @@ export async function createUser(userData: {
   baseRole: 'Admin' | 'Lecturer';
   roles: string[];
   password: string;
+  lecturerCategory?: 'Undergraduate' | 'Postgraduate';
 }): Promise<{ user: User | null; error: string | null }> {
   try {
     if (!userData.email) {
@@ -271,6 +275,7 @@ export async function createUser(userData: {
           name: userData.name,
           base_role: userData.baseRole,
           roles: userData.roles,
+          lecturer_category: userData.lecturerCategory || null,
         },
         emailRedirectTo: undefined, // No email confirmation for admin-created users
       },
@@ -304,6 +309,7 @@ export async function createUser(userData: {
             base_role: userData.baseRole,
             roles: userData.roles,
             is_super_admin: false,
+            lecturer_category: userData.lecturerCategory || null,
           },
         ]);
 

@@ -47,6 +47,7 @@ export interface DatabaseUser {
   is_super_admin?: boolean;
   campus?: string;
   department?: string;
+  lecturer_category?: 'Undergraduate' | 'Postgraduate';
   created_at: string;
   updated_at: string;
 }
@@ -61,6 +62,7 @@ export interface UserProfile {
   isSuperAdmin?: boolean;
   campus?: string;
   department?: string;
+  lecturerCategory?: 'Undergraduate' | 'Postgraduate';
 }
 
 // Exam Paper types

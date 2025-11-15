@@ -11,6 +11,7 @@ import { authenticateUser, getAllUsers } from './lib/auth';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
 import LecturerDashboard from './components/LecturerDashboard';
 import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
+import { supabase } from './lib/supabase';
 
 type BaseRole = 'Admin' | 'Lecturer';
 type Role =
@@ -51,6 +52,7 @@ interface User {
   isSuperAdmin?: boolean;
   campus?: string;
   department?: string;
+  lecturerCategory?: 'Undergraduate' | 'Postgraduate';
 }
 
 interface TimelineEvent {
@@ -2978,26 +2980,60 @@ function PrivilegeDisplay({ role, showDetails = false }: PrivilegeDisplayProps) 
 function AdminViewLecturersPanel({
   users,
 }: AdminViewLecturersPanelProps) {
-  const [selectedDepartment, setSelectedDepartment] = useState<string>('');
+  const [lecturers, setLecturers] = useState<User[]>([]);
+  const [loading, setLoading] = useState(true);
   const [selectedLecturer, setSelectedLecturer] = useState<User | null>(null);
+  const [filterCategory, setFilterCategory] = useState<'All' | 'Undergraduate' | 'Postgraduate'>('All');
 
-  // Mock departments - in real system, these would come from the existing database
-  const departments = [
-    'Faculty of Engineering Design and Technology - Department of Computing',
-  ];
+  useEffect(() => {
+    loadLecturers();
+  }, []);
 
-  // Mock lecturers by department - in real system, this would be fetched from existing DB
-  const lecturersByDepartment: Record<string, User[]> = {
-    'Faculty of Engineering Design and Technology - Department of Computing': [
-      { id: 'lect-1', name: 'Dr. Achieng Odhiambo', baseRole: 'Lecturer', roles: ['Lecturer', 'Chief Examiner'], password: DEFAULT_PASSWORD },
-      { id: 'lect-2', name: 'Dr. Brian Muturi', baseRole: 'Lecturer', roles: ['Lecturer', 'Team Lead'], password: DEFAULT_PASSWORD },
-      { id: 'lect-3', name: 'Prof. Sarah Wanjiku', baseRole: 'Lecturer', roles: ['Lecturer', 'Vetter'], password: DEFAULT_PASSWORD },
-      { id: 'lect-4', name: 'Dr. James Ochieng', baseRole: 'Lecturer', roles: ['Lecturer', 'Setter'], password: DEFAULT_PASSWORD },
-      { id: 'lect-5', name: 'Dr. Mary Njeri', baseRole: 'Lecturer', roles: ['Lecturer'], password: DEFAULT_PASSWORD },
-    ],
+  const loadLecturers = async () => {
+    setLoading(true);
+    try {
+      const { data: profiles, error } = await supabase
+        .from('user_profiles')
+        .select('*')
+        .eq('base_role', 'Lecturer')
+        .order('name', { ascending: true });
+
+      if (error) {
+        console.error('Error loading lecturers:', error);
+        // Fallback to users prop if available
+        const lecturerUsers = users.filter(u => u.baseRole === 'Lecturer');
+        setLecturers(lecturerUsers);
+      } else {
+        const lecturerUsers: User[] = (profiles || []).map((profile: any) => ({
+          id: profile.id,
+          name: profile.name,
+          baseRole: 'Lecturer' as BaseRole,
+          roles: (profile.roles || []) as Role[],
+          password: '',
+          email: profile.email || '',
+          isSuperAdmin: profile.is_super_admin || false,
+          campus: profile.campus,
+          department: profile.department,
+          lecturerCategory: profile.lecturer_category as 'Undergraduate' | 'Postgraduate' | undefined,
+        }));
+        setLecturers(lecturerUsers);
+      }
+    } catch (error) {
+      console.error('Error loading lecturers:', error);
+      const lecturerUsers = users.filter(u => u.baseRole === 'Lecturer');
+      setLecturers(lecturerUsers);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const displayedLecturers = selectedDepartment ? lecturersByDepartment[selectedDepartment] || [] : [];
+  const undergraduateLecturers = lecturers.filter(l => l.lecturerCategory === 'Undergraduate');
+  const postgraduateLecturers = lecturers.filter(l => l.lecturerCategory === 'Postgraduate');
+  const uncategorizedLecturers = lecturers.filter(l => !l.lecturerCategory);
+
+  const displayedLecturers = filterCategory === 'All' 
+    ? lecturers 
+    : lecturers.filter(lecturer => lecturer.lecturerCategory === filterCategory);
   
   const getUserTotalPrivileges = (user: User): number => {
     const uniqueRoles = Array.from(new Set(user.roles));
@@ -3007,55 +3043,66 @@ function AdminViewLecturersPanel({
     }, 0);
   };
 
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-12">
+        <p className="text-blue-700">Loading lecturers...</p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <SectionCard
-        title="View Lecturers by Faculty & Department"
+        title="View Lecturers by Category"
         kicker="Staff Directory"
-        description="Select a faculty and department to view lecturers from the existing system database."
+        description="View all lecturers organized by undergraduate and postgraduate categories."
       >
         <div className="rounded-xl border border-slate-200 bg-white p-6">
           <div className="mb-4">
             <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
-              Select Faculty & Department
+              Filter by Category
             </label>
             <select
-              value={selectedDepartment}
+              value={filterCategory}
               onChange={(e) => {
-                setSelectedDepartment(e.target.value);
+                setFilterCategory(e.target.value as 'All' | 'Undergraduate' | 'Postgraduate');
                 setSelectedLecturer(null);
               }}
               className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
             >
-              <option value="">Choose a faculty and department...</option>
-              {departments.map((dept) => (
-                <option key={dept} value={dept}>
-                  {dept}
-                </option>
-              ))}
+              <option value="All">All Lecturers</option>
+              <option value="Undergraduate">Undergraduate Lecturers</option>
+              <option value="Postgraduate">Postgraduate Lecturers</option>
             </select>
           </div>
 
-          {selectedDepartment && (
-            <div className="mt-4 rounded-lg border border-blue-500/30 bg-blue-500/10 p-3">
-              <p className="text-xs font-semibold text-blue-700 mb-1">Selected Faculty & Department</p>
-              <p className="text-sm text-blue-800">{selectedDepartment}</p>
-              <p className="text-xs text-blue-600/80 mt-1">
-                {displayedLecturers.length} lecturer{displayedLecturers.length !== 1 ? 's' : ''} found
-              </p>
+          <div className="mt-4 grid grid-cols-3 gap-3">
+            <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-3 text-center">
+              <p className="text-xs font-semibold text-blue-700 mb-1">Total</p>
+              <p className="text-2xl font-bold text-blue-800">{lecturers.length}</p>
             </div>
-          )}
+            <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-3 text-center">
+              <p className="text-xs font-semibold text-green-700 mb-1">Undergraduate</p>
+              <p className="text-2xl font-bold text-green-800">{undergraduateLecturers.length}</p>
+            </div>
+            <div className="rounded-lg border border-purple-500/30 bg-purple-500/10 p-3 text-center">
+              <p className="text-xs font-semibold text-purple-700 mb-1">Postgraduate</p>
+              <p className="text-2xl font-bold text-purple-800">{postgraduateLecturers.length}</p>
+            </div>
+          </div>
         </div>
       </SectionCard>
 
-      {selectedDepartment && displayedLecturers.length > 0 && (
+      {/* Undergraduate Lecturers Section */}
+      {undergraduateLecturers.length > 0 && (filterCategory === 'All' || filterCategory === 'Undergraduate') && (
         <SectionCard
-          title="Department Lecturers"
+          title="Undergraduate Lecturers"
           kicker="Staff List"
-          description={`Lecturers in ${selectedDepartment}`}
+          description={`${undergraduateLecturers.length} undergraduate lecturer${undergraduateLecturers.length !== 1 ? 's' : ''}`}
         >
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {displayedLecturers.map((lecturer) => {
+            {undergraduateLecturers.map((lecturer) => {
               const totalPrivs = getUserTotalPrivileges(lecturer);
               const hasVettingRole = lecturer.roles.includes('Vetter') || lecturer.roles.includes('Team Lead') || lecturer.roles.includes('Setter');
               
@@ -3066,18 +3113,128 @@ function AdminViewLecturersPanel({
                   onClick={() => setSelectedLecturer(lecturer)}
                   className={`rounded-xl border p-4 text-left transition ${
                     selectedLecturer?.id === lecturer.id
-                      ? 'border-blue-500/50 bg-blue-500/10'
-                      : 'border-slate-200 bg-white hover:border-blue-500/40'
+                      ? 'border-green-500/50 bg-green-500/10'
+                      : 'border-slate-200 bg-white hover:border-green-500/40'
                   }`}
                 >
                   <div className="flex items-start justify-between mb-2">
                     <div className="flex-1">
                       <p className="text-sm font-semibold text-slate-800">{lecturer.name}</p>
-                      <p className="text-xs text-slate-600 mt-1">{selectedDepartment}</p>
+                      {lecturer.department && (
+                        <p className="text-xs text-slate-600 mt-1">{lecturer.department}</p>
+                      )}
+                    </div>
+                    <span className="text-xs font-semibold text-green-700 bg-green-500/20 px-2 py-1 rounded">
+                      UG
+                    </span>
+                    {hasVettingRole && (
+                      <span className="text-xs font-semibold text-amber-400 bg-amber-500/20 px-2 py-1 rounded ml-1">
+                        Vetting
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {lecturer.roles.map((role) => (
+                      <RoleBadge key={role} role={role} />
+                    ))}
+                  </div>
+                  <div className="mt-2 text-xs text-blue-700">
+                    {totalPrivs} total privileges
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </SectionCard>
+      )}
+
+      {/* Postgraduate Lecturers Section */}
+      {postgraduateLecturers.length > 0 && (filterCategory === 'All' || filterCategory === 'Postgraduate') && (
+        <SectionCard
+          title="Postgraduate Lecturers"
+          kicker="Staff List"
+          description={`${postgraduateLecturers.length} postgraduate lecturer${postgraduateLecturers.length !== 1 ? 's' : ''}`}
+        >
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {postgraduateLecturers.map((lecturer) => {
+              const totalPrivs = getUserTotalPrivileges(lecturer);
+              const hasVettingRole = lecturer.roles.includes('Vetter') || lecturer.roles.includes('Team Lead') || lecturer.roles.includes('Setter');
+              
+              return (
+                <button
+                  key={lecturer.id}
+                  type="button"
+                  onClick={() => setSelectedLecturer(lecturer)}
+                  className={`rounded-xl border p-4 text-left transition ${
+                    selectedLecturer?.id === lecturer.id
+                      ? 'border-purple-500/50 bg-purple-500/10'
+                      : 'border-slate-200 bg-white hover:border-purple-500/40'
+                  }`}
+                >
+                  <div className="flex items-start justify-between mb-2">
+                    <div className="flex-1">
+                      <p className="text-sm font-semibold text-slate-800">{lecturer.name}</p>
+                      {lecturer.department && (
+                        <p className="text-xs text-slate-600 mt-1">{lecturer.department}</p>
+                      )}
+                    </div>
+                    <span className="text-xs font-semibold text-purple-700 bg-purple-500/20 px-2 py-1 rounded">
+                      PG
+                    </span>
+                    {hasVettingRole && (
+                      <span className="text-xs font-semibold text-amber-400 bg-amber-500/20 px-2 py-1 rounded ml-1">
+                        Vetting
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {lecturer.roles.map((role) => (
+                      <RoleBadge key={role} role={role} />
+                    ))}
+                  </div>
+                  <div className="mt-2 text-xs text-blue-700">
+                    {totalPrivs} total privileges
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </SectionCard>
+      )}
+
+      {/* Uncategorized Lecturers Section */}
+      {uncategorizedLecturers.length > 0 && filterCategory === 'All' && (
+        <SectionCard
+          title="Uncategorized Lecturers"
+          kicker="Staff List"
+          description={`${uncategorizedLecturers.length} lecturer${uncategorizedLecturers.length !== 1 ? 's' : ''} without category assignment`}
+        >
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {uncategorizedLecturers.map((lecturer) => {
+              const totalPrivs = getUserTotalPrivileges(lecturer);
+              const hasVettingRole = lecturer.roles.includes('Vetter') || lecturer.roles.includes('Team Lead') || lecturer.roles.includes('Setter');
+              
+              return (
+                <button
+                  key={lecturer.id}
+                  type="button"
+                  onClick={() => setSelectedLecturer(lecturer)}
+                  className={`rounded-xl border p-4 text-left transition ${
+                    selectedLecturer?.id === lecturer.id
+                      ? 'border-slate-500/50 bg-slate-500/10'
+                      : 'border-slate-200 bg-white hover:border-slate-500/40'
+                  }`}
+                >
+                  <div className="flex items-start justify-between mb-2">
+                    <div className="flex-1">
+                      <p className="text-sm font-semibold text-slate-800">{lecturer.name}</p>
+                      {lecturer.department && (
+                        <p className="text-xs text-slate-600 mt-1">{lecturer.department}</p>
+                      )}
                     </div>
                     {hasVettingRole && (
                       <span className="text-xs font-semibold text-amber-400 bg-amber-500/20 px-2 py-1 rounded">
-                        Vetting Staff
+                        Vetting
                       </span>
                     )}
                   </div>
@@ -3108,9 +3265,19 @@ function AdminViewLecturersPanel({
                 <p className="text-xs text-slate-600 mb-1">Full Name</p>
                 <p className="text-sm font-semibold text-slate-800">{selectedLecturer.name}</p>
               </div>
+              {selectedLecturer.department && (
+                <div>
+                  <p className="text-xs text-slate-600 mb-1">Department</p>
+                  <p className="text-sm font-semibold text-slate-800">{selectedLecturer.department}</p>
+                </div>
+              )}
               <div>
-                <p className="text-xs text-slate-600 mb-1">Department</p>
-                <p className="text-sm font-semibold text-slate-800">{selectedDepartment}</p>
+                <p className="text-xs text-slate-600 mb-1">Category</p>
+                <p className="text-sm font-semibold text-slate-800">
+                  {selectedLecturer.lecturerCategory || (
+                    <span className="text-slate-400 italic">Not assigned</span>
+                  )}
+                </p>
               </div>
               <div>
                 <p className="text-xs text-slate-600 mb-1">Base Role</p>
@@ -3120,6 +3287,12 @@ function AdminViewLecturersPanel({
                 <p className="text-xs text-slate-600 mb-1">Total Privileges</p>
                 <p className="text-sm font-semibold text-blue-700">{getUserTotalPrivileges(selectedLecturer)}</p>
               </div>
+              {selectedLecturer.campus && (
+                <div>
+                  <p className="text-xs text-slate-600 mb-1">Campus</p>
+                  <p className="text-sm font-semibold text-slate-800">{selectedLecturer.campus}</p>
+                </div>
+              )}
             </div>
             <div>
               <p className="text-xs text-slate-600 mb-2">Assigned Roles</p>
