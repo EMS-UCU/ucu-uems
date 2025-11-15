@@ -1667,27 +1667,11 @@ function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleNavigate('super-accounts')}
-                    className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-left transition-all hover:border-blue-400 hover:shadow-lg hover:bg-blue-100"
-                  >
-                    <p className="text-sm font-semibold text-blue-700">View All Accounts</p>
-                    <p className="mt-1 text-xs text-slate-600">Browse all system users</p>
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => handleNavigate('super-system-stats')}
                     className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-left transition-all hover:border-blue-400 hover:shadow-lg hover:bg-blue-100"
                   >
                     <p className="text-sm font-semibold text-amber-700">System Statistics</p>
                     <p className="mt-1 text-xs text-slate-600">View detailed system metrics</p>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleNavigate('super-manage-users')}
-                    className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-left transition-all hover:border-blue-400 hover:shadow-lg hover:bg-blue-100"
-                  >
-                    <p className="text-sm font-semibold text-red-700">Manage Users</p>
-                    <p className="mt-1 text-xs text-slate-600">Edit or delete user accounts</p>
                   </button>
                   <button
                     type="button"
@@ -2014,24 +1998,16 @@ function App() {
           ),
         },
         {
-          id: 'super-chief-role',
-          label: 'Chief Examiner Role',
+          id: 'admin-add-chief-examiner',
+          label: 'Add Chief Examiner',
           visible: true,
           render: () => (
-            <SuperUserChiefExaminerPanel
-              users={users}
-              chiefExaminerRoleEnabled={chiefExaminerRoleEnabled}
-              onEnableChiefExaminerRole={handleEnableChiefExaminerRole}
-              onPromoteToChiefExaminer={handlePromoteToChiefExaminer}
-              onUnassignChiefExaminer={handleUnassignChiefExaminer}
+            <PrivilegeElevationPanel
+              currentUserId={currentUser!.id}
+              isSuperAdmin={true}
+              isChiefExaminer={false}
             />
           ),
-        },
-        {
-          id: 'super-accounts',
-          label: 'All Accounts',
-          visible: true,
-          render: () => <SuperUserAccountsPanel users={users} />,
         },
         {
           id: 'super-system-stats',
@@ -2040,22 +2016,10 @@ function App() {
           render: () => <SuperUserSystemStatsPanel users={users} workflow={workflow} />,
         },
         {
-          id: 'super-manage-users',
-          label: 'Manage Users',
-          visible: true,
-          render: () => <SuperUserManageUsersPanel users={users} setUsers={setUsers} />,
-        },
-        {
           id: 'admin-system-settings',
           label: 'System Settings',
           visible: true,
           render: () => <AdminSystemSettingsPanel />,
-        },
-        {
-          id: 'admin-audit-log',
-          label: 'Audit Log',
-          visible: true,
-          render: () => <AdminAuditLogPanel workflow={workflow} />,
         },
       ]
     : [];
@@ -3539,9 +3503,9 @@ function AdminAddLecturerPanel({
           value={lecturerName}
           onChange={(event) => setLecturerName(event.target.value)}
           placeholder="e.g. Dr. Jane Mwangi"
-          required
-          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
-        />
+            required
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+          />
         </div>
         
         <div>
@@ -4178,6 +4142,8 @@ function SuperUserSystemStatsPanel({ users, workflow }: SuperUserSystemStatsPane
 
   const totalPrivileges = Object.values(rolePrivileges).reduce((sum, role) => sum + role.totalPrivileges, 0);
   const activeUsers = users.length;
+  const totalRoleAssignments = chiefExaminers + teamLeads + vetters + setters;
+
 
   return (
     <SectionCard
@@ -4186,64 +4152,275 @@ function SuperUserSystemStatsPanel({ users, workflow }: SuperUserSystemStatsPane
       description="Comprehensive overview of system users, roles, and privileges."
     >
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Total Users</p>
-          <p className="mt-2 text-3xl font-bold text-blue-700">{activeUsers}</p>
-          <div className="mt-3 space-y-1 text-xs text-slate-600">
+        {/* Total Users Card with Thick Line Graph */}
+        <div className="relative rounded-xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 via-white to-indigo-50 p-4 shadow-lg overflow-hidden group hover:shadow-xl transition-all duration-300">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-blue-400/20 to-indigo-400/20 rounded-bl-full"></div>
+          <p className="text-xs uppercase tracking-wide text-blue-600 font-bold relative z-10">Total Users</p>
+          <p className="mt-2 text-3xl font-bold text-blue-700 relative z-10">{activeUsers}</p>
+          
+          {/* Thin Donut Chart */}
+          <div className="mt-4 h-16 relative z-10 flex items-center justify-center">
+            <svg width="64" height="64" viewBox="0 0 64 64" className="transform -rotate-90">
+              <defs>
+                <linearGradient id="usersDonutGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stopColor="#3b82f6" />
+                  <stop offset="100%" stopColor="#6366f1" />
+                </linearGradient>
+              </defs>
+              {/* Background circle */}
+              <circle cx="32" cy="32" r="14" fill="none" stroke="#e0e7ff" strokeWidth="3" />
+              {/* Active segment - Admins */}
+              {activeUsers > 0 && (
+                <circle
+                  cx="32"
+                  cy="32"
+                  r="14"
+                  fill="none"
+                  stroke="url(#usersDonutGradient)"
+                  strokeWidth="3"
+                  strokeDasharray={`${(admins / activeUsers) * 87.96} 87.96`}
+                  strokeLinecap="round"
+                />
+              )}
+              {/* Active segment - Lecturers */}
+              {activeUsers > 0 && lecturers > 0 && (
+                <circle
+                  cx="32"
+                  cy="32"
+                  r="14"
+                  fill="none"
+                  stroke="#a78bfa"
+                  strokeWidth="3"
+                  strokeDasharray={`${(lecturers / activeUsers) * 87.96} 87.96`}
+                  strokeDashoffset={`-${(admins / activeUsers) * 87.96}`}
+                  strokeLinecap="round"
+                />
+              )}
+            </svg>
+          </div>
+          
+          <div className="mt-3 space-y-1 text-xs text-slate-600 relative z-10">
             <p>Admins: {admins}</p>
             <p>Lecturers: {lecturers}</p>
           </div>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Role Assignments</p>
-          <p className="mt-2 text-3xl font-bold text-blue-700">{chiefExaminers + teamLeads + vetters + setters}</p>
-          <div className="mt-3 space-y-1 text-xs text-slate-600">
+
+        {/* Role Assignments Card with Thick Line Graph */}
+        <div className="relative rounded-xl border-2 border-purple-200 bg-gradient-to-br from-purple-50 via-white to-pink-50 p-4 shadow-lg overflow-hidden group hover:shadow-xl transition-all duration-300">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-purple-400/20 to-pink-400/20 rounded-bl-full"></div>
+          <p className="text-xs uppercase tracking-wide text-purple-600 font-bold relative z-10">Role Assignments</p>
+          <p className="mt-2 text-3xl font-bold text-purple-700 relative z-10">{totalRoleAssignments}</p>
+          
+          {/* Thin Donut Chart */}
+          <div className="mt-4 h-16 relative z-10 flex items-center justify-center">
+            <svg width="64" height="64" viewBox="0 0 64 64" className="transform -rotate-90">
+              <defs>
+                <linearGradient id="rolesDonutGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stopColor="#a855f7" />
+                  <stop offset="100%" stopColor="#ec4899" />
+                </linearGradient>
+              </defs>
+              {/* Background circle */}
+              <circle cx="32" cy="32" r="14" fill="none" stroke="#f3e8ff" strokeWidth="3" />
+              {/* Active segments */}
+              {totalRoleAssignments > 0 && (
+                <>
+                  <circle
+                    cx="32"
+                    cy="32"
+                    r="14"
+                    fill="none"
+                    stroke="url(#rolesDonutGradient)"
+                    strokeWidth="3"
+                    strokeDasharray={`${(chiefExaminers / Math.max(totalRoleAssignments, 1)) * 87.96} 87.96`}
+                    strokeLinecap="round"
+                  />
+                  {teamLeads > 0 && (
+                    <circle
+                      cx="32"
+                      cy="32"
+                      r="14"
+                      fill="none"
+                      stroke="#f59e0b"
+                      strokeWidth="3"
+                      strokeDasharray={`${(teamLeads / Math.max(totalRoleAssignments, 1)) * 87.96} 87.96`}
+                      strokeDashoffset={`-${(chiefExaminers / Math.max(totalRoleAssignments, 1)) * 87.96}`}
+                      strokeLinecap="round"
+                    />
+                  )}
+                  {vetters > 0 && (
+                    <circle
+                      cx="32"
+                      cy="32"
+                      r="14"
+                      fill="none"
+                      stroke="#ec4899"
+                      strokeWidth="3"
+                      strokeDasharray={`${(vetters / Math.max(totalRoleAssignments, 1)) * 87.96} 87.96`}
+                      strokeDashoffset={`-${((chiefExaminers + teamLeads) / Math.max(totalRoleAssignments, 1)) * 87.96}`}
+                      strokeLinecap="round"
+                    />
+                  )}
+                  {setters > 0 && (
+                    <circle
+                      cx="32"
+                      cy="32"
+                      r="14"
+                      fill="none"
+                      stroke="#06b6d4"
+                      strokeWidth="3"
+                      strokeDasharray={`${(setters / Math.max(totalRoleAssignments, 1)) * 87.96} 87.96`}
+                      strokeDashoffset={`-${((chiefExaminers + teamLeads + vetters) / Math.max(totalRoleAssignments, 1)) * 87.96}`}
+                      strokeLinecap="round"
+                    />
+                  )}
+                </>
+              )}
+            </svg>
+          </div>
+          
+          <div className="mt-3 space-y-1 text-xs text-slate-600 relative z-10">
             <p>Chief Examiners: {chiefExaminers}</p>
             <p>Team Leads: {teamLeads}</p>
             <p>Vetters: {vetters}</p>
             <p>Setters: {setters}</p>
           </div>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-wide text-slate-500">System Privileges</p>
-          <p className="mt-2 text-3xl font-bold text-blue-700">{totalPrivileges}</p>
-          <p className="mt-3 text-xs text-slate-600">
+
+        {/* System Privileges Card with Thick Line Graph */}
+        <div className="relative rounded-xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 via-white to-teal-50 p-4 shadow-lg overflow-hidden group hover:shadow-xl transition-all duration-300">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-emerald-400/20 to-teal-400/20 rounded-bl-full"></div>
+          <p className="text-xs uppercase tracking-wide text-emerald-600 font-bold relative z-10">System Privileges</p>
+          <p className="mt-2 text-3xl font-bold text-emerald-700 relative z-10">{totalPrivileges}</p>
+          
+          {/* Thin Donut Chart */}
+          <div className="mt-4 h-16 relative z-10 flex items-center justify-center">
+            <svg width="64" height="64" viewBox="0 0 64 64" className="transform -rotate-90">
+              <defs>
+                <linearGradient id="privilegesDonutGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stopColor="#10b981" />
+                  <stop offset="100%" stopColor="#14b8a6" />
+                </linearGradient>
+              </defs>
+              {/* Background circle */}
+              <circle cx="32" cy="32" r="14" fill="none" stroke="#d1fae5" strokeWidth="3" />
+              {/* Active segment - showing distribution across roles */}
+              <circle
+                cx="32"
+                cy="32"
+                r="14"
+                fill="none"
+                stroke="url(#privilegesDonutGradient)"
+                strokeWidth="3"
+                strokeDasharray="87.96 87.96"
+                strokeDashoffset={`${(1 - Object.keys(rolePrivileges).length / 10) * 87.96}`}
+                strokeLinecap="round"
+              />
+            </svg>
+          </div>
+          
+          <p className="mt-3 text-xs text-slate-600 relative z-10">
             Across {Object.keys(rolePrivileges).length} roles
           </p>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Workflow Stage</p>
-          <p className="mt-2 text-lg font-bold text-amber-300">{workflow.stage.replace(/-/g, ' ')}</p>
-          <p className="mt-3 text-xs text-slate-600">
+
+        {/* Workflow Stage Card with Thick Line Graph */}
+        <div className="relative rounded-xl border-2 border-amber-200 bg-gradient-to-br from-amber-50 via-white to-orange-50 p-4 shadow-lg overflow-hidden group hover:shadow-xl transition-all duration-300">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-amber-400/20 to-orange-400/20 rounded-bl-full"></div>
+          <p className="text-xs uppercase tracking-wide text-amber-600 font-bold relative z-10">Workflow Stage</p>
+          <p className="mt-2 text-lg font-bold text-amber-700 relative z-10">{workflow.stage.replace(/-/g, ' ')}</p>
+          
+          {/* Thin Donut Chart */}
+          <div className="mt-4 h-16 relative z-10 flex items-center justify-center">
+            <svg width="64" height="64" viewBox="0 0 64 64" className="transform -rotate-90">
+              <defs>
+                <linearGradient id="workflowDonutGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stopColor="#f59e0b" />
+                  <stop offset="100%" stopColor="#f97316" />
+                </linearGradient>
+              </defs>
+              {/* Background circle */}
+              <circle cx="32" cy="32" r="14" fill="none" stroke="#fed7aa" strokeWidth="3" />
+              {/* Active segment - based on timeline entries */}
+              <circle
+                cx="32"
+                cy="32"
+                r="14"
+                fill="none"
+                stroke="url(#workflowDonutGradient)"
+                strokeWidth="3"
+                strokeDasharray={`${Math.min((workflow.timeline.length / 10) * 87.96, 87.96)} 87.96`}
+                strokeLinecap="round"
+              />
+            </svg>
+          </div>
+          
+          <p className="mt-3 text-xs text-slate-600 relative z-10">
             Timeline: {workflow.timeline.length} entries
           </p>
         </div>
       </div>
 
-      <div className="mt-6 rounded-xl border border-slate-200 bg-white p-5">
-        <h3 className="text-sm font-semibold text-slate-800 mb-4">Privilege Distribution by Role</h3>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {Object.values(rolePrivileges).map((rolePriv) => {
-            const roleCount = users.filter(u => u.roles.includes(rolePriv.role)).length;
-            return (
-              <div key={rolePriv.role} className="rounded-lg border border-slate-200 bg-white p-3">
-                <div className="flex items-center justify-between mb-2">
-                  <p className="text-sm font-semibold text-slate-800">{rolePriv.role}</p>
-                  <span className="text-xs text-slate-600">{roleCount} users</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-blue-500"
-                      style={{ width: `${(rolePriv.totalPrivileges / totalPrivileges) * 100}%` }}
-                    />
+      {/* Privilege Distribution with Single Bar Graph */}
+      <div className="mt-6 rounded-xl border-2 border-slate-300 bg-gradient-to-br from-slate-50 via-white to-blue-50 p-5 shadow-lg">
+        <div className="flex items-center gap-2 mb-6">
+          <svg className="w-5 h-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
+          <h3 className="text-sm font-bold text-slate-800">Privilege Distribution by Role</h3>
+        </div>
+        
+        {/* Single Bar Graph Container */}
+        <div className="bg-white rounded-lg p-6 border border-slate-200 shadow-sm">
+          <div className="flex items-end gap-4 h-64 relative">
+            {Object.values(rolePrivileges).map((rolePriv, index) => {
+              const roleCount = users.filter(u => u.roles.includes(rolePriv.role)).length;
+              const percentage = (rolePriv.totalPrivileges / totalPrivileges) * 100;
+              const maxBarHeight = 220; // Maximum height in pixels
+              const barHeight = Math.max(30, (percentage / 100) * maxBarHeight);
+              
+              const colors = [
+                { from: '#3b82f6', to: '#2563eb' }, // Blue
+                { from: '#8b5cf6', to: '#7c3aed' }, // Purple
+                { from: '#10b981', to: '#059669' }, // Emerald
+                { from: '#f59e0b', to: '#d97706' }, // Amber
+                { from: '#ec4899', to: '#db2777' }, // Pink
+                { from: '#06b6d4', to: '#0891b2' }, // Cyan
+              ];
+              const color = colors[index % colors.length];
+
+              return (
+                <div key={rolePriv.role} className="flex-1 flex flex-col items-center group">
+                  {/* Value label above bar */}
+                  <div className="mb-2 text-xs font-bold text-slate-700 text-center">
+                    {rolePriv.totalPrivileges}
                   </div>
-                  <span className="text-xs font-semibold text-blue-700">{rolePriv.totalPrivileges}</span>
+                  
+                  {/* Bar */}
+                  <div className="w-full flex flex-col items-center relative">
+                    <div
+                      className="w-full rounded-t-lg shadow-md group-hover:shadow-xl transition-all duration-300 relative overflow-hidden group-hover:scale-105"
+                      style={{
+                        height: `${barHeight}px`,
+                        minHeight: '30px',
+                        background: `linear-gradient(180deg, ${color.from} 0%, ${color.to} 100%)`,
+                      }}
+                    >
+                      {/* Shine overlay */}
+                      <div className="absolute inset-0 bg-gradient-to-t from-transparent via-white/20 to-white/40 rounded-t-lg"></div>
+                    </div>
+                  </div>
+                  
+                  {/* Role label below bar */}
+                  <div className="mt-3 text-center">
+                    <p className="text-xs font-bold text-slate-800 mb-1">{rolePriv.role}</p>
+                    <p className="text-xs text-slate-500">{roleCount} users</p>
+                    <p className="text-xs text-slate-500">{percentage.toFixed(1)}%</p>
+                  </div>
                 </div>
-                <p className="mt-2 text-xs text-slate-500">{rolePriv.panelCount} access panels</p>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
       </div>
     </SectionCard>

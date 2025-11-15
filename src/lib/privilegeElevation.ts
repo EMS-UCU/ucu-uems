@@ -6,6 +6,7 @@ export async function elevateToChiefExaminer(
   lecturerId: string,
   elevatedBy: string,
   assignmentDetails?: {
+    category?: 'Undergraduate' | 'Postgraduate';
     faculty?: string;
     department?: string;
     course?: string;
@@ -52,6 +53,7 @@ export async function elevateToChiefExaminer(
         role_granted: 'Chief Examiner',
         is_active: true,
         metadata: assignmentDetails ? {
+          category: assignmentDetails.category,
           faculty: assignmentDetails.faculty,
           department: assignmentDetails.department,
           course: assignmentDetails.course,
