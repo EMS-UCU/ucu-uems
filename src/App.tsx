@@ -6,6 +6,11 @@ import {
   type FormEvent,
   type ReactNode,
 } from 'react';
+import HomePage from './HomePage';
+import { authenticateUser, getAllUsers } from './lib/auth';
+import SuperAdminDashboard from './components/SuperAdminDashboard';
+import LecturerDashboard from './components/LecturerDashboard';
+import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 
 type BaseRole = 'Admin' | 'Lecturer';
 type Role =
@@ -42,6 +47,10 @@ interface User {
   baseRole: BaseRole;
   roles: Role[];
   password: string;
+  email?: string;
+  isSuperAdmin?: boolean;
+  campus?: string;
+  department?: string;
 }
 
 interface TimelineEvent {
@@ -411,12 +420,12 @@ const formatTimestamp = (iso: string) =>
   });
 
 const roleColours: Record<Role, string> = {
-  'Admin': 'bg-purple-100 text-purple-700',
-  Lecturer: 'bg-slate-200 text-slate-800',
-  'Chief Examiner': 'bg-emerald-100 text-emerald-700',
-  'Team Lead': 'bg-indigo-100 text-indigo-700',
-  Vetter: 'bg-amber-100 text-amber-800',
-  Setter: 'bg-pink-100 text-pink-700',
+  'Admin': 'bg-blue-100 text-blue-700',
+  Lecturer: 'bg-red-100 text-red-700',
+  'Chief Examiner': 'bg-blue-100 text-blue-700',
+  'Team Lead': 'bg-blue-100 text-blue-700',
+  Vetter: 'bg-yellow-100 text-yellow-700',
+  Setter: 'bg-yellow-100 text-yellow-700',
 };
 
 function App() {
@@ -454,6 +463,7 @@ function App() {
   const [users, setUsers] = useState<User[]>(loadPersistedUsers);
   const [authUserId, setAuthUserId] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
   const [chiefExaminerRoleEnabled, setChiefExaminerRoleEnabled] =
     useState(loadPersistedChiefExaminerEnabled);
   const [deadlinesActive, setDeadlinesActive] = useState(false);
@@ -530,7 +540,65 @@ function App() {
     [authUserId, users]
   );
 
-  // Persist users to localStorage whenever they change
+  // Load users from Supabase on mount
+  useEffect(() => {
+    const loadUsersFromSupabase = async () => {
+      setIsLoadingUsers(true);
+      try {
+        const supabaseUsers = await getAllUsers();
+        if (supabaseUsers.length > 0) {
+          setUsers(supabaseUsers);
+          // Also persist to localStorage as backup
+          try {
+            localStorage.setItem('ucu-moderation-users', JSON.stringify(supabaseUsers));
+          } catch (error) {
+            console.error('Error saving users to localStorage:', error);
+          }
+        } else {
+          // If no users from Supabase, try to load from localStorage as fallback
+          const saved = localStorage.getItem('ucu-moderation-users');
+          if (saved) {
+            try {
+              const parsed = JSON.parse(saved);
+              if (parsed.length > 0) {
+                setUsers(parsed.map((user: any) => ({
+                  ...user,
+                  roles: user.roles || [],
+                  baseRole: user.baseRole || 'Lecturer',
+                })) as User[]);
+              }
+            } catch (error) {
+              console.error('Error loading users from localStorage:', error);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Error loading users from Supabase:', error);
+        // Fallback to localStorage if Supabase fails
+        const saved = localStorage.getItem('ucu-moderation-users');
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved);
+            if (parsed.length > 0) {
+              setUsers(parsed.map((user: any) => ({
+                ...user,
+                roles: user.roles || [],
+                baseRole: user.baseRole || 'Lecturer',
+              })) as User[]);
+            }
+          } catch (error) {
+            console.error('Error loading users from localStorage:', error);
+          }
+        }
+      } finally {
+        setIsLoadingUsers(false);
+      }
+    };
+
+    loadUsersFromSupabase();
+  }, []);
+
+  // Persist users to localStorage whenever they change (as backup)
   useEffect(() => {
     try {
       localStorage.setItem('ucu-moderation-users', JSON.stringify(users));
@@ -574,15 +642,50 @@ function App() {
   const currentUserHasRole = (role: Role) =>
     currentUser?.roles.includes(role) ?? false;
 
-  const handleLogin = (userId: string, password: string) => {
-    const target = users.find((user) => user.id === userId);
-    if (!target || target.password !== password.trim()) {
-      setAuthError('Invalid credentials. Please try again.');
+  const handleLogin = async (email: string, password: string) => {
+    setAuthError(null);
+    
+    try {
+      console.log('Attempting login for:', email);
+      const { user, error } = await authenticateUser(email, password);
+      
+      if (error || !user) {
+        console.error('Login failed:', error);
+        setAuthError(error || 'Invalid email or password. Please try again.');
+        return false;
+      }
+
+      console.log('Login successful for user:', user.name, 'Roles:', user.roles);
+
+      // Update users list if user is not already in it
+      setUsers((prevUsers) => {
+        const exists = prevUsers.find((u) => u.id === user.id);
+        if (!exists) {
+          return [...prevUsers, user];
+        }
+        return prevUsers;
+      });
+
+      setAuthUserId(user.id);
+      setAuthError(null);
+      
+      // Set default panel based on role
+      if (user.isSuperAdmin) {
+        setActivePanelId('super-admin-dashboard');
+      } else if (user.roles.includes('Admin')) {
+        setActivePanelId('overview');
+      } else if (user.baseRole === 'Lecturer') {
+        setActivePanelId('lecturer-role-dashboard');
+      } else {
+        setActivePanelId('overview');
+      }
+      
+      return true;
+    } catch (error: any) {
+      console.error('Login error:', error);
+      setAuthError(error?.message || 'An error occurred during login. Please try again.');
       return false;
     }
-    setAuthUserId(target.id);
-    setAuthError(null);
-    return true;
   };
 
   const handleLogout = () => {
@@ -1421,49 +1524,68 @@ function App() {
 
           return (
             <div className="space-y-6">
+              {/* Dashboard Label */}
+              <div className="flex items-center justify-between rounded-xl border-2 border-blue-600 bg-gradient-to-r from-blue-50 to-purple-50 p-4 shadow-md">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 text-white">
+                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h1 className="text-xl font-bold text-blue-900">Admin Dashboard</h1>
+                    <p className="text-sm text-slate-600">User Management & System Administration</p>
+                  </div>
+                </div>
+                <div className="rounded-full bg-blue-600 px-3 py-1 text-xs font-semibold text-white">
+                  ADMIN
+                </div>
+              </div>
+
               {/* Key Metrics */}
               <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+                <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm hover:shadow-md transition-shadow">
                   <div className="flex items-center justify-between mb-2">
                     <p className="text-xs uppercase tracking-wide text-slate-500">Total Users</p>
-                    <span className="text-emerald-400">👥</span>
+                    <span className="text-blue-600">👥</span>
                   </div>
-                  <p className="text-3xl font-bold text-emerald-300">{totalUsers}</p>
-                  <div className="mt-3 flex gap-4 text-xs text-slate-400">
+                  <p className="text-3xl font-bold text-blue-600">{totalUsers}</p>
+                  <div className="mt-3 flex gap-4 text-xs text-slate-600">
                     <span>Admins: {admins}</span>
                     <span>Lecturers: {lecturers}</span>
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+                <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm hover:shadow-md transition-shadow">
                   <div className="flex items-center justify-between mb-2">
                     <p className="text-xs uppercase tracking-wide text-slate-500">Active Roles</p>
-                    <span className="text-indigo-400">🎭</span>
+                    <span className="text-purple-600">🎭</span>
                   </div>
-                  <p className="text-3xl font-bold text-indigo-300">{activeRoles}</p>
-                  <div className="mt-3 text-xs text-slate-400">
+                  <p className="text-3xl font-bold text-purple-600">{activeRoles}</p>
+                  <div className="mt-3 text-xs text-slate-600">
                     {chiefExaminers} CE • {teamLeads} TL • {vetters} V • {setters} S
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+                <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm hover:shadow-md transition-shadow">
                   <div className="flex items-center justify-between mb-2">
                     <p className="text-xs uppercase tracking-wide text-slate-500">System Status</p>
-                    <span className="text-emerald-400">✓</span>
+                    <span className="text-green-600">✓</span>
                   </div>
-                  <p className="text-2xl font-bold text-emerald-300">Operational</p>
-                  <p className="mt-3 text-xs text-slate-400">
+                  <p className="text-2xl font-bold text-green-600">Operational</p>
+                  <p className="mt-3 text-xs text-slate-600">
                     Chief Examiner: {chiefExaminerRoleEnabled ? 'Enabled' : 'Locked'}
                   </p>
                 </div>
 
-                <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+                <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm hover:shadow-md transition-shadow">
                   <div className="flex items-center justify-between mb-2">
                     <p className="text-xs uppercase tracking-wide text-slate-500">Workflow Stage</p>
-                    <span className="text-amber-400">⚙️</span>
+                    <span className="text-purple-600">⚙️</span>
                   </div>
-                  <p className="text-lg font-bold text-amber-300">{workflow.stage.replace(/-/g, ' ')}</p>
-                  <p className="mt-3 text-xs text-slate-400">
+                  <p className="text-lg font-bold text-purple-600">{workflow.stage.replace(/-/g, ' ')}</p>
+                  <p className="mt-3 text-xs text-slate-600">
                     {workflow.timeline.length} timeline entries
                   </p>
                 </div>
@@ -1479,50 +1601,50 @@ function App() {
                   <button
                     type="button"
                     onClick={() => handleNavigate('admin-view-lecturers')}
-                    className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-left transition hover:border-emerald-500/40 hover:bg-slate-900"
+                    className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-left transition-all hover:border-blue-400 hover:shadow-lg hover:bg-blue-100"
                   >
-                    <p className="text-sm font-semibold text-emerald-300">View Lecturers</p>
-                    <p className="mt-1 text-xs text-slate-400">Browse lecturers by department</p>
+                    <p className="text-sm font-semibold text-blue-700">View Lecturers</p>
+                    <p className="mt-1 text-xs text-slate-600">Browse lecturers by department</p>
                   </button>
                   <button
                     type="button"
                     onClick={() => handleNavigate('super-chief-role')}
-                    className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-left transition hover:border-indigo-500/40 hover:bg-slate-900"
+                    className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-left transition-all hover:border-blue-400 hover:shadow-lg hover:bg-blue-100"
                   >
-                    <p className="text-sm font-semibold text-indigo-300">Manage Chief Examiner</p>
-                    <p className="mt-1 text-xs text-slate-400">Enable and assign Chief Examiner role</p>
+                    <p className="text-sm font-semibold text-purple-700">Manage Chief Examiner</p>
+                    <p className="mt-1 text-xs text-slate-600">Enable and assign Chief Examiner role</p>
                   </button>
                   <button
                     type="button"
                     onClick={() => handleNavigate('super-accounts')}
-                    className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-left transition hover:border-purple-500/40 hover:bg-slate-900"
+                    className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-left transition-all hover:border-blue-400 hover:shadow-lg hover:bg-blue-100"
                   >
-                    <p className="text-sm font-semibold text-purple-300">View All Accounts</p>
-                    <p className="mt-1 text-xs text-slate-400">Browse all system users</p>
+                    <p className="text-sm font-semibold text-blue-700">View All Accounts</p>
+                    <p className="mt-1 text-xs text-slate-600">Browse all system users</p>
                   </button>
                   <button
                     type="button"
                     onClick={() => handleNavigate('super-system-stats')}
-                    className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-left transition hover:border-amber-500/40 hover:bg-slate-900"
+                    className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-left transition-all hover:border-blue-400 hover:shadow-lg hover:bg-blue-100"
                   >
-                    <p className="text-sm font-semibold text-amber-300">System Statistics</p>
-                    <p className="mt-1 text-xs text-slate-400">View detailed system metrics</p>
+                    <p className="text-sm font-semibold text-amber-700">System Statistics</p>
+                    <p className="mt-1 text-xs text-slate-600">View detailed system metrics</p>
                   </button>
                   <button
                     type="button"
                     onClick={() => handleNavigate('super-manage-users')}
-                    className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-left transition hover:border-rose-500/40 hover:bg-slate-900"
+                    className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-left transition-all hover:border-blue-400 hover:shadow-lg hover:bg-blue-100"
                   >
-                    <p className="text-sm font-semibold text-rose-300">Manage Users</p>
-                    <p className="mt-1 text-xs text-slate-400">Edit or delete user accounts</p>
+                    <p className="text-sm font-semibold text-red-700">Manage Users</p>
+                    <p className="mt-1 text-xs text-slate-600">Edit or delete user accounts</p>
                   </button>
                   <button
                     type="button"
                     onClick={() => handleNavigate('admin-add-admin')}
-                    className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-left transition hover:border-emerald-500/40 hover:bg-slate-900"
+                    className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-left transition-all hover:border-blue-400 hover:shadow-lg hover:bg-blue-100"
                   >
-                    <p className="text-sm font-semibold text-emerald-300">Add Admin</p>
-                    <p className="mt-1 text-xs text-slate-400">Create additional administrators</p>
+                    <p className="text-sm font-semibold text-blue-700">Add Admin</p>
+                    <p className="mt-1 text-xs text-slate-600">Create additional administrators</p>
                   </button>
                 </div>
               </SectionCard>
@@ -1534,8 +1656,8 @@ function App() {
                 description="Staff members assigned to the moderation workflow (Team Leads, Vetters, Setters)."
               >
                 {vettingStaff.length === 0 ? (
-                  <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6 text-center">
-                    <p className="text-sm text-slate-400">No vetting staff assigned yet.</p>
+                  <div className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6 text-center shadow-md">
+                    <p className="text-sm text-slate-600">No vetting staff assigned yet.</p>
                     <p className="text-xs text-slate-500 mt-2">Assign roles through the Chief Examiner Role panel.</p>
                   </div>
                 ) : (
@@ -1549,8 +1671,8 @@ function App() {
                         >
                           <div className="flex items-start justify-between mb-2">
                             <div className="flex-1">
-                              <p className="text-sm font-semibold text-slate-200">{user.name}</p>
-                              <p className="mt-1 text-xs text-slate-400">{user.baseRole}</p>
+                              <p className="text-sm font-semibold text-slate-800">{user.name}</p>
+                              <p className="mt-1 text-xs text-slate-600">{user.baseRole}</p>
                             </div>
                             <span className="text-xs font-semibold text-amber-400 bg-amber-500/20 px-2 py-1 rounded">
                               Vetting Staff
@@ -1580,18 +1702,18 @@ function App() {
                 description="Latest users added to the system."
               >
                 {recentUsers.length === 0 ? (
-                  <p className="text-sm text-slate-400">No users in the system yet.</p>
+                  <p className="text-sm text-slate-600">No users in the system yet.</p>
                 ) : (
                   <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                     {recentUsers.map((user) => (
                       <div
                         key={user.id}
-                        className="rounded-xl border border-slate-800 bg-slate-950/60 p-4"
+                        className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 shadow-md"
                       >
                         <div className="flex items-start justify-between">
                           <div className="flex-1">
-                            <p className="text-sm font-semibold text-slate-200">{user.name}</p>
-                            <p className="mt-1 text-xs text-slate-400">{user.baseRole}</p>
+                            <p className="text-sm font-semibold text-slate-800">{user.name}</p>
+                            <p className="mt-1 text-xs text-slate-600">{user.baseRole}</p>
                           </div>
                           <div className="flex flex-wrap gap-1">
                             {user.roles.map((role) => (
@@ -1612,28 +1734,28 @@ function App() {
                 description="Current status of key system components."
               >
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
                     <div className="flex items-center justify-between mb-3">
-                      <p className="text-sm font-semibold text-slate-200">Chief Examiner Role</p>
+                      <p className="text-sm font-semibold text-slate-800">Chief Examiner Role</p>
                       <StatusPill
                         label={chiefExaminerRoleEnabled ? 'Active' : 'Locked'}
                         active={chiefExaminerRoleEnabled}
-                        tone={chiefExaminerRoleEnabled ? 'emerald' : 'amber'}
+                        tone={chiefExaminerRoleEnabled ? 'blue' : 'amber'}
                       />
                     </div>
-                    <p className="text-xs text-slate-400">
+                    <p className="text-xs text-slate-600">
                       {chiefExaminerRoleEnabled
                         ? 'Role template is enabled and ready for assignments'
                         : 'Enable the role template to assign Chief Examiner privileges'}
                     </p>
                   </div>
 
-                  <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
                     <div className="flex items-center justify-between mb-3">
-                      <p className="text-sm font-semibold text-slate-200">Workflow Status</p>
-                      <span className="text-xs text-emerald-400">Active</span>
+                      <p className="text-sm font-semibold text-slate-800">Workflow Status</p>
+                      <span className="text-xs text-blue-600">Active</span>
                     </div>
-                    <p className="text-xs text-slate-400">
+                    <p className="text-xs text-slate-600">
                       Current stage: {workflow.stage.replace(/-/g, ' ')}
                     </p>
                   </div>
@@ -1655,14 +1777,37 @@ function App() {
           const recentTimeline = workflow.timeline.slice(0, 5);
           const recentVersions = versionHistory.slice(0, 4);
           const roles = currentUser?.roles ?? [];
+          const isChiefExaminer = roles.includes('Chief Examiner');
 
           return (
             <div className="space-y-6">
+              {/* Dashboard Label */}
+              <div className="flex items-center justify-between rounded-xl border-2 border-blue-600 bg-gradient-to-r from-blue-50 to-purple-50 p-4 shadow-md">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 text-white">
+                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h1 className="text-xl font-bold text-blue-900">
+                      {isChiefExaminer ? 'Chief Examiner Dashboard' : 'Workflow Dashboard'}
+                    </h1>
+                    <p className="text-sm text-slate-600">
+                      {isChiefExaminer ? 'Exam Moderation & Approval' : 'Workflow Management & Tracking'}
+                    </p>
+                  </div>
+                </div>
+                <div className="rounded-full bg-blue-600 px-3 py-1 text-xs font-semibold text-white">
+                  {isChiefExaminer ? 'CHIEF EXAMINER' : 'WORKFLOW'}
+                </div>
+              </div>
+
               <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <DashboardStat
                   label="Workflow Stage"
                   value={workflow.stage.replace(/-/g, ' ')}
-                  tone="emerald"
+                  tone="blue"
                 />
                 <DashboardStat label="Version Label" value={latestVersionLabel} />
                 <DashboardStat
@@ -1681,16 +1826,16 @@ function App() {
                 description="High-level summary of the moderation cycle and pending responsibilities."
               >
                 <div className="grid gap-4 md:grid-cols-2">
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-300">
-                    <p className="text-xs uppercase tracking-wide text-slate-500">
+                  <div className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-sm shadow-md">
+                    <p className="text-xs uppercase tracking-wide text-blue-600 font-semibold">
                       Outstanding Task
                     </p>
-                    <p className="mt-2 text-base font-semibold text-emerald-300">
+                    <p className="mt-2 text-base font-semibold text-blue-800">
                       {outstandingAction}
                     </p>
                   </div>
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-300">
-                    <p className="text-xs uppercase tracking-wide text-slate-500">
+                  <div className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-sm shadow-md">
+                    <p className="text-xs uppercase tracking-wide text-blue-600 font-semibold">
                       Acting Roles
                     </p>
                     <div className="mt-2 flex flex-wrap gap-2">
@@ -1708,7 +1853,7 @@ function App() {
                 description="Snapshot of the latest workflow events recorded in the timeline."
               >
                 {recentTimeline.length === 0 ? (
-                  <p className="text-sm text-slate-400">
+                  <p className="text-sm text-blue-700">
                     No activity logged yet. Actions taken across the moderation lifecycle will appear here.
                   </p>
                 ) : (
@@ -1716,11 +1861,11 @@ function App() {
                     {recentTimeline.map((event) => (
                       <li
                         key={`overview-timeline-${event.id}`}
-                        className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-200"
+                        className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-3 text-sm text-blue-900 shadow-md"
                       >
-                        <p className="font-semibold text-emerald-300">{event.actor}</p>
-                        <p className="text-slate-300">{event.message}</p>
-                        <div className="mt-1 flex flex-wrap items-center justify-between text-xs text-slate-500">
+                        <p className="font-semibold text-blue-800">{event.actor}</p>
+                        <p className="text-blue-900">{event.message}</p>
+                        <div className="mt-1 flex flex-wrap items-center justify-between text-xs text-blue-600">
                           <span>{event.stage}</span>
                           <span>{formatTimestamp(event.timestamp)}</span>
                         </div>
@@ -1736,7 +1881,7 @@ function App() {
                 description="Latest published versions and ownership details."
               >
                 {recentVersions.length === 0 ? (
-                  <p className="text-sm text-slate-400">
+                  <p className="text-sm text-blue-700">
                     No version history recorded yet. Once the workflow progresses, versions will be listed here.
                   </p>
                 ) : (
@@ -1744,16 +1889,16 @@ function App() {
                     {recentVersions.map((entry) => (
                       <li
                         key={`overview-version-${entry.id}`}
-                        className="rounded-xl border border-slate-800 bg-slate-950/60 p-3"
+                        className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-3 shadow-md"
                       >
-                        <div className="flex items-center justify-between text-xs text-slate-400">
-                          <span className="font-semibold text-emerald-300">
+                        <div className="flex items-center justify-between text-xs text-blue-700">
+                          <span className="font-semibold text-blue-800">
                             {entry.versionLabel}
                           </span>
                           <span>{formatTimestamp(entry.timestamp)}</span>
                         </div>
-                        <p className="mt-1 text-sm text-slate-100">{entry.notes}</p>
-                        <p className="mt-1 text-xs text-slate-500">Owner: {entry.actor}</p>
+                        <p className="mt-1 text-sm text-blue-900">{entry.notes}</p>
+                        <p className="mt-1 text-xs text-blue-600">Owner: {entry.actor}</p>
                       </li>
                     ))}
                   </ul>
@@ -1792,11 +1937,29 @@ function App() {
 
           return (
             <div className="space-y-6">
+              {/* Dashboard Label */}
+              <div className="flex items-center justify-between rounded-xl border-2 border-red-600 bg-gradient-to-r from-red-50 to-pink-50 p-4 shadow-md">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-red-600 text-white">
+                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h1 className="text-xl font-bold text-red-900">Lecturer Dashboard</h1>
+                    <p className="text-sm text-slate-600">Teaching & Academic Management</p>
+                  </div>
+                </div>
+                <div className="rounded-full bg-red-600 px-3 py-1 text-xs font-semibold text-white">
+                  LECTURER
+                </div>
+              </div>
+
               <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <DashboardStat
                   label="Classes This Week"
                   value={`${academicMetrics.classesThisWeek}`}
-                  tone="emerald"
+                  tone="blue"
                 />
                 <DashboardStat
                   label="Students Engaged"
@@ -1817,10 +1980,10 @@ function App() {
                 kicker="Week at a Glance"
                 description="Focus on these academic priorities to keep classes running smoothly."
               >
-                <ul className="space-y-2 text-sm text-slate-300">
+                <ul className="space-y-2 text-sm text-slate-700">
                   {teachingPriorities.map((item) => (
                     <li key={item} className="flex items-start gap-2">
-                      <span className="mt-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                      <span className="mt-1 h-1.5 w-1.5 rounded-full bg-blue-400" />
                       <span>{item}</span>
                     </li>
                   ))}
@@ -1832,7 +1995,7 @@ function App() {
                 kicker="Campus Communications"
                 description="Stay informed about departmental timelines and university-wide engagements."
               >
-                <ul className="space-y-2 text-sm text-slate-300">
+                <ul className="space-y-2 text-sm text-slate-700">
                   {facultyAnnouncements.map((item) => (
                     <li key={item} className="flex items-start gap-2">
                       <span className="mt-1 h-1.5 w-1.5 rounded-full bg-indigo-400" />
@@ -1847,7 +2010,23 @@ function App() {
       }
     : null;
 
-  const overviewPanel = adminDashboard || workflowDashboard || lecturerDashboard;
+  // Super Admin Dashboard
+  const superAdminDashboard: PanelConfig | null = 
+    isAuthenticated && currentUser?.isSuperAdmin
+      ? {
+          id: 'super-admin-dashboard',
+          label: 'Super Admin Dashboard',
+          visible: true,
+          render: () => (
+            <SuperAdminDashboard
+              currentUserId={currentUser.id}
+              isSuperAdmin={true}
+            />
+          ),
+        }
+      : null;
+
+  const overviewPanel = superAdminDashboard || adminDashboard || workflowDashboard || lecturerDashboard;
 
   const adminPanels: PanelConfig[] = isAuthenticated && isAdmin
     ? [
@@ -2143,9 +2322,45 @@ function App() {
     });
   }
 
+  // Chief Examiner Privilege Elevation Panel
+  const chiefExaminerPrivilegePanel: PanelConfig | null =
+    isAuthenticated && currentUserHasRole('Chief Examiner')
+      ? {
+          id: 'chief-examiner-privileges',
+          label: 'Appoint Roles',
+          visible: true,
+          render: () => (
+            <PrivilegeElevationPanel
+              currentUserId={currentUser!.id}
+              isSuperAdmin={false}
+              isChiefExaminer={true}
+            />
+          ),
+        }
+      : null;
+
+  // Lecturer Dashboard with role-specific views
+  const lecturerRoleDashboard: PanelConfig | null =
+    isAuthenticated && currentUser && (currentUser.baseRole === 'Lecturer' || currentUserHasRole('Lecturer'))
+      ? {
+          id: 'lecturer-role-dashboard',
+          label: 'My Dashboard',
+          visible: true,
+          render: () => (
+            <LecturerDashboard
+              currentUserId={currentUser.id}
+              userRoles={currentUser.roles}
+              baseRole={currentUser.baseRole}
+            />
+          ),
+        }
+      : null;
+
   const panelConfigs: PanelConfig[] = [
     ...(overviewPanel ? [overviewPanel] : []),
+    ...(lecturerRoleDashboard ? [lecturerRoleDashboard] : []),
     ...(isAdmin ? adminPanels : []),
+    ...(chiefExaminerPrivilegePanel ? [chiefExaminerPrivilegePanel] : []),
     // Show lecturer panels to anyone with Lecturer role (including Chief Examiners)
     ...(isAuthenticated && currentUserHasRole('Lecturer') ? lecturerPanels : []),
     ...roleSpecificPanels,
@@ -2170,65 +2385,12 @@ function App() {
 
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex">
-        {/* Lecturer Login - Far Left */}
-        <div className="flex-1 flex items-center justify-center px-8 py-12 border-r border-slate-800/50">
-          <div className="w-full max-w-md">
-            <div className="mb-8">
-              <div className="flex items-center gap-4 mb-6">
-                <div className="h-16 w-16 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center shadow-lg">
-                  <span className="text-2xl font-bold text-white">UCU</span>
-                </div>
-                <div>
-                  <h1 className="text-3xl font-bold text-slate-100">Alpha UCU</h1>
-                  <p className="text-sm text-slate-400">Uganda Christian University</p>
-                </div>
-              </div>
-              <h2 className="text-2xl font-bold text-slate-100 mb-2">Welcome Back</h2>
-              <p className="text-slate-400">
-                Sign in to access your teaching dashboard and manage your classes
-              </p>
-            </div>
-            <LoginPortal
-              admins={users.filter((user: User) => user.roles.includes('Admin'))}
-              lecturers={users.filter((user) => user.baseRole === 'Lecturer')}
-              onLogin={handleLogin}
-              authError={authError}
-              onClearError={() => setAuthError(null)}
-              showLecturerOnly={true}
-            />
-          </div>
-        </div>
-
-        {/* Admin Login - Far Right */}
-        <div className="flex-1 flex items-center justify-center px-8 py-12">
-          <div className="w-full max-w-md">
-            <div className="mb-8">
-              <div className="flex items-center gap-4 mb-6">
-                <div className="h-16 w-16 rounded-xl bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center shadow-lg">
-                  <span className="text-2xl font-bold text-white">⚙️</span>
-                </div>
-                <div>
-                  <h1 className="text-3xl font-bold text-slate-100">Control Center</h1>
-                  <p className="text-sm text-slate-400">Digital Paper Moderation System</p>
-                </div>
-              </div>
-              <h2 className="text-2xl font-bold text-slate-100 mb-2">Admin Access</h2>
-              <p className="text-slate-400">
-                Sign in to manage staff accounts and system configuration
-              </p>
-            </div>
-            <LoginPortal
-              admins={users.filter((user: User) => user.roles.includes('Admin'))}
-              lecturers={users.filter((user) => user.baseRole === 'Lecturer')}
-              onLogin={handleLogin}
-              authError={authError}
-              onClearError={() => setAuthError(null)}
-              showAdminOnly={true}
-            />
-          </div>
-        </div>
-      </div>
+      <HomePage
+        users={users}
+        onLogin={handleLogin}
+        authError={authError}
+        onClearError={() => setAuthError(null)}
+      />
     );
   }
 
@@ -2246,18 +2408,18 @@ function App() {
       : 'Navigate workflow checkpoints and manage elevated privileges from one command hub.';
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex">
-      <aside className="hidden w-72 flex-col border-r border-slate-900/80 bg-slate-900/60 lg:flex">
+    <div className="min-h-screen bg-white text-slate-900 flex">
+      <aside className="hidden w-72 flex-col border-r border-blue-300 bg-gradient-to-b from-blue-600 to-blue-700 lg:flex shadow-lg">
         <div className="px-6 py-8">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-400">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-100">
             {currentUserHasRole('Lecturer') && !isAdmin
               ? 'Lecturer Portal'
               : isAdmin ? 'Admin Portal' : 'Digital Moderation'}
           </p>
-          <h1 className="mt-3 text-2xl font-semibold text-slate-100">
+          <h1 className="mt-3 text-2xl font-semibold text-white">
             {headingTitle}
           </h1>
-          <p className="mt-2 text-xs text-slate-500">{headingSubtitle}</p>
+          <p className="mt-2 text-xs text-blue-100">{headingSubtitle}</p>
         </div>
         <nav className="flex-1 space-y-1 overflow-y-auto px-4 pb-6">
           {(() => {
@@ -2325,12 +2487,12 @@ function App() {
                       onClick={() => handlePanelSelect(panel.id)}
                       className={`flex w-full items-center justify-between rounded-xl border px-4 py-2 text-left text-sm font-medium transition ${
                         isActive
-                          ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-200'
-                          : 'border-transparent text-slate-300 hover:border-emerald-500/40 hover:bg-slate-900/80 hover:text-emerald-200'
+                          ? 'border-blue-300 bg-blue-500 text-white shadow-md'
+                          : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white'
                       }`}
                     >
                       <span>{panel.label}</span>
-                      <span className="text-xs text-slate-500">{isActive ? '•' : '↗'}</span>
+                      <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
                     </button>
                   );
                 })}
@@ -2372,7 +2534,7 @@ function App() {
                 {filteredChiefExaminerPanels.length > 0 && (
                   <>
                     <div className="mt-4 mb-2 px-2">
-                      <p className="text-xs font-semibold uppercase tracking-wider text-indigo-400">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-blue-600">
                         Chief Examiner
                       </p>
                     </div>
@@ -2390,9 +2552,9 @@ function App() {
 
                       if (panel.id === 'vetting-suite') {
                         panelStyles = {
-                          active: 'border-emerald-500/60 bg-gradient-to-r from-emerald-500/20 via-teal-500/20 to-emerald-500/20 text-emerald-200 shadow-emerald-500/30',
-                          inactive: 'border-emerald-500/40 bg-gradient-to-r from-emerald-500/10 via-teal-500/10 to-emerald-500/10 text-emerald-300 hover:border-emerald-500/60 hover:bg-gradient-to-r hover:from-emerald-500/20 hover:via-teal-500/20 hover:to-emerald-500/20 hover:shadow-emerald-500/40 hover:text-emerald-200',
-                          textColor: 'text-emerald-400',
+                          active: 'border-blue-500/60 bg-gradient-to-r from-blue-500/20 via-teal-500/20 to-emerald-500/20 text-blue-800 shadow-blue-500/30',
+                          inactive: 'border-blue-500/40 bg-gradient-to-r from-blue-500/10 via-teal-500/10 to-emerald-500/10 text-blue-700 hover:border-blue-500/60 hover:bg-gradient-to-r hover:from-blue-500/20 hover:via-teal-500/20 hover:to-emerald-500/20 hover:shadow-blue-500/40 hover:text-blue-800',
+                          textColor: 'text-blue-600',
                           iconColor: 'text-emerald-500/60',
                           labelParts: panel.label.split(' & ')
                         };
@@ -2427,9 +2589,9 @@ function App() {
                             )}
                             {panel.id === 'vetting-suite' && (
                               <span className="inline-flex items-center gap-1">
-                                <span className={`animate-heartbeat font-bold ${isActive ? 'text-emerald-300' : 'text-emerald-400'}`} style={{ animationDelay: '0s' }}>Vetting</span>
-                                <span className={`ml-1 opacity-90 ${isActive ? 'text-emerald-200' : 'text-emerald-300'}`}>&</span>
-                                <span className={`animate-heartbeat font-bold ${isActive ? 'text-emerald-300' : 'text-emerald-400'}`} style={{ animationDelay: '0.15s' }}>Annotations</span>
+                                <span className={`animate-heartbeat font-bold ${isActive ? 'text-blue-700' : 'text-blue-600'}`} style={{ animationDelay: '0s' }}>Vetting</span>
+                                <span className={`ml-1 opacity-90 ${isActive ? 'text-blue-800' : 'text-blue-700'}`}>&</span>
+                                <span className={`animate-heartbeat font-bold ${isActive ? 'text-blue-700' : 'text-blue-600'}`} style={{ animationDelay: '0.15s' }}>Annotations</span>
                               </span>
                             )}
                             {panel.id === 'destruction-log' && (
@@ -2454,7 +2616,7 @@ function App() {
                 {lecturerPanelsList.length > 0 && (
                   <>
                     <div className="mt-4 mb-2 px-2">
-                      <p className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-blue-100">
                         Teaching & Classes
                       </p>
                     </div>
@@ -2467,12 +2629,12 @@ function App() {
                           onClick={() => handlePanelSelect(panel.id)}
                           className={`flex w-full items-center justify-between rounded-xl border px-4 py-2 text-left text-sm font-medium transition ${
                             isActive
-                              ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-200'
-                              : 'border-transparent text-slate-300 hover:border-emerald-500/40 hover:bg-slate-900/80 hover:text-emerald-200'
+                              ? 'border-blue-300 bg-blue-500 text-white shadow-md'
+                              : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white'
                           }`}
                         >
                           <span>{panel.label}</span>
-                          <span className="text-xs text-slate-500">{isActive ? '•' : '↗'}</span>
+                          <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
                         </button>
                       );
                     })}
@@ -2483,7 +2645,7 @@ function App() {
                 {adminPanelsList.length > 0 && (
                   <>
                     <div className="mt-4 mb-2 px-2">
-                      <p className="text-xs font-semibold uppercase tracking-wider text-purple-400">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-blue-100">
                         Administration
                       </p>
                     </div>
@@ -2496,12 +2658,12 @@ function App() {
                           onClick={() => handlePanelSelect(panel.id)}
                           className={`flex w-full items-center justify-between rounded-xl border px-4 py-2 text-left text-sm font-medium transition ${
                             isActive
-                              ? 'border-purple-500/50 bg-purple-500/10 text-purple-200'
-                              : 'border-transparent text-slate-300 hover:border-purple-500/40 hover:bg-slate-900/80 hover:text-purple-200'
+                              ? 'border-blue-300 bg-blue-500 text-white shadow-md'
+                              : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white'
                           }`}
                         >
                           <span>{panel.label}</span>
-                          <span className="text-xs text-slate-500">{isActive ? '•' : '↗'}</span>
+                          <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
                         </button>
                       );
                     })}
@@ -2518,12 +2680,12 @@ function App() {
                       onClick={() => handlePanelSelect(panel.id)}
                       className={`flex w-full items-center justify-between rounded-xl border px-4 py-2 text-left text-sm font-medium transition ${
                         isActive
-                          ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-200'
-                          : 'border-transparent text-slate-300 hover:border-emerald-500/40 hover:bg-slate-900/80 hover:text-emerald-200'
+                          ? 'border-blue-300 bg-blue-500 text-white shadow-md'
+                          : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white'
                       }`}
                     >
                       <span>{panel.label}</span>
-                      <span className="text-xs text-slate-500">{isActive ? '•' : '↗'}</span>
+                      <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
                     </button>
                   );
                 })}
@@ -2531,11 +2693,11 @@ function App() {
             );
           })()}
         </nav>
-        <div className="border-t border-slate-800 px-6 py-6 text-sm text-slate-300">
-          <p className="text-xs uppercase tracking-wide text-slate-500">
+        <div className="border-t border-blue-400 px-6 py-6 text-sm text-white">
+          <p className="text-xs uppercase tracking-wide text-blue-100">
             Signed In
           </p>
-          <p className="mt-1 font-semibold text-emerald-300">{currentUser?.name ?? 'Unknown'}</p>
+          <p className="mt-1 font-semibold text-white">{currentUser?.name ?? 'Unknown'}</p>
           <div className="mt-2 flex flex-wrap gap-1">
             {currentUser?.roles.map((role) => (
               <RoleBadge key={`sidebar-${role}`} role={role} />
@@ -2544,7 +2706,7 @@ function App() {
           <button
             type="button"
             onClick={handleLogout}
-            className="mt-4 w-full rounded-lg bg-slate-800 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-200 transition hover:bg-slate-700"
+            className="mt-4 w-full rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-white transition hover:bg-blue-700"
           >
             Sign out
           </button>
@@ -2552,42 +2714,42 @@ function App() {
       </aside>
 
       <div className="flex-1 flex flex-col">
-        <header className="border-b border-slate-900/70 bg-slate-900/70 px-4 py-5 backdrop-blur sm:px-6 lg:px-10">
+        <header className="border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-emerald-400">
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-600">
                 {isPureLecturer ? 'Faculty Updates' : isAdmin ? 'Admin Dashboard' : 'Current Stage'}
               </p>
-              <h2 className="mt-2 text-2xl font-semibold text-slate-100 sm:text-3xl">
+              <h2 className="mt-2 text-2xl font-semibold text-blue-900 sm:text-3xl">
                 {isPureLecturer
                   ? 'Teaching & Student Engagement'
                   : isAdmin
                   ? 'System Administration'
                   : workflow.stage.replace(/-/g, ' ')}
               </h2>
-              <p className="mt-1 text-sm text-slate-400">
+              <p className="mt-1 text-sm text-slate-600">
                 {isAdmin ? 'Manage staff accounts and system configuration' : outstandingAction}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
               {isPureLecturer ? (
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-300 shadow-sm shadow-slate-900/20 sm:min-w-[220px]">
-                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                <div className="rounded-xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white px-4 py-3 text-sm shadow-md sm:min-w-[220px]">
+                  <p className="text-xs uppercase tracking-wide text-blue-600 font-semibold">
                     Upcoming Spotlight
                   </p>
-                  <p className="mt-1 text-lg font-semibold text-emerald-300">
+                  <p className="mt-1 text-lg font-semibold text-blue-800">
                     Departmental seminar this Friday
                   </p>
-                  <p className="mt-3 text-xs text-slate-500">
+                  <p className="mt-3 text-xs text-blue-600">
                     Prepare student project highlights and confirm attendance.
                   </p>
                 </div>
               ) : (
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-300 shadow-sm shadow-slate-900/20 sm:min-w-[220px]">
-                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                <div className="rounded-xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white px-4 py-3 text-sm shadow-md sm:min-w-[220px]">
+                  <p className="text-xs uppercase tracking-wide text-blue-600 font-semibold">
                     Version
                   </p>
-                  <p className="mt-1 text-lg font-semibold text-emerald-300">
+                  <p className="mt-1 text-lg font-semibold text-blue-800">
                     {latestVersionLabel}
                   </p>
                   <div className="mt-3 flex flex-wrap gap-1">
@@ -2600,7 +2762,7 @@ function App() {
               <button
                 type="button"
                 onClick={handleLogout}
-                className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-400/20 hover:text-emerald-100"
+                className="rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-2 text-sm font-semibold text-blue-800 transition hover:bg-blue-400/20 hover:text-emerald-100"
               >
                 Sign out
               </button>
@@ -2615,10 +2777,10 @@ function App() {
                   key={`mobile-${panel.id}`}
                   type="button"
                   onClick={() => handlePanelSelect(panel.id)}
-                  className={`rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-wide transition ${
+                  className={`rounded-xl border-2 px-3 py-2 text-xs font-semibold uppercase tracking-wide transition ${
                     isActive
-                      ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-100'
-                      : 'border-slate-800 bg-slate-900 text-slate-300 hover:border-emerald-500/40 hover:text-emerald-200'
+                      ? 'border-blue-500 bg-blue-600 text-white shadow-md'
+                      : 'border-blue-200 bg-white text-blue-700 hover:border-blue-400 hover:bg-blue-50 hover:text-blue-800'
                   }`}
                 >
                   {panel.label}
@@ -2661,20 +2823,20 @@ function SectionCard({
   return (
     <section
       id={id}
-      className="rounded-3xl border border-slate-800 bg-slate-900/60 p-6 shadow-lg shadow-slate-950/30"
+      className="rounded-3xl border border-slate-200 bg-white p-6 shadow-md"
     >
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
           {kicker ? (
-            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-400">
+            <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
               {kicker}
             </p>
           ) : null}
-          <h2 className="text-xl font-semibold text-slate-100 sm:text-2xl">
+          <h2 className="text-xl font-semibold text-slate-900 sm:text-2xl">
             {title}
           </h2>
           {description ? (
-            <p className="mt-2 text-sm text-slate-400">{description}</p>
+            <p className="mt-2 text-sm text-slate-600">{description}</p>
           ) : null}
         </div>
         {actions ? <div className="shrink-0">{actions}</div> : null}
@@ -2695,27 +2857,27 @@ const RoleBadge = ({ role }: { role: Role }) => (
 interface DashboardStatProps {
   label: string;
   value: string;
-  tone?: 'emerald' | 'indigo' | 'amber';
+  tone?: 'blue' | 'red' | 'amber';
 }
 
 const statToneClasses: Record<
   NonNullable<DashboardStatProps['tone']>,
   string
 > = {
-  emerald: 'border-emerald-500/30 bg-emerald-500/5 text-emerald-200',
-  indigo: 'border-indigo-500/30 bg-indigo-500/5 text-indigo-200',
-  amber: 'border-amber-500/30 bg-amber-500/5 text-amber-200',
+  blue: 'border-blue-300 bg-blue-50 text-blue-800',
+  red: 'border-red-300 bg-red-50 text-red-800',
+  amber: 'border-amber-300 bg-amber-50 text-amber-800',
 };
 
 function DashboardStat({ label, value, tone }: DashboardStatProps) {
   return (
     <div
-      className={`rounded-2xl border border-slate-800 bg-slate-900/70 p-4 shadow-sm shadow-slate-950/20 ${
+      className={`rounded-2xl border border-slate-200 bg-white p-4 shadow-sm ${
         tone ? statToneClasses[tone] : ''
       }`}
     >
       <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
-      <p className="mt-2 text-xl font-semibold text-slate-100">{value}</p>
+      <p className="mt-2 text-xl font-semibold text-slate-900">{value}</p>
     </div>
   );
 }
@@ -2723,24 +2885,24 @@ function DashboardStat({ label, value, tone }: DashboardStatProps) {
 interface StatusPillProps {
   label: string;
   active?: boolean;
-  tone?: 'emerald' | 'amber' | 'slate';
+  tone?: 'blue' | 'amber' | 'slate';
 }
 
 const toneClasses: Record<NonNullable<StatusPillProps['tone']>, string> = {
-  emerald: 'bg-emerald-400/10 text-emerald-300 border-emerald-500/40',
-  amber: 'bg-amber-300/10 text-amber-200 border-amber-400/40',
-  slate: 'bg-slate-800 text-slate-300 border-slate-700',
+  blue: 'bg-blue-100 text-blue-800 border-blue-300',
+  amber: 'bg-amber-100 text-amber-800 border-amber-300',
+  slate: 'bg-slate-100 text-slate-800 border-slate-300',
 };
 
 const StatusPill = ({
   label,
   active = true,
-  tone = 'emerald',
+  tone = 'blue',
 }: StatusPillProps) => (
   <span
-    className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${
-      active ? toneClasses[tone] : 'bg-slate-800 text-slate-500 border-slate-700'
-    }`}
+      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${
+        active ? toneClasses[tone] : 'bg-slate-100 text-slate-500 border-slate-300'
+      }`}
   >
     <span
       className={`h-2 w-2 rounded-full ${
@@ -2771,16 +2933,16 @@ function PrivilegeDisplay({ role, showDetails = false }: PrivilegeDisplayProps) 
   const categories = Array.from(new Set(privilegeSet.privileges.map(p => p.category)));
 
   return (
-    <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+    <div className="rounded-xl border border-slate-200 bg-white p-4">
       <div className="mb-4 flex items-center justify-between">
         <div>
-          <h4 className="text-sm font-semibold text-slate-200">{role} Privileges</h4>
-          <p className="mt-1 text-xs text-slate-400">
+          <h4 className="text-sm font-semibold text-slate-800">{role} Privileges</h4>
+          <p className="mt-1 text-xs text-slate-600">
             {privilegeSet.totalPrivileges} total privileges • {privilegeSet.panelCount} access panels
           </p>
         </div>
-        <div className="rounded-lg bg-emerald-500/20 px-3 py-1">
-          <span className="text-lg font-bold text-emerald-300">{privilegeSet.totalPrivileges}</span>
+        <div className="rounded-lg bg-blue-500/20 px-3 py-1">
+          <span className="text-lg font-bold text-blue-700">{privilegeSet.totalPrivileges}</span>
         </div>
       </div>
 
@@ -2789,16 +2951,16 @@ function PrivilegeDisplay({ role, showDetails = false }: PrivilegeDisplayProps) 
           {categories.map((category) => {
             const categoryPrivileges = privilegeSet.privileges.filter(p => p.category === category);
             return (
-              <div key={category} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-emerald-400 mb-2">
+              <div key={category} className="rounded-lg border border-slate-200 bg-white p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-blue-600 mb-2">
                   {category} ({categoryPrivileges.length})
                 </p>
                 <div className="space-y-1.5">
                   {categoryPrivileges.map((priv) => (
                     <div key={priv.id} className="flex items-start gap-2 text-xs">
-                      <span className="text-emerald-400 mt-0.5">•</span>
+                      <span className="text-blue-600 mt-0.5">•</span>
                       <div className="flex-1">
-                        <p className="text-slate-200 font-medium">{priv.name}</p>
+                        <p className="text-slate-800 font-medium">{priv.name}</p>
                         <p className="text-slate-500 mt-0.5">{priv.description}</p>
                       </div>
                     </div>
@@ -2852,9 +3014,9 @@ function AdminViewLecturersPanel({
         kicker="Staff Directory"
         description="Select a faculty and department to view lecturers from the existing system database."
       >
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-6">
           <div className="mb-4">
-            <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+            <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
               Select Faculty & Department
             </label>
             <select
@@ -2863,7 +3025,7 @@ function AdminViewLecturersPanel({
                 setSelectedDepartment(e.target.value);
                 setSelectedLecturer(null);
               }}
-              className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-100 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+              className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
             >
               <option value="">Choose a faculty and department...</option>
               {departments.map((dept) => (
@@ -2875,10 +3037,10 @@ function AdminViewLecturersPanel({
           </div>
 
           {selectedDepartment && (
-            <div className="mt-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
-              <p className="text-xs font-semibold text-emerald-300 mb-1">Selected Faculty & Department</p>
-              <p className="text-sm text-emerald-200">{selectedDepartment}</p>
-              <p className="text-xs text-emerald-400/80 mt-1">
+            <div className="mt-4 rounded-lg border border-blue-500/30 bg-blue-500/10 p-3">
+              <p className="text-xs font-semibold text-blue-700 mb-1">Selected Faculty & Department</p>
+              <p className="text-sm text-blue-800">{selectedDepartment}</p>
+              <p className="text-xs text-blue-600/80 mt-1">
                 {displayedLecturers.length} lecturer{displayedLecturers.length !== 1 ? 's' : ''} found
               </p>
             </div>
@@ -2904,14 +3066,14 @@ function AdminViewLecturersPanel({
                   onClick={() => setSelectedLecturer(lecturer)}
                   className={`rounded-xl border p-4 text-left transition ${
                     selectedLecturer?.id === lecturer.id
-                      ? 'border-emerald-500/50 bg-emerald-500/10'
-                      : 'border-slate-800 bg-slate-950/60 hover:border-emerald-500/40'
+                      ? 'border-blue-500/50 bg-blue-500/10'
+                      : 'border-slate-200 bg-white hover:border-blue-500/40'
                   }`}
                 >
                   <div className="flex items-start justify-between mb-2">
                     <div className="flex-1">
-                      <p className="text-sm font-semibold text-slate-200">{lecturer.name}</p>
-                      <p className="text-xs text-slate-400 mt-1">{selectedDepartment}</p>
+                      <p className="text-sm font-semibold text-slate-800">{lecturer.name}</p>
+                      <p className="text-xs text-slate-600 mt-1">{selectedDepartment}</p>
                     </div>
                     {hasVettingRole && (
                       <span className="text-xs font-semibold text-amber-400 bg-amber-500/20 px-2 py-1 rounded">
@@ -2924,7 +3086,7 @@ function AdminViewLecturersPanel({
                       <RoleBadge key={role} role={role} />
                     ))}
                   </div>
-                  <div className="mt-2 text-xs text-emerald-300">
+                  <div className="mt-2 text-xs text-blue-700">
                     {totalPrivs} total privileges
                   </div>
                 </button>
@@ -2940,27 +3102,27 @@ function AdminViewLecturersPanel({
           kicker="Profile Information"
           description="Detailed information about this lecturer's account and privileges."
         >
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6 space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <p className="text-xs text-slate-400 mb-1">Full Name</p>
-                <p className="text-sm font-semibold text-slate-200">{selectedLecturer.name}</p>
+                <p className="text-xs text-slate-600 mb-1">Full Name</p>
+                <p className="text-sm font-semibold text-slate-800">{selectedLecturer.name}</p>
               </div>
               <div>
-                <p className="text-xs text-slate-400 mb-1">Department</p>
-                <p className="text-sm font-semibold text-slate-200">{selectedDepartment}</p>
+                <p className="text-xs text-slate-600 mb-1">Department</p>
+                <p className="text-sm font-semibold text-slate-800">{selectedDepartment}</p>
               </div>
               <div>
-                <p className="text-xs text-slate-400 mb-1">Base Role</p>
-                <p className="text-sm font-semibold text-slate-200">{selectedLecturer.baseRole}</p>
+                <p className="text-xs text-slate-600 mb-1">Base Role</p>
+                <p className="text-sm font-semibold text-slate-800">{selectedLecturer.baseRole}</p>
               </div>
               <div>
-                <p className="text-xs text-slate-400 mb-1">Total Privileges</p>
-                <p className="text-sm font-semibold text-emerald-300">{getUserTotalPrivileges(selectedLecturer)}</p>
+                <p className="text-xs text-slate-600 mb-1">Total Privileges</p>
+                <p className="text-sm font-semibold text-blue-700">{getUserTotalPrivileges(selectedLecturer)}</p>
               </div>
             </div>
             <div>
-              <p className="text-xs text-slate-400 mb-2">Assigned Roles</p>
+              <p className="text-xs text-slate-600 mb-2">Assigned Roles</p>
               <div className="flex flex-wrap gap-2">
                 {selectedLecturer.roles.map((role) => (
                   <RoleBadge key={role} role={role} />
@@ -3003,20 +3165,20 @@ function AdminAddLecturerPanel({
       kicker="Admin Action"
       description={`Create a lecturer profile. Default password is ${DEFAULT_PASSWORD}; advise the lecturer to update it after first login.`}
     >
-      <form onSubmit={handleSubmit} className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-        <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+      <form onSubmit={handleSubmit} className="rounded-2xl border border-slate-200 bg-white p-4">
+        <label className="text-xs font-semibold uppercase tracking-wide text-slate-600">
           Lecturer full name
         </label>
         <input
           value={lecturerName}
           onChange={(event) => setLecturerName(event.target.value)}
           placeholder="e.g. Dr. Jane Mwangi"
-          className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+          className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
         />
         <button
           type="submit"
           disabled={!lecturerName.trim()}
-          className="mt-4 w-full rounded-xl bg-emerald-500/90 px-4 py-2 text-sm font-semibold text-emerald-950 shadow transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-emerald-500/30 disabled:text-emerald-900"
+          className="mt-4 w-full rounded-xl bg-blue-500/90 px-4 py-2 text-sm font-semibold text-emerald-950 shadow transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-blue-500/30 disabled:text-emerald-900"
         >
           Create Lecturer
         </button>
@@ -3030,19 +3192,19 @@ function AdminAddLecturerPanel({
       >
         <div className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="rounded-lg bg-emerald-500/20 px-4 py-2">
-              <p className="text-xs text-slate-400">Total Privileges</p>
-              <p className="text-2xl font-bold text-emerald-300">{lecturerPrivileges.totalPrivileges}</p>
+            <div className="rounded-lg bg-blue-500/20 px-4 py-2">
+              <p className="text-xs text-slate-600">Total Privileges</p>
+              <p className="text-2xl font-bold text-blue-700">{lecturerPrivileges.totalPrivileges}</p>
             </div>
-            <div className="rounded-lg bg-indigo-500/20 px-4 py-2">
-              <p className="text-xs text-slate-400">Access Panels</p>
-              <p className="text-2xl font-bold text-indigo-300">{lecturerPrivileges.panelCount}</p>
+            <div className="rounded-lg bg-blue-500/20 px-4 py-2">
+              <p className="text-xs text-slate-600">Access Panels</p>
+              <p className="text-2xl font-bold text-blue-700">{lecturerPrivileges.panelCount}</p>
             </div>
           </div>
           <button
             type="button"
             onClick={() => setShowPrivileges(!showPrivileges)}
-            className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-slate-800"
+            className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-800"
           >
             {showPrivileges ? 'Hide Details' : 'Show Details'}
           </button>
@@ -3074,20 +3236,20 @@ function AdminAddAdminPanel({
       kicker="Admin Action"
       description={`Provision another administrator account. Default password is ${DEFAULT_PASSWORD}.`}
     >
-      <form onSubmit={handleSubmit} className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-        <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+      <form onSubmit={handleSubmit} className="rounded-2xl border border-slate-200 bg-white p-4">
+        <label className="text-xs font-semibold uppercase tracking-wide text-slate-600">
           Admin full name
         </label>
         <input
           value={adminName}
           onChange={(event) => setAdminName(event.target.value)}
           placeholder="e.g. Prof. Samuel Otieno"
-          className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+          className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
         />
         <button
           type="submit"
           disabled={!adminName.trim()}
-          className="mt-4 w-full rounded-xl bg-purple-500/90 px-4 py-2 text-sm font-semibold text-purple-950 shadow transition hover:bg-purple-400 disabled:cursor-not-allowed disabled:bg-purple-500/30 disabled:text-purple-900"
+          className="mt-4 w-full rounded-xl bg-blue-500/90 px-4 py-2 text-sm font-semibold text-purple-950 shadow transition hover:bg-purple-400 disabled:cursor-not-allowed disabled:bg-blue-500/30 disabled:text-purple-900"
         >
           Create Admin Account
         </button>
@@ -3158,19 +3320,19 @@ function SuperUserChiefExaminerPanel({
       {/* Status Banner */}
       <div className={`rounded-xl border p-4 ${
         chiefExaminerRoleEnabled
-          ? 'border-emerald-500/50 bg-emerald-500/10'
+          ? 'border-blue-500/50 bg-blue-500/10'
           : 'border-amber-500/50 bg-amber-500/10'
       }`}>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className={`h-3 w-3 rounded-full ${
-              chiefExaminerRoleEnabled ? 'bg-emerald-500' : 'bg-amber-500'
+              chiefExaminerRoleEnabled ? 'bg-blue-500' : 'bg-amber-500'
             }`} />
             <div>
-              <p className="text-sm font-semibold text-slate-200">
+              <p className="text-sm font-semibold text-slate-800">
                 {chiefExaminerRoleEnabled ? 'Chief Examiner Role Active' : 'Chief Examiner Role Locked'}
               </p>
-              <p className="text-xs text-slate-400 mt-0.5">
+              <p className="text-xs text-slate-600 mt-0.5">
                 {chiefExaminerRoleEnabled
                   ? 'Role template is enabled. You can now assign Chief Examiner privileges to lecturers.'
                   : 'Enable the role template to begin assigning Chief Examiner privileges.'}
@@ -3180,20 +3342,20 @@ function SuperUserChiefExaminerPanel({
           <StatusPill
             label={chiefExaminerRoleEnabled ? 'Active' : 'Locked'}
             active={chiefExaminerRoleEnabled}
-            tone={chiefExaminerRoleEnabled ? 'emerald' : 'amber'}
+            tone={chiefExaminerRoleEnabled ? 'blue' : 'amber'}
           />
         </div>
       </div>
 
       {/* Tab Navigation */}
-      <div className="flex gap-2 border-b border-slate-800">
+      <div className="flex gap-2 border-b border-slate-200">
         <button
           type="button"
           onClick={() => setActiveTab('activate')}
           className={`px-4 py-2 text-sm font-medium transition ${
             activeTab === 'activate'
-              ? 'border-b-2 border-emerald-500 text-emerald-300'
-              : 'text-slate-400 hover:text-slate-300'
+              ? 'border-b-2 border-blue-500 text-blue-700'
+              : 'text-slate-600 hover:text-slate-700'
           }`}
         >
           Activate Role
@@ -3203,8 +3365,8 @@ function SuperUserChiefExaminerPanel({
           onClick={() => setActiveTab('promote')}
           className={`px-4 py-2 text-sm font-medium transition ${
             activeTab === 'promote'
-              ? 'border-b-2 border-indigo-500 text-indigo-300'
-              : 'text-slate-400 hover:text-slate-300'
+              ? 'border-b-2 border-blue-500 text-blue-700'
+              : 'text-slate-600 hover:text-slate-700'
           }`}
         >
           Assign Role
@@ -3215,7 +3377,7 @@ function SuperUserChiefExaminerPanel({
           className={`px-4 py-2 text-sm font-medium transition ${
             activeTab === 'remove'
               ? 'border-b-2 border-rose-500 text-rose-300'
-              : 'text-slate-400 hover:text-slate-300'
+              : 'text-slate-600 hover:text-slate-700'
           }`}
         >
           Remove Role
@@ -3231,26 +3393,26 @@ function SuperUserChiefExaminerPanel({
             kicker="Step 1: Enable Role"
             description="Unlock the Chief Examiner role template to enable assignment of elevated moderation privileges."
           >
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+            <div className="rounded-xl border border-slate-200 bg-white p-6">
               <div className="mb-6">
-                <h3 className="text-base font-semibold text-slate-200 mb-2">
+                <h3 className="text-base font-semibold text-slate-800 mb-2">
                   What This Enables
                 </h3>
-                <ul className="space-y-2 text-sm text-slate-400">
+                <ul className="space-y-2 text-sm text-slate-600">
                   <li className="flex items-start gap-2">
-                    <span className="text-emerald-400 mt-0.5">•</span>
+                    <span className="text-blue-600 mt-0.5">•</span>
                     <span>Orchestration privileges for workflow management</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <span className="text-emerald-400 mt-0.5">•</span>
+                    <span className="text-blue-600 mt-0.5">•</span>
                     <span>Ability to award roles (Team Lead, Vetter, Setter)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <span className="text-emerald-400 mt-0.5">•</span>
+                    <span className="text-blue-600 mt-0.5">•</span>
                     <span>Repository and deadline management controls</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <span className="text-emerald-400 mt-0.5">•</span>
+                    <span className="text-blue-600 mt-0.5">•</span>
                     <span>Final approval authority for exam submissions</span>
                   </li>
                 </ul>
@@ -3261,8 +3423,8 @@ function SuperUserChiefExaminerPanel({
                 disabled={chiefExaminerRoleEnabled}
                 className={`w-full rounded-xl px-6 py-3 text-sm font-semibold transition ${
                   chiefExaminerRoleEnabled
-                    ? 'bg-emerald-500/30 text-emerald-300 cursor-not-allowed'
-                    : 'bg-emerald-500/90 text-emerald-950 hover:bg-emerald-400'
+                    ? 'bg-blue-500/30 text-blue-700 cursor-not-allowed'
+                    : 'bg-blue-500/90 text-emerald-950 hover:bg-blue-400'
                 }`}
               >
                 {chiefExaminerRoleEnabled
@@ -3283,7 +3445,7 @@ function SuperUserChiefExaminerPanel({
             >
               <form onSubmit={handlePromotion} className="space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                     Select Lecturer to Promote
                   </label>
                   <select
@@ -3292,7 +3454,7 @@ function SuperUserChiefExaminerPanel({
                       setPromotionTarget(event.target.value);
                       setShowPrivilegeGain(true);
                     }}
-                    className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-100 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50 disabled:cursor-not-allowed"
                     disabled={!chiefExaminerRoleEnabled || eligibleLecturers.length === 0}
                   >
                     <option value="">
@@ -3314,47 +3476,47 @@ function SuperUserChiefExaminerPanel({
                 </div>
 
                 {promotionTarget && selectedLecturer && (
-                  <div className="rounded-xl border border-indigo-500/50 bg-indigo-500/10 p-5">
+                  <div className="rounded-xl border border-blue-500/50 bg-blue-500/10 p-5">
                     <div className="mb-4 flex items-center justify-between">
                       <div>
                         <h4 className="text-sm font-semibold text-indigo-200">
                           Privilege Preview: {selectedLecturer.name}
                         </h4>
-                        <p className="mt-1 text-xs text-indigo-400">
+                        <p className="mt-1 text-xs text-blue-600">
                           Review the privileges that will be granted
                         </p>
                       </div>
                       <button
                         type="button"
                         onClick={() => setShowPrivilegeGain(!showPrivilegeGain)}
-                        className="rounded-lg border border-indigo-500/40 bg-indigo-500/20 px-3 py-1 text-xs font-semibold text-indigo-300 transition hover:bg-indigo-500/30"
+                        className="rounded-lg border border-blue-500/40 bg-blue-500/20 px-3 py-1 text-xs font-semibold text-blue-700 transition hover:bg-blue-500/30"
                       >
                         {showPrivilegeGain ? 'Hide' : 'Show'} Details
                       </button>
                     </div>
 
                     <div className="grid grid-cols-3 gap-3 mb-4">
-                      <div className="rounded-lg bg-slate-900/70 border border-slate-800 p-4 text-center">
-                        <p className="text-xs text-slate-400 mb-1">Current</p>
-                        <p className="text-3xl font-bold text-slate-300">{lecturerPrivileges.totalPrivileges}</p>
+                      <div className="rounded-lg bg-white border border-slate-200 p-4 text-center">
+                        <p className="text-xs text-slate-600 mb-1">Current</p>
+                        <p className="text-3xl font-bold text-slate-700">{lecturerPrivileges.totalPrivileges}</p>
                         <p className="text-xs text-slate-500 mt-1">Lecturer</p>
                       </div>
-                      <div className="rounded-lg bg-indigo-500/20 border border-indigo-500/40 p-4 text-center">
-                        <p className="text-xs text-indigo-400 mb-1">Additional</p>
-                        <p className="text-3xl font-bold text-indigo-300">+{privilegeGain}</p>
-                        <p className="text-xs text-indigo-400 mt-1">Chief Examiner</p>
+                      <div className="rounded-lg bg-blue-500/20 border border-blue-500/40 p-4 text-center">
+                        <p className="text-xs text-blue-600 mb-1">Additional</p>
+                        <p className="text-3xl font-bold text-blue-700">+{privilegeGain}</p>
+                        <p className="text-xs text-blue-600 mt-1">Chief Examiner</p>
                       </div>
-                      <div className="rounded-lg bg-emerald-500/20 border border-emerald-500/40 p-4 text-center">
-                        <p className="text-xs text-emerald-400 mb-1">Total</p>
-                        <p className="text-3xl font-bold text-emerald-300">{chiefExaminerPrivileges.totalPrivileges}</p>
-                        <p className="text-xs text-emerald-400 mt-1">Combined</p>
+                      <div className="rounded-lg bg-blue-500/20 border border-blue-500/40 p-4 text-center">
+                        <p className="text-xs text-blue-600 mb-1">Total</p>
+                        <p className="text-3xl font-bold text-blue-700">{chiefExaminerPrivileges.totalPrivileges}</p>
+                        <p className="text-xs text-blue-600 mt-1">Combined</p>
                       </div>
                     </div>
 
                     {showPrivilegeGain && (
                       <div className="mt-4 space-y-3">
-                        <div className="rounded-lg border border-indigo-500/30 bg-slate-900/50 p-4">
-                          <p className="text-xs font-semibold text-indigo-300 mb-3">
+                        <div className="rounded-lg border border-blue-500/30 bg-slate-900/50 p-4">
+                          <p className="text-xs font-semibold text-blue-700 mb-3">
                             New Privileges ({privilegeGain} additional)
                           </p>
                           <div className="space-y-2 max-h-48 overflow-y-auto">
@@ -3362,9 +3524,9 @@ function SuperUserChiefExaminerPanel({
                               .filter(priv => !lecturerPrivileges.privileges.some(lp => lp.id === priv.id || lp.name === priv.name))
                               .map((priv) => (
                                 <div key={priv.id} className="flex items-start gap-2 text-xs">
-                                  <span className="text-indigo-400 mt-0.5">+</span>
+                                  <span className="text-blue-600 mt-0.5">+</span>
                                   <div className="flex-1">
-                                    <p className="text-slate-200 font-medium">{priv.name}</p>
+                                    <p className="text-slate-800 font-medium">{priv.name}</p>
                                     <p className="text-slate-500 mt-0.5">{priv.description}</p>
                                   </div>
                                 </div>
@@ -3379,7 +3541,7 @@ function SuperUserChiefExaminerPanel({
                 <button
                   type="submit"
                   disabled={!chiefExaminerRoleEnabled || !promotionTarget}
-                  className="w-full rounded-xl bg-indigo-500/90 px-6 py-3 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-indigo-500/30 disabled:text-indigo-900"
+                  className="w-full rounded-xl bg-blue-500/90 px-6 py-3 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-blue-500/30 disabled:text-indigo-900"
                 >
                   Promote to Chief Examiner
                 </button>
@@ -3396,21 +3558,21 @@ function SuperUserChiefExaminerPanel({
             description="Select a current Chief Examiner to revoke their elevated privileges. They will retain their base Lecturer role."
           >
             {currentChiefExaminers.length === 0 ? (
-              <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6 text-center">
-                <p className="text-sm text-slate-400">
+              <div className="rounded-xl border border-slate-200 bg-white p-6 text-center">
+                <p className="text-sm text-slate-600">
                   No Chief Examiners currently assigned
                 </p>
               </div>
             ) : (
               <form onSubmit={handleRemoval} className="space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                     Select Chief Examiner to Remove
                   </label>
                   <select
                     value={removalTarget}
                     onChange={(event) => setRemovalTarget(event.target.value)}
-                    className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-100 focus:border-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-500/40"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-500/40"
                   >
                     <option value="">Choose a Chief Examiner...</option>
                     {currentChiefExaminers.map((user) => (
@@ -3482,11 +3644,11 @@ function SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
                     setSelectedUser(user);
                     setShowPrivileges(true);
                   }}
-                  className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-left text-sm transition hover:border-emerald-500/50 hover:bg-emerald-500/20"
+                  className="rounded-2xl border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-left text-sm transition hover:border-blue-500/50 hover:bg-blue-500/20"
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-semibold text-emerald-100">{user.name}</span>
-                <span className="text-xs uppercase tracking-wide text-emerald-200">
+                <span className="text-xs uppercase tracking-wide text-blue-800">
                   Base: Admin
                 </span>
               </div>
@@ -3495,7 +3657,7 @@ function SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
                   <RoleBadge key={`${user.id}-${role}`} role={role} />
                 ))}
               </div>
-                  <div className="mt-2 text-xs text-emerald-300">
+                  <div className="mt-2 text-xs text-blue-700">
                     {totalPrivs} total privileges
             </div>
                 </button>
@@ -3520,10 +3682,10 @@ function SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
                       setSelectedUser(user);
                       setShowPrivileges(true);
                     }}
-                    className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-left text-sm transition hover:border-emerald-500/40 hover:bg-slate-900"
+                    className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm transition hover:border-blue-500/40 hover:bg-slate-900"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-semibold text-slate-100">{user.name}</span>
+                  <span className="font-semibold text-slate-900">{user.name}</span>
                   <span className="text-xs uppercase tracking-wide text-slate-500">
                     Base: Lecturer
                   </span>
@@ -3533,7 +3695,7 @@ function SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
                     <RoleBadge key={`${user.id}-${role}`} role={role} />
                   ))}
                 </div>
-                    <div className="mt-2 text-xs text-emerald-300">
+                    <div className="mt-2 text-xs text-blue-700">
                       {totalPrivs} total privileges
                     </div>
                   </button>
@@ -3551,19 +3713,19 @@ function SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
         >
           <div className="mb-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="rounded-lg bg-emerald-500/20 px-4 py-2">
-                <p className="text-xs text-slate-400">Total Privileges</p>
-                <p className="text-2xl font-bold text-emerald-300">{getUserTotalPrivileges(selectedUser)}</p>
+              <div className="rounded-lg bg-blue-500/20 px-4 py-2">
+                <p className="text-xs text-slate-600">Total Privileges</p>
+                <p className="text-2xl font-bold text-blue-700">{getUserTotalPrivileges(selectedUser)}</p>
               </div>
-              <div className="rounded-lg bg-indigo-500/20 px-4 py-2">
-                <p className="text-xs text-slate-400">Roles</p>
-                <p className="text-2xl font-bold text-indigo-300">{selectedUser.roles.length}</p>
+              <div className="rounded-lg bg-blue-500/20 px-4 py-2">
+                <p className="text-xs text-slate-600">Roles</p>
+                <p className="text-2xl font-bold text-blue-700">{selectedUser.roles.length}</p>
               </div>
             </div>
             <button
               type="button"
               onClick={() => setShowPrivileges(false)}
-              className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-slate-800"
+              className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-800"
             >
               Close
             </button>
@@ -3573,15 +3735,15 @@ function SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
               const rolePriv = rolePrivileges[role];
               if (!rolePriv) return null;
               return (
-                <div key={role} className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+                <div key={role} className="rounded-xl border border-slate-200 bg-white p-4">
                   <div className="mb-2 flex items-center justify-between">
-                    <h4 className="text-sm font-semibold text-slate-200">{role}</h4>
-                    <span className="text-xs text-slate-400">{rolePriv.totalPrivileges} privileges</span>
+                    <h4 className="text-sm font-semibold text-slate-800">{role}</h4>
+                    <span className="text-xs text-slate-600">{rolePriv.totalPrivileges} privileges</span>
                   </div>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {rolePriv.privileges.slice(0, 6).map((priv) => (
                       <div key={priv.id} className="text-xs">
-                        <span className="text-emerald-400">•</span> {priv.name}
+                        <span className="text-blue-600">•</span> {priv.name}
               </div>
             ))}
                     {rolePriv.privileges.length > 6 && (
@@ -3623,59 +3785,59 @@ function SuperUserSystemStatsPanel({ users, workflow }: SuperUserSystemStatsPane
       description="Comprehensive overview of system users, roles, and privileges."
     >
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
           <p className="text-xs uppercase tracking-wide text-slate-500">Total Users</p>
-          <p className="mt-2 text-3xl font-bold text-emerald-300">{activeUsers}</p>
-          <div className="mt-3 space-y-1 text-xs text-slate-400">
+          <p className="mt-2 text-3xl font-bold text-blue-700">{activeUsers}</p>
+          <div className="mt-3 space-y-1 text-xs text-slate-600">
             <p>Admins: {admins}</p>
             <p>Lecturers: {lecturers}</p>
           </div>
         </div>
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
           <p className="text-xs uppercase tracking-wide text-slate-500">Role Assignments</p>
-          <p className="mt-2 text-3xl font-bold text-indigo-300">{chiefExaminers + teamLeads + vetters + setters}</p>
-          <div className="mt-3 space-y-1 text-xs text-slate-400">
+          <p className="mt-2 text-3xl font-bold text-blue-700">{chiefExaminers + teamLeads + vetters + setters}</p>
+          <div className="mt-3 space-y-1 text-xs text-slate-600">
             <p>Chief Examiners: {chiefExaminers}</p>
             <p>Team Leads: {teamLeads}</p>
             <p>Vetters: {vetters}</p>
             <p>Setters: {setters}</p>
           </div>
         </div>
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
           <p className="text-xs uppercase tracking-wide text-slate-500">System Privileges</p>
-          <p className="mt-2 text-3xl font-bold text-purple-300">{totalPrivileges}</p>
-          <p className="mt-3 text-xs text-slate-400">
+          <p className="mt-2 text-3xl font-bold text-blue-700">{totalPrivileges}</p>
+          <p className="mt-3 text-xs text-slate-600">
             Across {Object.keys(rolePrivileges).length} roles
           </p>
         </div>
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
           <p className="text-xs uppercase tracking-wide text-slate-500">Workflow Stage</p>
           <p className="mt-2 text-lg font-bold text-amber-300">{workflow.stage.replace(/-/g, ' ')}</p>
-          <p className="mt-3 text-xs text-slate-400">
+          <p className="mt-3 text-xs text-slate-600">
             Timeline: {workflow.timeline.length} entries
           </p>
         </div>
       </div>
 
-      <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/70 p-5">
-        <h3 className="text-sm font-semibold text-slate-200 mb-4">Privilege Distribution by Role</h3>
+      <div className="mt-6 rounded-xl border border-slate-200 bg-white p-5">
+        <h3 className="text-sm font-semibold text-slate-800 mb-4">Privilege Distribution by Role</h3>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {Object.values(rolePrivileges).map((rolePriv) => {
             const roleCount = users.filter(u => u.roles.includes(rolePriv.role)).length;
             return (
-              <div key={rolePriv.role} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+              <div key={rolePriv.role} className="rounded-lg border border-slate-200 bg-white p-3">
                 <div className="flex items-center justify-between mb-2">
-                  <p className="text-sm font-semibold text-slate-200">{rolePriv.role}</p>
-                  <span className="text-xs text-slate-400">{roleCount} users</span>
+                  <p className="text-sm font-semibold text-slate-800">{rolePriv.role}</p>
+                  <span className="text-xs text-slate-600">{roleCount} users</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-emerald-500"
+                      className="h-full bg-blue-500"
                       style={{ width: `${(rolePriv.totalPrivileges / totalPrivileges) * 100}%` }}
                     />
                   </div>
-                  <span className="text-xs font-semibold text-emerald-300">{rolePriv.totalPrivileges}</span>
+                  <span className="text-xs font-semibold text-blue-700">{rolePriv.totalPrivileges}</span>
                 </div>
                 <p className="mt-2 text-xs text-slate-500">{rolePriv.panelCount} access panels</p>
               </div>
@@ -3730,8 +3892,8 @@ function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPane
       description="View, edit, and manage user accounts in the system."
     >
       <div className="space-y-4">
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
             Select User
           </label>
           <select
@@ -3740,7 +3902,7 @@ function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPane
               setSelectedUserId(e.target.value);
               setAction('view');
             }}
-            className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-emerald-500 focus:outline-none"
+            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none"
           >
             <option value="">Choose a user...</option>
             {users.map((user) => (
@@ -3753,30 +3915,30 @@ function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPane
 
         {selectedUser && (
           <div className="space-y-4">
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+            <div className="rounded-xl border border-slate-200 bg-white p-5">
               <div className="flex items-start justify-between mb-4">
                 <div>
-                  <h3 className="text-lg font-semibold text-slate-200">{selectedUser.name}</h3>
-                  <p className="mt-1 text-sm text-slate-400">ID: {selectedUser.id}</p>
+                  <h3 className="text-lg font-semibold text-slate-800">{selectedUser.name}</h3>
+                  <p className="mt-1 text-sm text-slate-600">ID: {selectedUser.id}</p>
                 </div>
                 <div className="text-right">
                   <p className="text-xs text-slate-500">Base Role</p>
-                  <p className="text-sm font-semibold text-emerald-300">{selectedUser.baseRole}</p>
+                  <p className="text-sm font-semibold text-blue-700">{selectedUser.baseRole}</p>
                 </div>
               </div>
 
               <div className="grid gap-4 sm:grid-cols-3 mb-4">
-                <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-                  <p className="text-xs text-slate-400">Total Privileges</p>
-                  <p className="mt-1 text-2xl font-bold text-emerald-300">{getUserTotalPrivileges(selectedUser)}</p>
+                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                  <p className="text-xs text-slate-600">Total Privileges</p>
+                  <p className="mt-1 text-2xl font-bold text-blue-700">{getUserTotalPrivileges(selectedUser)}</p>
                 </div>
-                <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-                  <p className="text-xs text-slate-400">Assigned Roles</p>
-                  <p className="mt-1 text-2xl font-bold text-indigo-300">{selectedUser.roles.length}</p>
+                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                  <p className="text-xs text-slate-600">Assigned Roles</p>
+                  <p className="mt-1 text-2xl font-bold text-blue-700">{selectedUser.roles.length}</p>
                 </div>
-                <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-                  <p className="text-xs text-slate-400">Account Status</p>
-                  <p className="mt-1 text-sm font-semibold text-emerald-300">Active</p>
+                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                  <p className="text-xs text-slate-600">Account Status</p>
+                  <p className="mt-1 text-sm font-semibold text-blue-700">Active</p>
                 </div>
               </div>
 
@@ -3795,8 +3957,8 @@ function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPane
                   onClick={() => setAction('view')}
                   className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition ${
                     action === 'view'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                      : 'bg-slate-800/50 text-slate-300 border border-slate-700 hover:bg-slate-800'
+                      ? 'bg-blue-500/20 text-blue-700 border border-blue-500/40'
+                      : 'bg-slate-800/50 text-slate-700 border border-slate-700 hover:bg-slate-800'
                   }`}
                 >
                   View Details
@@ -3806,8 +3968,8 @@ function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPane
                   onClick={() => setAction('edit')}
                   className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition ${
                     action === 'edit'
-                      ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
-                      : 'bg-slate-800/50 text-slate-300 border border-slate-700 hover:bg-slate-800'
+                      ? 'bg-blue-500/20 text-blue-700 border border-blue-500/40'
+                      : 'bg-slate-800/50 text-slate-700 border border-slate-700 hover:bg-slate-800'
                   }`}
                 >
                   Edit User
@@ -3822,16 +3984,16 @@ function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPane
               </div>
 
               {action === 'view' && (
-                <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/60 p-4">
-                  <p className="text-xs font-semibold text-slate-300 mb-2">Privilege Summary</p>
+                <div className="mt-4 rounded-lg border border-slate-200 bg-white p-4">
+                  <p className="text-xs font-semibold text-slate-700 mb-2">Privilege Summary</p>
                   <div className="space-y-2">
                     {selectedUser.roles.map((role) => {
                       const rolePriv = rolePrivileges[role];
                       if (!rolePriv) return null;
                       return (
                         <div key={role} className="text-xs">
-                          <span className="font-semibold text-emerald-400">{role}:</span>{' '}
-                          <span className="text-slate-400">{rolePriv.totalPrivileges} privileges</span>
+                          <span className="font-semibold text-blue-600">{role}:</span>{' '}
+                          <span className="text-slate-600">{rolePriv.totalPrivileges} privileges</span>
                         </div>
                       );
                     })}
@@ -3870,22 +4032,22 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
       description="Configure system-wide settings and preferences."
     >
       <form onSubmit={handleSave} className="space-y-6">
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
-          <h3 className="text-sm font-semibold text-slate-200 mb-4">General Settings</h3>
+        <div className="rounded-xl border border-slate-200 bg-white p-6">
+          <h3 className="text-sm font-semibold text-slate-800 mb-4">General Settings</h3>
           <div className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                 System Name
               </label>
               <input
                 type="text"
                 value={settings.systemName}
                 onChange={(e) => setSettings({ ...settings, systemName: e.target.value })}
-                className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-100 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                 Session Timeout (minutes)
               </label>
               <input
@@ -3894,17 +4056,17 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
                 max="120"
                 value={settings.sessionTimeout}
                 onChange={(e) => setSettings({ ...settings, sessionTimeout: parseInt(e.target.value) || 30 })}
-                className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-100 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                 Password Policy
               </label>
               <select
                 value={settings.passwordPolicy}
                 onChange={(e) => setSettings({ ...settings, passwordPolicy: e.target.value })}
-                className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-100 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
               >
                 <option value="low">Low (6+ characters)</option>
                 <option value="medium">Medium (8+ characters, mixed case)</option>
@@ -3914,11 +4076,11 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
           </div>
         </div>
 
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
-          <h3 className="text-sm font-semibold text-slate-200 mb-4">Notification Settings</h3>
+        <div className="rounded-xl border border-slate-200 bg-white p-6">
+          <h3 className="text-sm font-semibold text-slate-800 mb-4">Notification Settings</h3>
           <div className="space-y-3">
             <label className="flex items-center justify-between cursor-pointer">
-              <span className="text-sm text-slate-300">Email Notifications</span>
+              <span className="text-sm text-slate-700">Email Notifications</span>
               <input
                 type="checkbox"
                 checked={settings.emailNotifications}
@@ -3927,7 +4089,7 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
               />
             </label>
             <label className="flex items-center justify-between cursor-pointer">
-              <span className="text-sm text-slate-300">SMS Notifications</span>
+              <span className="text-sm text-slate-700">SMS Notifications</span>
               <input
                 type="checkbox"
                 checked={settings.smsNotifications}
@@ -3938,10 +4100,10 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
           </div>
         </div>
 
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
-          <h3 className="text-sm font-semibold text-slate-200 mb-4">System Status</h3>
+        <div className="rounded-xl border border-slate-200 bg-white p-6">
+          <h3 className="text-sm font-semibold text-slate-800 mb-4">System Status</h3>
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-sm text-slate-300">Maintenance Mode</span>
+            <span className="text-sm text-slate-700">Maintenance Mode</span>
             <input
               type="checkbox"
               checked={settings.maintenanceMode}
@@ -3956,7 +4118,7 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
 
         <button
           type="submit"
-          className="w-full rounded-xl bg-purple-500/90 px-6 py-3 text-sm font-semibold text-purple-950 transition hover:bg-purple-400"
+          className="w-full rounded-xl bg-blue-500/90 px-6 py-3 text-sm font-semibold text-purple-950 transition hover:bg-purple-400"
         >
           Save Settings
         </button>
@@ -3976,12 +4138,12 @@ function AdminAuditLogPanel({ workflow }: AdminAuditLogPanelProps) {
       kicker="System Activity"
       description="Complete audit trail of all system activities and user actions."
     >
-      <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+      <div className="rounded-xl border border-slate-200 bg-white p-6">
         <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-slate-200">Activity Timeline</h3>
+          <h3 className="text-sm font-semibold text-slate-800">Activity Timeline</h3>
           <button
             type="button"
-            className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-slate-800"
+            className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-800"
           >
             Export Log
           </button>
@@ -3990,12 +4152,12 @@ function AdminAuditLogPanel({ workflow }: AdminAuditLogPanelProps) {
           {workflow.timeline.map((event) => (
             <div
               key={event.id}
-              className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm"
+              className="rounded-lg border border-slate-200 bg-white p-3 text-sm"
             >
               <div className="flex items-start justify-between">
                 <div className="flex-1">
-                  <p className="font-semibold text-emerald-300">{event.actor}</p>
-                  <p className="text-slate-300 mt-1">{event.message}</p>
+                  <p className="font-semibold text-blue-700">{event.actor}</p>
+                  <p className="text-slate-700 mt-1">{event.message}</p>
                   <p className="text-xs text-slate-500 mt-1">{event.stage}</p>
                 </div>
                 <span className="text-xs text-slate-500 whitespace-nowrap ml-4">
@@ -4050,9 +4212,9 @@ function AdminStaffManagementPanel({ users, setUsers }: AdminStaffManagementPane
       description="Comprehensive staff account management with search, view, and edit capabilities."
     >
       <div className="space-y-6">
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-6">
           <div className="mb-4">
-            <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+            <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
               Search Staff
             </label>
             <input
@@ -4060,7 +4222,7 @@ function AdminStaffManagementPanel({ users, setUsers }: AdminStaffManagementPane
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Search by name or role..."
-              className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+              className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
             />
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 max-h-96 overflow-y-auto">
@@ -4071,12 +4233,12 @@ function AdminStaffManagementPanel({ users, setUsers }: AdminStaffManagementPane
                 onClick={() => setSelectedUser(user.id)}
                 className={`rounded-xl border p-4 text-left transition ${
                   selectedUser === user.id
-                    ? 'border-purple-500/50 bg-purple-500/10'
-                    : 'border-slate-800 bg-slate-950/60 hover:border-purple-500/40'
+                    ? 'border-blue-500/50 bg-blue-500/10'
+                    : 'border-slate-200 bg-white hover:border-blue-500/40'
                 }`}
               >
-                <p className="text-sm font-semibold text-slate-200">{user.name}</p>
-                <p className="text-xs text-slate-400 mt-1">{user.baseRole}</p>
+                <p className="text-sm font-semibold text-slate-800">{user.name}</p>
+                <p className="text-xs text-slate-600 mt-1">{user.baseRole}</p>
                 <div className="mt-2 flex flex-wrap gap-1">
                   {user.roles.map((role) => (
                     <RoleBadge key={role} role={role} />
@@ -4088,35 +4250,35 @@ function AdminStaffManagementPanel({ users, setUsers }: AdminStaffManagementPane
         </div>
 
         {selectedUserData && (
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+          <div className="rounded-xl border border-slate-200 bg-white p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-base font-semibold text-slate-200">User Details</h3>
+              <h3 className="text-base font-semibold text-slate-800">User Details</h3>
               <button
                 type="button"
                 onClick={() => setSelectedUser('')}
-                className="text-xs text-slate-400 hover:text-slate-300"
+                className="text-xs text-slate-600 hover:text-slate-700"
               >
                 Close
               </button>
             </div>
             <div className="space-y-4">
               <div>
-                <p className="text-xs text-slate-400">Full Name</p>
-                <p className="text-sm font-semibold text-slate-200">{selectedUserData.name}</p>
+                <p className="text-xs text-slate-600">Full Name</p>
+                <p className="text-sm font-semibold text-slate-800">{selectedUserData.name}</p>
               </div>
               <div>
-                <p className="text-xs text-slate-400">Base Role</p>
-                <p className="text-sm font-semibold text-slate-200">{selectedUserData.baseRole}</p>
+                <p className="text-xs text-slate-600">Base Role</p>
+                <p className="text-sm font-semibold text-slate-800">{selectedUserData.baseRole}</p>
               </div>
               <div>
-                <p className="text-xs text-slate-400">Assigned Roles</p>
+                <p className="text-xs text-slate-600">Assigned Roles</p>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {selectedUserData.roles.map((role) => (
                     <RoleBadge key={role} role={role} />
                   ))}
                 </div>
               </div>
-              <div className="pt-4 border-t border-slate-800">
+              <div className="pt-4 border-t border-slate-200">
                 <button
                   type="button"
                   onClick={() => handleDeleteUser(selectedUserData.id)}
@@ -4184,17 +4346,17 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
-        <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+        <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
           Select PDF File
         </label>
         <input
           type="file"
           accept=".pdf"
           onChange={handleFileSelect}
-          className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 file:mr-4 file:rounded-lg file:border-0 file:bg-indigo-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-indigo-950 file:cursor-pointer hover:file:bg-indigo-400"
+          className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 file:mr-4 file:rounded-lg file:border-0 file:bg-blue-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-indigo-950 file:cursor-pointer hover:file:bg-indigo-400"
         />
         {selectedFile && (
-          <p className="mt-2 text-xs text-emerald-300">
+          <p className="mt-2 text-xs text-blue-700">
             Selected: {selectedFile.name}
           </p>
         )}
@@ -4202,7 +4364,7 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
-          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
             Course Code
           </label>
           <input
@@ -4210,12 +4372,12 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
             value={courseCode}
             onChange={(e) => setCourseCode(e.target.value)}
             placeholder="e.g., CSC 302"
-            className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           />
         </div>
 
         <div>
-          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
             Course Unit
           </label>
           <input
@@ -4223,18 +4385,18 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
             value={courseUnit}
             onChange={(e) => setCourseUnit(e.target.value)}
             placeholder="e.g., Advanced Algorithms"
-            className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           />
         </div>
 
         <div>
-          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
             Semester
           </label>
           <select
             value={semester}
             onChange={(e) => setSemester(e.target.value)}
-            className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           >
             <option value="">Select semester...</option>
             <option value="Fall">Fall</option>
@@ -4244,7 +4406,7 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
         </div>
 
         <div>
-          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
             Year
           </label>
           <input
@@ -4252,7 +4414,7 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
             value={year}
             onChange={(e) => setYear(e.target.value)}
             placeholder="e.g., 2024"
-            className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           />
         </div>
       </div>
@@ -4260,7 +4422,7 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
       <button
         type="submit"
         disabled={!selectedFile || !courseUnit || !courseCode || !semester || !year}
-        className="w-full rounded-xl bg-indigo-500/90 px-6 py-3 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-indigo-500/40 disabled:text-indigo-900"
+        className="w-full rounded-xl bg-blue-500/90 px-6 py-3 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-blue-500/40 disabled:text-indigo-900"
       >
         Add Paper to Repository
       </button>
@@ -4376,23 +4538,23 @@ function ChiefExaminerConsole({
         kicker="Operational Roles"
         description="Assign operational roles to lecturers to activate the moderation workflow pipeline."
       >
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
-          <h3 className="text-base font-semibold text-slate-200 mb-2">
+        <div className="rounded-xl border border-slate-200 bg-white p-6">
+          <h3 className="text-base font-semibold text-slate-800 mb-2">
             Award Operational Roles
           </h3>
-          <p className="text-sm text-slate-400 mb-4">
+          <p className="text-sm text-slate-600 mb-4">
             Elevate lecturers into Team Leads, Vetters, or Setters to activate the moderation pipeline.
           </p>
           <form onSubmit={handleAward} className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                   Select Lecturer
                 </label>
                 <select
                   value={awardUserId}
                   onChange={(event) => setAwardUserId(event.target.value)}
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-100 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
                 >
                   <option value="">Choose a lecturer...</option>
                   {eligibleUsers.map((user) => (
@@ -4403,13 +4565,13 @@ function ChiefExaminerConsole({
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                   Select Role
                 </label>
                 <select
                   value={awardRole}
                   onChange={(event) => setAwardRole(event.target.value as Role)}
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-100 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
                 >
                   {awardableRoles.map((role) => (
                     <option key={role} value={role}>
@@ -4422,7 +4584,7 @@ function ChiefExaminerConsole({
             <button
               type="submit"
               disabled={!awardUserId}
-              className="w-full rounded-xl bg-indigo-500/90 px-6 py-3 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-indigo-500/40 disabled:text-indigo-900"
+              className="w-full rounded-xl bg-blue-500/90 px-6 py-3 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-blue-500/40 disabled:text-indigo-900"
             >
               Assign Role
             </button>
@@ -4430,11 +4592,11 @@ function ChiefExaminerConsole({
         </div>
 
         {/* Assigned Roles Display */}
-        <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/70 p-6">
-          <h3 className="text-base font-semibold text-slate-200 mb-4">
+        <div className="mt-6 rounded-xl border border-slate-200 bg-white p-6">
+          <h3 className="text-base font-semibold text-slate-800 mb-4">
             Currently Assigned Roles
           </h3>
-          <p className="text-sm text-slate-400 mb-4">
+          <p className="text-sm text-slate-600 mb-4">
             View all lecturers who have been assigned operational roles in the moderation workflow.
           </p>
           
@@ -4448,7 +4610,7 @@ function ChiefExaminerConsole({
             if (assignedUsers.length === 0) {
               return (
                 <div className="text-center py-8">
-                  <p className="text-sm text-slate-400">No operational roles assigned yet.</p>
+                  <p className="text-sm text-slate-600">No operational roles assigned yet.</p>
                   <p className="text-xs text-slate-500 mt-2">Assign roles using the form above.</p>
                 </div>
               );
@@ -4488,9 +4650,9 @@ function ChiefExaminerConsole({
                         };
                       case 'Vetter':
                         return {
-                          title: 'text-emerald-300',
-                          badge: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
-                          active: 'bg-emerald-500/30 text-emerald-300 border-emerald-500/50',
+                          title: 'text-blue-700',
+                          badge: 'bg-blue-500/20 text-blue-700 border-blue-500/30',
+                          active: 'bg-blue-500/30 text-blue-700 border-blue-500/50',
                         };
                       case 'Setter':
                         return {
@@ -4500,9 +4662,9 @@ function ChiefExaminerConsole({
                         };
                       default:
                         return {
-                          title: 'text-slate-300',
-                          badge: 'bg-slate-500/20 text-slate-300 border-slate-500/30',
-                          active: 'bg-slate-500/30 text-slate-300 border-slate-500/50',
+                          title: 'text-slate-700',
+                          badge: 'bg-slate-500/20 text-slate-700 border-slate-500/30',
+                          active: 'bg-slate-500/30 text-slate-700 border-slate-500/50',
                         };
                     }
                   };
@@ -4510,7 +4672,7 @@ function ChiefExaminerConsole({
                   const roleStyles = getRoleStyles(role);
 
                   return (
-                    <div key={role} className="rounded-lg border border-slate-800 bg-slate-950/60 p-4">
+                    <div key={role} className="rounded-lg border border-slate-200 bg-white p-4">
                       <div className="flex items-center justify-between mb-3">
                         <h4 className={`text-sm font-semibold ${roleStyles.title}`}>
                           {role}
@@ -4523,9 +4685,9 @@ function ChiefExaminerConsole({
                         {usersWithRole.map(user => (
                           <div
                             key={user.id}
-                            className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/50 px-3 py-2"
+                            className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-900/50 px-3 py-2"
                           >
-                            <span className="text-sm text-slate-200">{user.name}</span>
+                            <span className="text-sm text-slate-800">{user.name}</span>
                             <div className="flex items-center gap-2">
                               {user.roles.filter(r => operationalRoles.includes(r)).map(assignedRole => {
                                 const assignedStyles = getRoleStyles(assignedRole);
@@ -4535,7 +4697,7 @@ function ChiefExaminerConsole({
                                     className={`px-2 py-0.5 rounded text-xs font-medium border ${
                                       assignedRole === role
                                         ? assignedStyles.active
-                                        : 'bg-slate-700/50 text-slate-400 border-slate-600/50'
+                                        : 'bg-slate-700/50 text-slate-600 border-slate-600/50'
                                     }`}
                                   >
                                     {assignedRole}
@@ -4571,20 +4733,20 @@ function ChiefExaminerConsole({
       >
         <div className="grid gap-6 lg:grid-cols-2">
           {/* Setter Deadline Configuration */}
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+          <div className="rounded-xl border border-slate-200 bg-white p-6">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-base font-semibold text-pink-300">
                   Setter Submission Deadline
                 </h3>
-                <p className="text-sm text-slate-400 mt-1">
+                <p className="text-sm text-slate-600 mt-1">
                   Set duration for Setter paper submissions
                 </p>
               </div>
               <StatusPill
                 label={setterDeadlineActive ? 'Active' : 'Inactive'}
                 active={setterDeadlineActive}
-                tone={setterDeadlineActive ? 'emerald' : 'amber'}
+                tone={setterDeadlineActive ? 'blue' : 'amber'}
               />
             </div>
 
@@ -4603,7 +4765,7 @@ function ChiefExaminerConsole({
                   <button
                     type="button"
                     onClick={() => setShowSetterDurationSettings(true)}
-                    className="w-full rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-300 transition hover:bg-slate-800"
+                    className="w-full rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-800"
                   >
                     {setterDeadlineActive ? 'Update Deadline Duration' : 'Set Deadline Duration'}
                   </button>
@@ -4626,43 +4788,43 @@ function ChiefExaminerConsole({
                   setShowSetterDurationSettings(false);
                 }} className="space-y-4">
                   <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-3">
+                    <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-3">
                       Set Deadline Duration for Setter Submissions
                     </label>
                     <div className="grid grid-cols-3 gap-4">
                       <div className="space-y-2">
-                        <label className="block text-xs font-medium text-slate-300">Days</label>
+                        <label className="block text-xs font-medium text-slate-700">Days</label>
                         <input
                           type="number"
                           min="0"
                           max="30"
                           value={setterDurationForm.days}
                           onChange={(e) => setSetterDurationForm({ ...setterDurationForm, days: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-200 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
                           placeholder="0"
                         />
                       </div>
                       <div className="space-y-2">
-                        <label className="block text-xs font-medium text-slate-300">Hours</label>
+                        <label className="block text-xs font-medium text-slate-700">Hours</label>
                         <input
                           type="number"
                           min="0"
                           max="23"
                           value={setterDurationForm.hours}
                           onChange={(e) => setSetterDurationForm({ ...setterDurationForm, hours: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-200 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
                           placeholder="0"
                         />
                       </div>
                       <div className="space-y-2">
-                        <label className="block text-xs font-medium text-slate-300">Minutes</label>
+                        <label className="block text-xs font-medium text-slate-700">Minutes</label>
                         <input
                           type="number"
                           min="0"
                           max="59"
                           value={setterDurationForm.minutes}
                           onChange={(e) => setSetterDurationForm({ ...setterDurationForm, minutes: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-200 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
                           placeholder="0"
                         />
                       </div>
@@ -4690,7 +4852,7 @@ function ChiefExaminerConsole({
                         setShowSetterDurationSettings(false);
                         setSetterDurationForm(setterDeadlineDuration);
                       }}
-                      className="flex-1 rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-300 transition hover:bg-slate-800"
+                      className="flex-1 rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-800"
                     >
                       Cancel
                     </button>
@@ -4701,13 +4863,13 @@ function ChiefExaminerConsole({
           </div>
 
           {/* Team Lead Deadline Configuration */}
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+          <div className="rounded-xl border border-slate-200 bg-white p-6">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-base font-semibold text-violet-300">
                   Team Lead Submission Deadline
                 </h3>
-                <p className="text-sm text-slate-400 mt-1">
+                <p className="text-sm text-slate-600 mt-1">
                   Set duration for Team Lead paper submissions
                 </p>
                 <p className="text-xs text-slate-500 mt-1">
@@ -4717,7 +4879,7 @@ function ChiefExaminerConsole({
               <StatusPill
                 label={teamLeadDeadlineActive ? 'Active' : 'Inactive'}
                 active={teamLeadDeadlineActive}
-                tone={teamLeadDeadlineActive ? 'emerald' : 'amber'}
+                tone={teamLeadDeadlineActive ? 'blue' : 'amber'}
               />
             </div>
 
@@ -4736,7 +4898,7 @@ function ChiefExaminerConsole({
                   <button
                     type="button"
                     onClick={() => setShowTeamLeadDurationSettings(true)}
-                    className="w-full rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-300 transition hover:bg-slate-800"
+                    className="w-full rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-800"
                   >
                     {teamLeadDeadlineActive ? 'Update Deadline Duration' : 'Set Deadline Duration'}
                   </button>
@@ -4767,43 +4929,43 @@ function ChiefExaminerConsole({
                   setShowTeamLeadDurationSettings(false);
                 }} className="space-y-4">
                   <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-3">
+                    <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-3">
                       Set Deadline Duration for Team Lead Submissions
                     </label>
                     <div className="grid grid-cols-3 gap-4">
                       <div className="space-y-2">
-                        <label className="block text-xs font-medium text-slate-300">Days</label>
+                        <label className="block text-xs font-medium text-slate-700">Days</label>
                         <input
                           type="number"
                           min="0"
                           max="30"
                           value={teamLeadDurationForm.days}
                           onChange={(e) => setTeamLeadDurationForm({ ...teamLeadDurationForm, days: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-200 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
                           placeholder="0"
                         />
                       </div>
                       <div className="space-y-2">
-                        <label className="block text-xs font-medium text-slate-300">Hours</label>
+                        <label className="block text-xs font-medium text-slate-700">Hours</label>
                         <input
                           type="number"
                           min="0"
                           max="23"
                           value={teamLeadDurationForm.hours}
                           onChange={(e) => setTeamLeadDurationForm({ ...teamLeadDurationForm, hours: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-200 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
                           placeholder="0"
                         />
                       </div>
                       <div className="space-y-2">
-                        <label className="block text-xs font-medium text-slate-300">Minutes</label>
+                        <label className="block text-xs font-medium text-slate-700">Minutes</label>
                         <input
                           type="number"
                           min="0"
                           max="59"
                           value={teamLeadDurationForm.minutes}
                           onChange={(e) => setTeamLeadDurationForm({ ...teamLeadDurationForm, minutes: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-200 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
                           placeholder="0"
                         />
                       </div>
@@ -4831,7 +4993,7 @@ function ChiefExaminerConsole({
                         setShowTeamLeadDurationSettings(false);
                         setTeamLeadDurationForm(teamLeadDeadlineDuration);
                       }}
-                      className="flex-1 rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-300 transition hover:bg-slate-800"
+                      className="flex-1 rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-800"
                     >
                       Cancel
                     </button>
@@ -4843,20 +5005,20 @@ function ChiefExaminerConsole({
 
           {/* Repository Management */}
           <div className="space-y-6">
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+            <div className="rounded-xl border border-slate-200 bg-white p-6">
               <div className="flex items-center justify-between mb-4">
                 <div>
-                  <h3 className="text-base font-semibold text-slate-200">
+                  <h3 className="text-base font-semibold text-slate-800">
                     Semester Repositories
                   </h3>
-                  <p className="text-sm text-slate-400 mt-1">
+                  <p className="text-sm text-slate-600 mt-1">
                     Open or close repositories for submissions
                   </p>
                 </div>
                 <StatusPill
                   label={repositoriesActive ? 'Open' : 'Closed'}
                   active={repositoriesActive}
-                  tone={repositoriesActive ? 'emerald' : 'amber'}
+                  tone={repositoriesActive ? 'blue' : 'amber'}
                 />
               </div>
 
@@ -4867,14 +5029,14 @@ function ChiefExaminerConsole({
                   className={`w-full rounded-xl px-6 py-3 text-sm font-semibold transition ${
                     repositoriesActive
                       ? 'bg-amber-500/90 text-amber-950 hover:bg-amber-400'
-                      : 'bg-emerald-500/90 text-emerald-950 hover:bg-emerald-400'
+                      : 'bg-blue-500/90 text-emerald-950 hover:bg-blue-400'
                   }`}
                 >
                   {repositoriesActive ? 'Close Repositories' : 'Open Repositories'}
                 </button>
-                <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4">
-                  <p className="text-xs font-semibold text-slate-400 mb-2">Status</p>
-                  <p className="text-sm text-slate-300">
+                <div className="rounded-lg border border-slate-200 bg-white p-4">
+                  <p className="text-xs font-semibold text-slate-600 mb-2">Status</p>
+                  <p className="text-sm text-slate-700">
                     {repositoriesActive
                       ? 'Repositories are open. Team Leads can submit papers.'
                       : 'Repositories are closed. No submissions accepted.'}
@@ -4884,12 +5046,12 @@ function ChiefExaminerConsole({
             </div>
 
             {/* Add Paper to Repository */}
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+            <div className="rounded-xl border border-slate-200 bg-white p-6">
               <div className="mb-4">
-                <h3 className="text-base font-semibold text-slate-200">
+                <h3 className="text-base font-semibold text-slate-800">
                   Add Paper to Repository
                 </h3>
-                <p className="text-sm text-slate-400 mt-1">
+                <p className="text-sm text-slate-600 mt-1">
                   Upload papers to the repository for AI similarity analysis
                 </p>
               </div>
@@ -4899,12 +5061,12 @@ function ChiefExaminerConsole({
 
             {/* Repository Papers List */}
             {repositoryPapers.length > 0 && (
-              <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+              <div className="rounded-xl border border-slate-200 bg-white p-6">
                 <div className="mb-4">
-                  <h3 className="text-base font-semibold text-slate-200">
+                  <h3 className="text-base font-semibold text-slate-800">
                     Repository Papers
                   </h3>
-                  <p className="text-sm text-slate-400 mt-1">
+                  <p className="text-sm text-slate-600 mt-1">
                     View and manage papers in the repository
                   </p>
                 </div>
@@ -4913,20 +5075,20 @@ function ChiefExaminerConsole({
                   {repositoryPapers.map((paper) => (
                     <div
                       key={paper.id}
-                      className="rounded-lg border border-slate-800 bg-slate-950/60 p-4"
+                      className="rounded-lg border border-slate-200 bg-white p-4"
                     >
                       <div className="flex items-start justify-between">
                         <div className="flex-1">
                           <div className="flex items-center gap-2 mb-2">
-                            <h4 className="text-sm font-semibold text-slate-200">{paper.fileName}</h4>
+                            <h4 className="text-sm font-semibold text-slate-800">{paper.fileName}</h4>
                             <span className="px-2 py-0.5 rounded-lg text-xs font-medium border bg-cyan-500/20 text-cyan-300 border-cyan-500/30">
                               {paper.courseCode}
                             </span>
                           </div>
-                          <div className="space-y-1 text-xs text-slate-400">
-                            <p>Course: <span className="text-slate-300">{paper.courseUnit}</span></p>
-                            <p>Submitted by: <span className="text-slate-300">{paper.submittedBy}</span></p>
-                            <p>Semester: <span className="text-slate-300">{paper.semester} {paper.year}</span></p>
+                          <div className="space-y-1 text-xs text-slate-600">
+                            <p>Course: <span className="text-slate-700">{paper.courseUnit}</span></p>
+                            <p>Submitted by: <span className="text-slate-700">{paper.submittedBy}</span></p>
+                            <p>Semester: <span className="text-slate-700">{paper.semester} {paper.year}</span></p>
                             <p>Added: {new Date(paper.submittedAt).toLocaleString()}</p>
                           </div>
                         </div>
@@ -4962,20 +5124,20 @@ function ChiefExaminerConsole({
         kicker="Package Management"
         description="Download moderated exam packages and view export history."
       >
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-6">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="text-base font-semibold text-slate-200">
+              <h3 className="text-base font-semibold text-slate-800">
                 Download Moderation Results
               </h3>
-              <p className="text-sm text-slate-400 mt-1">
+              <p className="text-sm text-slate-600 mt-1">
                 Package and export moderated exam papers
               </p>
             </div>
             <StatusPill
               label={lastModerationDownload ? 'Exported' : 'Not Exported'}
               active={Boolean(lastModerationDownload)}
-              tone={lastModerationDownload ? 'emerald' : 'amber'}
+              tone={lastModerationDownload ? 'blue' : 'amber'}
             />
           </div>
           <button
@@ -5075,7 +5237,7 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
       )}
 
       <div>
-        <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+        <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
           Select PDF File
         </label>
         <input
@@ -5083,10 +5245,10 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
           accept=".pdf"
           onChange={handleFileSelect}
           disabled={!canSubmit}
-          className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 file:mr-4 file:rounded-lg file:border-0 file:bg-pink-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-pink-950 file:cursor-pointer hover:file:bg-pink-400 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 file:mr-4 file:rounded-lg file:border-0 file:bg-pink-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-pink-950 file:cursor-pointer hover:file:bg-pink-400 disabled:opacity-50 disabled:cursor-not-allowed"
         />
         {selectedFile && (
-          <p className="mt-2 text-xs text-emerald-300">
+          <p className="mt-2 text-xs text-blue-700">
             Selected: {selectedFile.name}
           </p>
         )}
@@ -5094,7 +5256,7 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
-          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
             Course Code
           </label>
           <input
@@ -5103,12 +5265,12 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
             onChange={(e) => setCourseCode(e.target.value)}
             placeholder="e.g., CSC 302"
             disabled={!canSubmit}
-            className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
+            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
           />
         </div>
 
         <div>
-          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
             Course Unit
           </label>
           <input
@@ -5117,19 +5279,19 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
             onChange={(e) => setCourseUnit(e.target.value)}
             placeholder="e.g., Advanced Algorithms"
             disabled={!canSubmit}
-            className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
+            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
           />
         </div>
 
         <div>
-          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
             Semester
           </label>
           <select
             value={semester}
             onChange={(e) => setSemester(e.target.value)}
             disabled={!canSubmit}
-            className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
+            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
           >
             <option value="">Select semester...</option>
             <option value="Fall">Fall</option>
@@ -5139,7 +5301,7 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
         </div>
 
         <div>
-          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
             Year
           </label>
           <input
@@ -5148,7 +5310,7 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
             onChange={(e) => setYear(e.target.value)}
             placeholder="e.g., 2024"
             disabled={!canSubmit}
-            className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
+            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
           />
         </div>
       </div>
@@ -5166,9 +5328,9 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
       </button>
 
       {canSubmit && (
-        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4">
-          <p className="text-xs font-semibold text-slate-300 mb-2">What happens next?</p>
-          <ul className="space-y-1 text-xs text-slate-400">
+        <div className="rounded-lg border border-slate-200 bg-white p-4">
+          <p className="text-xs font-semibold text-slate-700 mb-2">What happens next?</p>
+          <ul className="space-y-1 text-xs text-slate-600">
             <li className="flex items-start gap-2">
               <span className="mt-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
               <span>Your paper will be sent to the Team Lead for compilation</span>
@@ -5254,15 +5416,15 @@ function SetterPanel({
         kicker="Time Remaining"
         description="Countdown timer showing the time remaining to submit your paper draft."
       >
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-6">
           {!deadlineActive ? (
             <div className="text-center py-8">
-              <p className="text-sm text-slate-400">Deadlines are not currently active.</p>
+              <p className="text-sm text-slate-600">Deadlines are not currently active.</p>
               <p className="text-xs text-slate-500 mt-2">Waiting for Chief Examiner to activate deadlines.</p>
             </div>
           ) : !deadlineStartTime ? (
             <div className="text-center py-8">
-              <p className="text-sm text-slate-400">Deadline timer will start when activated.</p>
+              <p className="text-sm text-slate-600">Deadline timer will start when activated.</p>
             </div>
           ) : timeRemaining?.expired ? (
             <div className="text-center py-8">
@@ -5270,33 +5432,33 @@ function SetterPanel({
                 <span className="text-2xl">⏰</span>
               </div>
               <p className="text-lg font-semibold text-rose-300">Deadline Expired</p>
-              <p className="text-sm text-slate-400 mt-2">The submission deadline has passed. Team Lead deadline has started.</p>
+              <p className="text-sm text-slate-600 mt-2">The submission deadline has passed. Team Lead deadline has started.</p>
             </div>
           ) : (
             <div className="space-y-4">
               <div className="grid grid-cols-4 gap-4">
                 <div className="text-center">
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
                     <p className="text-3xl font-bold text-pink-300">{String(timeRemaining?.days ?? 0).padStart(2, '0')}</p>
-                    <p className="text-xs text-slate-400 mt-1 uppercase tracking-wide">Days</p>
+                    <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Days</p>
                   </div>
                 </div>
                 <div className="text-center">
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
                     <p className="text-3xl font-bold text-pink-300">{String(timeRemaining?.hours ?? 0).padStart(2, '0')}</p>
-                    <p className="text-xs text-slate-400 mt-1 uppercase tracking-wide">Hours</p>
+                    <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Hours</p>
                   </div>
                 </div>
                 <div className="text-center">
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
                     <p className="text-3xl font-bold text-pink-300">{String(timeRemaining?.minutes ?? 0).padStart(2, '0')}</p>
-                    <p className="text-xs text-slate-400 mt-1 uppercase tracking-wide">Minutes</p>
+                    <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Minutes</p>
                   </div>
                 </div>
                 <div className="text-center">
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
                     <p className="text-3xl font-bold text-pink-300">{String(timeRemaining?.seconds ?? 0).padStart(2, '0')}</p>
-                    <p className="text-xs text-slate-400 mt-1 uppercase tracking-wide">Seconds</p>
+                    <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Seconds</p>
                   </div>
                 </div>
               </div>
@@ -5316,7 +5478,7 @@ function SetterPanel({
         kicker="Paper Submission"
         description="Submit your exam paper draft to the Team Lead. A copy will be automatically shared with the Chief Examiner and added to repository."
       >
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6 space-y-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-6 space-y-6">
           <SetterSubmissionForm
             onSubmit={onSetterSubmit}
             canSubmit={canSubmit}
@@ -5453,11 +5615,11 @@ function TeamLeadPanel({
       case 'in-vetting':
         return 'text-amber-400 bg-amber-500/10 border-amber-500/30';
       case 'vetted':
-        return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30';
+        return 'text-blue-600 bg-blue-500/10 border-blue-500/30';
       case 'approved':
-        return 'text-blue-400 bg-blue-500/10 border-blue-500/30';
+        return 'text-blue-600 bg-blue-500/10 border-blue-500/30';
       default:
-        return 'text-slate-400 bg-slate-500/10 border-slate-500/30';
+        return 'text-slate-600 bg-slate-500/10 border-slate-500/30';
     }
   };
 
@@ -5490,15 +5652,15 @@ function TeamLeadPanel({
         kicker="Time Remaining"
         description="Countdown timer showing the time remaining to submit papers as set by the Chief Examiner."
       >
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-6">
           {!deadlinesActive ? (
             <div className="text-center py-8">
-              <p className="text-sm text-slate-400">Deadlines are not currently active.</p>
+              <p className="text-sm text-slate-600">Deadlines are not currently active.</p>
               <p className="text-xs text-slate-500 mt-2">Waiting for Chief Examiner to activate deadlines.</p>
             </div>
           ) : !deadlineStartTime ? (
             <div className="text-center py-8">
-              <p className="text-sm text-slate-400">Deadline timer will start when activated.</p>
+              <p className="text-sm text-slate-600">Deadline timer will start when activated.</p>
             </div>
           ) : timeRemaining?.expired ? (
             <div className="text-center py-8">
@@ -5506,39 +5668,39 @@ function TeamLeadPanel({
                 <span className="text-2xl">⏰</span>
               </div>
               <p className="text-lg font-semibold text-rose-300">Deadline Expired</p>
-              <p className="text-sm text-slate-400 mt-2">The submission deadline has passed.</p>
+              <p className="text-sm text-slate-600 mt-2">The submission deadline has passed.</p>
             </div>
           ) : (
             <div className="space-y-4">
               <div className="grid grid-cols-4 gap-4">
                 <div className="text-center">
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-                    <p className="text-3xl font-bold text-emerald-300">{String(timeRemaining?.days ?? 0).padStart(2, '0')}</p>
-                    <p className="text-xs text-slate-400 mt-1 uppercase tracking-wide">Days</p>
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <p className="text-3xl font-bold text-blue-700">{String(timeRemaining?.days ?? 0).padStart(2, '0')}</p>
+                    <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Days</p>
                   </div>
                 </div>
                 <div className="text-center">
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-                    <p className="text-3xl font-bold text-emerald-300">{String(timeRemaining?.hours ?? 0).padStart(2, '0')}</p>
-                    <p className="text-xs text-slate-400 mt-1 uppercase tracking-wide">Hours</p>
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <p className="text-3xl font-bold text-blue-700">{String(timeRemaining?.hours ?? 0).padStart(2, '0')}</p>
+                    <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Hours</p>
                   </div>
                 </div>
                 <div className="text-center">
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-                    <p className="text-3xl font-bold text-emerald-300">{String(timeRemaining?.minutes ?? 0).padStart(2, '0')}</p>
-                    <p className="text-xs text-slate-400 mt-1 uppercase tracking-wide">Minutes</p>
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <p className="text-3xl font-bold text-blue-700">{String(timeRemaining?.minutes ?? 0).padStart(2, '0')}</p>
+                    <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Minutes</p>
                   </div>
                 </div>
                 <div className="text-center">
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-                    <p className="text-3xl font-bold text-emerald-300">{String(timeRemaining?.seconds ?? 0).padStart(2, '0')}</p>
-                    <p className="text-xs text-slate-400 mt-1 uppercase tracking-wide">Seconds</p>
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <p className="text-3xl font-bold text-blue-700">{String(timeRemaining?.seconds ?? 0).padStart(2, '0')}</p>
+                    <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Seconds</p>
                   </div>
                 </div>
               </div>
-              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4">
-                <p className="text-xs font-semibold text-emerald-300 mb-1">Deadline Duration</p>
-                <p className="text-sm text-emerald-200">
+              <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-4">
+                <p className="text-xs font-semibold text-blue-700 mb-1">Deadline Duration</p>
+                <p className="text-sm text-blue-800">
                   {deadlineDuration.days} day{deadlineDuration.days !== 1 ? 's' : ''}, {deadlineDuration.hours} hour{deadlineDuration.hours !== 1 ? 's' : ''}, {deadlineDuration.minutes} minute{deadlineDuration.minutes !== 1 ? 's' : ''}
                 </p>
               </div>
@@ -5553,11 +5715,11 @@ function TeamLeadPanel({
         kicker="Submission & Review"
         description="Upload PDF to Chief Examiner and download moderation checklist with vetting comments."
       >
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6 space-y-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-6 space-y-6">
           {/* Upload PDF Form */}
           <form onSubmit={handleSubmitPDF} className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                 Upload PDF to Chief Examiner
               </label>
               <input
@@ -5565,10 +5727,10 @@ function TeamLeadPanel({
                 accept=".pdf"
                 onChange={handleFileSelect}
                 disabled={!canSubmit}
-                className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 file:mr-4 file:rounded-lg file:border-0 file:bg-indigo-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-indigo-950 file:cursor-pointer hover:file:bg-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 file:mr-4 file:rounded-lg file:border-0 file:bg-blue-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-indigo-950 file:cursor-pointer hover:file:bg-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed"
               />
               {selectedFile && (
-                <p className="mt-2 text-xs text-emerald-300">
+                <p className="mt-2 text-xs text-blue-700">
                   Selected: {selectedFile.name}
                 </p>
               )}
@@ -5576,7 +5738,7 @@ function TeamLeadPanel({
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                   Course Code
                 </label>
                 <input
@@ -5585,12 +5747,12 @@ function TeamLeadPanel({
                   onChange={(e) => setCourseCode(e.target.value)}
                   placeholder="e.g., CSC 302"
                   disabled={!canSubmit}
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                   Course Unit
                 </label>
                 <input
@@ -5599,19 +5761,19 @@ function TeamLeadPanel({
                   onChange={(e) => setCourseUnit(e.target.value)}
                   placeholder="e.g., Advanced Algorithms"
                   disabled={!canSubmit}
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                   Semester
                 </label>
                 <select
                   value={semester}
                   onChange={(e) => setSemester(e.target.value)}
                   disabled={!canSubmit}
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
                 >
                   <option value="">Select semester...</option>
                   <option value="Fall">Fall</option>
@@ -5621,7 +5783,7 @@ function TeamLeadPanel({
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                   Year
                 </label>
                 <input
@@ -5630,7 +5792,7 @@ function TeamLeadPanel({
                   onChange={(e) => setYear(e.target.value)}
                   placeholder="e.g., 2024"
                   disabled={!canSubmit}
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
                 />
               </div>
             </div>
@@ -5638,7 +5800,7 @@ function TeamLeadPanel({
             <button
               type="submit"
               disabled={!canSubmit || !selectedFile || !courseUnit || !courseCode || !semester || !year}
-              className="w-full rounded-xl bg-indigo-500/90 px-6 py-4 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-indigo-500/40 disabled:text-indigo-900"
+              className="w-full rounded-xl bg-blue-500/90 px-6 py-4 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-blue-500/40 disabled:text-indigo-900"
             >
               Submit PDF to Chief Examiner
             </button>
@@ -5648,15 +5810,15 @@ function TeamLeadPanel({
           </form>
 
           {/* Divider */}
-          <div className="border-t border-slate-800"></div>
+          <div className="border-t border-slate-200"></div>
 
           {/* Download Moderation Checklist Button */}
           <div className="space-y-3">
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
                 Download Moderation Checklist
               </label>
-              <p className="text-xs text-slate-400 mb-3">
+              <p className="text-xs text-slate-600 mb-3">
                 Download the moderation checklist with comments and feedback from the vetting process.
               </p>
             </div>
@@ -5687,13 +5849,13 @@ function TeamLeadPanel({
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-2">
-                      <h4 className="text-sm font-semibold text-slate-200">{submission.fileName}</h4>
+                      <h4 className="text-sm font-semibold text-slate-800">{submission.fileName}</h4>
                       <span className="px-2 py-0.5 rounded-lg text-xs font-medium border bg-amber-500/20 text-amber-300 border-amber-500/30">
                         From Setter
                       </span>
                     </div>
-                    <div className="space-y-1 text-xs text-slate-400">
-                      <p>Submitted by: <span className="text-slate-300">{submission.submittedBy}</span></p>
+                    <div className="space-y-1 text-xs text-slate-600">
+                      <p>Submitted by: <span className="text-slate-700">{submission.submittedBy}</span></p>
                       <p>Submitted: {new Date(submission.submittedAt).toLocaleString()}</p>
                     </div>
                   </div>
@@ -5740,23 +5902,23 @@ function TeamLeadPanel({
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-2">
-                      <h4 className="text-sm font-semibold text-slate-200">{paper.fileName}</h4>
+                      <h4 className="text-sm font-semibold text-slate-800">{paper.fileName}</h4>
                       <span className={`px-2 py-0.5 rounded-lg text-xs font-medium border ${getStatusColor(paper.status)}`}>
                         {getStatusLabel(paper.status)}
                       </span>
                     </div>
-                    <div className="space-y-1 text-xs text-slate-400">
+                    <div className="space-y-1 text-xs text-slate-600">
                       <p>Submitted: {new Date(paper.submittedAt).toLocaleString()}</p>
                       {paper.fileSize && (
                         <p>Size: {(paper.fileSize / 1024).toFixed(2)} KB</p>
                       )}
-                      <p>Current Workflow Stage: <span className="text-slate-300">{workflowStage}</span></p>
+                      <p>Current Workflow Stage: <span className="text-slate-700">{workflowStage}</span></p>
                     </div>
                   </div>
                   <div className="flex flex-col gap-2 ml-4">
                     <button
                       type="button"
-                      className="px-3 py-1.5 rounded-lg bg-slate-800/50 hover:bg-slate-700/50 text-xs font-medium text-slate-300 transition"
+                      className="px-3 py-1.5 rounded-lg bg-slate-800/50 hover:bg-slate-700/50 text-xs font-medium text-slate-700 transition"
                       onClick={() => {
                         // In a real app, this would download or view the paper
                         alert(`Viewing paper: ${paper.fileName}`);
@@ -5767,7 +5929,7 @@ function TeamLeadPanel({
                     {paper.status === 'vetted' && (
                       <button
                         type="button"
-                        className="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-xs font-medium text-emerald-300 transition"
+                        className="px-3 py-1.5 rounded-lg bg-blue-500/20 hover:bg-blue-500/30 text-xs font-medium text-blue-700 transition"
                         onClick={handleDownloadModerationChecklist}
                       >
                         Download Report
@@ -5912,8 +6074,8 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
       case 'critical': return 'bg-rose-500/20 text-rose-300 border-rose-500/40';
       case 'high': return 'bg-amber-500/20 text-amber-300 border-amber-500/40';
       case 'medium': return 'bg-yellow-500/20 text-yellow-300 border-yellow-500/40';
-      case 'low': return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
-      default: return 'bg-slate-800 text-slate-300 border-slate-700';
+      case 'low': return 'bg-blue-500/20 text-blue-700 border-blue-500/40';
+      default: return 'bg-slate-800 text-slate-700 border-slate-700';
     }
   };
 
@@ -5921,7 +6083,7 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
     if (score >= 85) return 'text-rose-400';
     if (score >= 70) return 'text-amber-400';
     if (score >= 50) return 'text-yellow-400';
-    return 'text-emerald-400';
+    return 'text-blue-600';
   };
 
   return (
@@ -5931,18 +6093,18 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
       description="Compare submitted exam papers with historical papers from previous semesters to detect potential similarities and ensure academic integrity."
     >
       <div className="space-y-4">
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
-          <h3 className="text-sm font-semibold text-slate-200 mb-4">Course Unit Selection</h3>
+        <div className="rounded-xl border border-slate-200 bg-white p-5">
+          <h3 className="text-sm font-semibold text-slate-800 mb-4">Course Unit Selection</h3>
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <label className="block text-xs text-slate-400 mb-2">Select Course Unit</label>
+              <label className="block text-xs text-slate-600 mb-2">Select Course Unit</label>
               <select
                 value={selectedCourse}
                 onChange={(e) => {
                   setSelectedCourse(e.target.value);
                   setSimilarityResults([]);
                 }}
-                className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
               >
                 <option value="">Choose a course unit...</option>
                 {courseUnits.map((course) => (
@@ -5957,7 +6119,7 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
                 type="button"
                 onClick={handleScan}
                 disabled={!selectedCourse || isScanning}
-                className="w-full rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full rounded-lg bg-blue-500/20 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isScanning ? 'Scanning...' : 'Run AI Similarity Scan'}
               </button>
@@ -5966,23 +6128,23 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
         </div>
 
         {selectedCourse && (
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
-            <h3 className="text-sm font-semibold text-slate-200 mb-4">Submitted Papers (Current Semester)</h3>
+          <div className="rounded-xl border border-slate-200 bg-white p-5">
+            <h3 className="text-sm font-semibold text-slate-800 mb-4">Submitted Papers (Current Semester)</h3>
             <div className="space-y-3">
               {submittedPapers
                 .filter(p => selectedCourse.includes(p.courseCode))
                 .map((paper) => (
-                  <div key={paper.id} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                  <div key={paper.id} className="rounded-lg border border-slate-200 bg-white p-3">
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
-                        <p className="text-sm font-semibold text-slate-200">{paper.courseCode}</p>
-                        <p className="text-xs text-slate-400 mt-1">{paper.fileName}</p>
+                        <p className="text-sm font-semibold text-slate-800">{paper.courseCode}</p>
+                        <p className="text-xs text-slate-600 mt-1">{paper.fileName}</p>
                         <p className="text-xs text-slate-500 mt-1">Submitted by: {paper.submittedBy}</p>
                         <p className="text-xs text-slate-500">
                           {new Date(paper.submittedAt).toLocaleDateString()}
                         </p>
                       </div>
-                      <span className="text-xs text-emerald-400">Ready for Scan</span>
+                      <span className="text-xs text-blue-600">Ready for Scan</span>
                     </div>
                   </div>
                 ))}
@@ -5991,10 +6153,10 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
         )}
 
         {similarityResults.length > 0 && (
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+          <div className="rounded-xl border border-slate-200 bg-white p-5">
             <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-slate-200">Similarity Detection Results</h3>
-              <span className="text-xs text-slate-400">
+              <h3 className="text-sm font-semibold text-slate-800">Similarity Detection Results</h3>
+              <span className="text-xs text-slate-600">
                 {similarityResults.length} match{similarityResults.length !== 1 ? 'es' : ''} found
               </span>
             </div>
@@ -6018,17 +6180,17 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
                             {result.riskLevel} Risk
                           </span>
                         </div>
-                        <p className="text-xs text-slate-300 mb-1">
+                        <p className="text-xs text-slate-700 mb-1">
                           <span className="font-semibold">Current:</span> {currentPaper?.fileName}
                         </p>
-                        <p className="text-xs text-slate-300">
+                        <p className="text-xs text-slate-700">
                           <span className="font-semibold">Historical:</span> {historicalPaper?.fileName} ({historicalPaper?.semester} {historicalPaper?.year})
                         </p>
                       </div>
                       <button
                         type="button"
                         onClick={() => setShowDetails(showDetails === `${idx}` ? null : `${idx}`)}
-                        className="text-xs text-slate-400 hover:text-slate-200"
+                        className="text-xs text-slate-600 hover:text-slate-800"
                       >
                         {showDetails === `${idx}` ? 'Hide' : 'Show'} Details
                       </button>
@@ -6037,10 +6199,10 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
                     {showDetails === `${idx}` && (
                       <div className="mt-3 pt-3 border-t border-slate-700 space-y-2">
                         <div>
-                          <p className="text-xs font-semibold text-slate-300 mb-1">Matched Sections:</p>
+                          <p className="text-xs font-semibold text-slate-700 mb-1">Matched Sections:</p>
                           <div className="flex flex-wrap gap-2">
                             {result.matchedSections.map((section, sIdx) => (
-                              <span key={sIdx} className="px-2 py-1 rounded bg-slate-800/50 text-xs text-slate-300">
+                              <span key={sIdx} className="px-2 py-1 rounded bg-slate-800/50 text-xs text-slate-700">
                                 {section}
                               </span>
                             ))}
@@ -6048,12 +6210,12 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
                         </div>
                         <div className="grid grid-cols-2 gap-2 text-xs">
                           <div>
-                            <p className="text-slate-400">Current Paper</p>
-                            <p className="text-slate-200">{currentPaper?.courseCode} - {currentPaper?.semester} {currentPaper?.year}</p>
+                            <p className="text-slate-600">Current Paper</p>
+                            <p className="text-slate-800">{currentPaper?.courseCode} - {currentPaper?.semester} {currentPaper?.year}</p>
                           </div>
                           <div>
-                            <p className="text-slate-400">Historical Paper</p>
-                            <p className="text-slate-200">{historicalPaper?.courseCode} - {historicalPaper?.semester} {historicalPaper?.year}</p>
+                            <p className="text-slate-600">Historical Paper</p>
+                            <p className="text-slate-800">{historicalPaper?.courseCode} - {historicalPaper?.semester} {historicalPaper?.year}</p>
                           </div>
                         </div>
                         {result.similarityScore >= 70 && (
@@ -6073,18 +6235,18 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
         )}
 
         {!isScanning && similarityResults.length === 0 && selectedCourse && (
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5 text-center">
-            <p className="text-sm text-slate-400">
+          <div className="rounded-xl border border-slate-200 bg-white p-5 text-center">
+            <p className="text-sm text-slate-600">
               Click "Run AI Similarity Scan" to compare submitted papers with historical papers.
             </p>
           </div>
         )}
 
         {isScanning && (
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5 text-center">
+          <div className="rounded-xl border border-slate-200 bg-white p-5 text-center">
             <div className="flex flex-col items-center gap-3">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-500"></div>
-              <p className="text-sm text-slate-400">AI is analyzing papers for similarities...</p>
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+              <p className="text-sm text-slate-600">AI is analyzing papers for similarities...</p>
             </div>
           </div>
         )}
@@ -6148,23 +6310,23 @@ function LecturerDashboardPanel({
           : 'Lecturers authenticate with their personal credentials to access tasks aligned to their elevated roles.'
       }
     >
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-        <h3 className="text-sm font-semibold text-slate-200">Your Roles</h3>
+      <div className="rounded-2xl border border-slate-200 bg-white p-5">
+        <h3 className="text-sm font-semibold text-slate-800">Your Roles</h3>
         <div className="mt-3 flex flex-wrap gap-2">
           {user.roles.map((role) => (
             <RoleBadge key={`landing-${role}`} role={role} />
           ))}
         </div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-300">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
             <p className="text-xs uppercase tracking-wide text-slate-500">
               {isPureLecturer ? 'Current Academic Week' : 'Current Workflow Stage'}
             </p>
-            <p className="mt-1 text-lg font-semibold text-emerald-300">
+            <p className="mt-1 text-lg font-semibold text-blue-700">
               {isPureLecturer ? 'Week 7 — Deep Learning Modules' : workflowStage.replace(/-/g, ' ')}
             </p>
           </div>
-          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-300">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
             <p className="text-xs uppercase tracking-wide text-slate-500">
               {isPureLecturer ? 'Teaching Resources' : 'Semester Status'}
             </p>
@@ -6174,12 +6336,12 @@ function LecturerDashboardPanel({
                   <StatusPill
                     label="Course Materials Published"
                     active={repositoriesActive}
-                    tone="emerald"
+                    tone="blue"
                   />
                   <StatusPill
                     label="Assessment Planning"
                     active={deadlinesActive}
-                    tone="emerald"
+                    tone="blue"
                   />
                 </>
               ) : (
@@ -6187,22 +6349,22 @@ function LecturerDashboardPanel({
                   <StatusPill
                     label="Deadlines Active"
                     active={deadlinesActive}
-                    tone="emerald"
+                    tone="blue"
                   />
                   <StatusPill
                     label="Repositories Open"
                     active={repositoriesActive}
-                    tone="emerald"
+                    tone="blue"
                   />
                 </>
               )}
             </div>
           </div>
         </div>
-        <div className="mt-5 space-y-2 text-sm text-slate-300">
+        <div className="mt-5 space-y-2 text-sm text-slate-700">
           {guidance.map((item, index) => (
             <p key={item}>
-              <span className="font-semibold text-emerald-300">
+              <span className="font-semibold text-blue-700">
                 Step {index + 1}:
               </span>{' '}
               {item}
@@ -6240,14 +6402,14 @@ function LecturerMyClassesPanel() {
               onClick={() => setSelectedClass(classItem.id)}
               className={`w-full rounded-xl border p-4 text-left transition ${
                 selectedClass === classItem.id
-                  ? 'border-emerald-500/50 bg-emerald-500/10'
-                  : 'border-slate-800 bg-slate-900/70 hover:border-emerald-500/40 hover:bg-slate-900'
+                  ? 'border-blue-500/50 bg-blue-500/10'
+                  : 'border-slate-200 bg-white hover:border-blue-500/40 hover:bg-slate-900'
               }`}
             >
               <div className="flex items-start justify-between">
                 <div>
-                  <p className="text-sm font-semibold text-emerald-300">{classItem.code}</p>
-                  <p className="mt-1 text-sm text-slate-300">{classItem.name}</p>
+                  <p className="text-sm font-semibold text-blue-700">{classItem.code}</p>
+                  <p className="mt-1 text-sm text-slate-700">{classItem.name}</p>
                   <p className="mt-2 text-xs text-slate-500">{classItem.schedule}</p>
                 </div>
                 <span className="text-xs text-slate-500">{classItem.students} students</span>
@@ -6257,37 +6419,37 @@ function LecturerMyClassesPanel() {
         </div>
         <div className="space-y-3">
           {selectedClassData ? (
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-sm text-slate-300">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
               <p className="text-xs uppercase tracking-wide text-slate-500">Class Details</p>
-          <p className="mt-2 text-base font-semibold text-emerald-300">
+          <p className="mt-2 text-base font-semibold text-blue-700">
                 {selectedClassData.code} — {selectedClassData.name}
               </p>
-              <p className="mt-2 text-xs text-slate-400">{selectedClassData.schedule}</p>
+              <p className="mt-2 text-xs text-slate-600">{selectedClassData.schedule}</p>
               <p className="mt-3 text-xs text-slate-500">Total Enrollment: {selectedClassData.students}</p>
               <button
                 type="button"
-                className="mt-4 w-full rounded-lg bg-emerald-500/20 px-3 py-2 text-xs font-semibold text-emerald-300 transition hover:bg-emerald-500/30"
+                className="mt-4 w-full rounded-lg bg-blue-500/20 px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-500/30"
               >
                 View Class Roster
               </button>
         </div>
           ) : (
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-sm text-slate-300">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
               <p className="text-xs uppercase tracking-wide text-slate-500">Upcoming Session</p>
-              <p className="mt-2 text-base font-semibold text-emerald-300">
+              <p className="mt-2 text-base font-semibold text-blue-700">
                 {classes[0].code} — {classes[0].name}
               </p>
               <p className="mt-1 text-xs text-slate-500">{classes[0].schedule}</p>
             </div>
           )}
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-sm text-slate-300">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
             <p className="text-xs uppercase tracking-wide text-slate-500">Preparation Notes</p>
             <p className="mt-2 text-xs">
             Upload revised lecture slides and share reading list with students 48 hours before class.
           </p>
             <button
               type="button"
-              className="mt-3 w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-slate-800"
+              className="mt-3 w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-800"
             >
               Upload Materials
             </button>
@@ -6330,7 +6492,7 @@ function LecturerSchedulingPanel() {
       description="Coordinate teaching times, office hours, and assessment deadlines."
     >
       <div className="space-y-4">
-        <div className="flex gap-2 border-b border-slate-800">
+        <div className="flex gap-2 border-b border-slate-200">
           {(['classes', 'office-hours', 'deadlines'] as const).map((type) => (
             <button
               key={type}
@@ -6338,8 +6500,8 @@ function LecturerSchedulingPanel() {
               onClick={() => setScheduleType(type)}
               className={`px-4 py-2 text-sm font-medium transition ${
                 scheduleType === type
-                  ? 'border-b-2 border-emerald-500 text-emerald-300'
-                  : 'text-slate-400 hover:text-slate-300'
+                  ? 'border-b-2 border-blue-500 text-blue-700'
+                  : 'text-slate-600 hover:text-slate-700'
               }`}
             >
               {type === 'classes' ? 'Classes' : type === 'office-hours' ? 'Office Hours' : 'Deadlines'}
@@ -6349,62 +6511,62 @@ function LecturerSchedulingPanel() {
 
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-slate-200">Scheduled Events</h3>
+            <h3 className="text-sm font-semibold text-slate-800">Scheduled Events</h3>
             {events[scheduleType].map((event, idx) => (
-              <div key={idx} className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-sm">
-                <p className="font-semibold text-emerald-300">{event.title}</p>
-                <p className="mt-1 text-xs text-slate-400">{event.date} • {event.time}</p>
+              <div key={idx} className="rounded-xl border border-slate-200 bg-white p-4 text-sm">
+                <p className="font-semibold text-blue-700">{event.title}</p>
+                <p className="mt-1 text-xs text-slate-600">{event.date} • {event.time}</p>
                 <p className="mt-1 text-xs text-slate-500">{event.location}</p>
               </div>
             ))}
           </div>
 
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-            <h3 className="text-sm font-semibold text-slate-200 mb-3">Add New Event</h3>
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <h3 className="text-sm font-semibold text-slate-800 mb-3">Add New Event</h3>
             <form onSubmit={handleAddEvent} className="space-y-3">
               <div>
-                <label className="block text-xs text-slate-400 mb-1">Title</label>
+                <label className="block text-xs text-slate-600 mb-1">Title</label>
                 <input
                   type="text"
                   value={newEvent.title}
                   onChange={(e) => setNewEvent({ ...newEvent, title: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   placeholder="Event title"
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Date</label>
+                  <label className="block text-xs text-slate-600 mb-1">Date</label>
                   <input
                     type="date"
                     value={newEvent.date}
                     onChange={(e) => setNewEvent({ ...newEvent, date: e.target.value })}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                    className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Time</label>
+                  <label className="block text-xs text-slate-600 mb-1">Time</label>
                   <input
                     type="time"
                     value={newEvent.time}
                     onChange={(e) => setNewEvent({ ...newEvent, time: e.target.value })}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                    className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   />
                 </div>
               </div>
               <div>
-                <label className="block text-xs text-slate-400 mb-1">Location</label>
+                <label className="block text-xs text-slate-600 mb-1">Location</label>
                 <input
                   type="text"
                   value={newEvent.location}
                   onChange={(e) => setNewEvent({ ...newEvent, location: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   placeholder="Location"
                 />
               </div>
               <button
                 type="submit"
-                className="w-full rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-500/30"
+                className="w-full rounded-lg bg-blue-500/20 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-500/30"
               >
                 Schedule Event
               </button>
@@ -6460,11 +6622,11 @@ function LecturerEnterMarksPanel() {
       <div className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <label className="block text-xs text-slate-400 mb-2">Select Class</label>
+            <label className="block text-xs text-slate-600 mb-2">Select Class</label>
             <select
               value={selectedClass}
               onChange={(e) => setSelectedClass(e.target.value)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
             >
               {classes.map((cls) => (
                 <option key={cls.id} value={cls.id}>{cls.name}</option>
@@ -6472,11 +6634,11 @@ function LecturerEnterMarksPanel() {
             </select>
           </div>
           <div>
-            <label className="block text-xs text-slate-400 mb-2">Assessment Type</label>
+            <label className="block text-xs text-slate-600 mb-2">Assessment Type</label>
             <select
               value={assessmentType}
               onChange={(e) => setAssessmentType(e.target.value)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
             >
               <option value="assignment">Assignment</option>
               <option value="test">Test</option>
@@ -6487,16 +6649,16 @@ function LecturerEnterMarksPanel() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 overflow-hidden">
-            <div className="grid grid-cols-12 gap-4 p-4 text-xs font-semibold text-slate-400 border-b border-slate-800">
+          <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+            <div className="grid grid-cols-12 gap-4 p-4 text-xs font-semibold text-slate-600 border-b border-slate-200">
               <div className="col-span-5">Student Name</div>
               <div className="col-span-3">Registration No.</div>
               <div className="col-span-4">Marks (0-100)</div>
             </div>
             {students.map((student) => (
-              <div key={student.id} className="grid grid-cols-12 gap-4 p-4 border-b border-slate-800 last:border-0">
-                <div className="col-span-5 text-sm text-slate-300">{student.name}</div>
-                <div className="col-span-3 text-sm text-slate-400">{student.regNo}</div>
+              <div key={student.id} className="grid grid-cols-12 gap-4 p-4 border-b border-slate-200 last:border-0">
+                <div className="col-span-5 text-sm text-slate-700">{student.name}</div>
+                <div className="col-span-3 text-sm text-slate-600">{student.regNo}</div>
                 <div className="col-span-4">
                   <input
                     type="number"
@@ -6504,7 +6666,7 @@ function LecturerEnterMarksPanel() {
                     max="100"
                     value={marks[student.id] || ''}
                     onChange={(e) => handleMarkChange(student.id, e.target.value)}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                    className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                     placeholder="0-100"
                     required
                   />
@@ -6514,14 +6676,14 @@ function LecturerEnterMarksPanel() {
           </div>
 
           {submitted && (
-            <div className="rounded-lg border border-emerald-500/50 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+            <div className="rounded-lg border border-blue-500/50 bg-blue-500/10 p-3 text-sm text-blue-700">
               Marks submitted successfully! Grade distribution and moderation flags will appear after review.
             </div>
           )}
 
           <button
             type="submit"
-            className="w-full rounded-lg bg-emerald-500/20 px-4 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-500/30"
+            className="w-full rounded-lg bg-blue-500/20 px-4 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-500/30"
           >
             Submit Marks
           </button>
@@ -6581,21 +6743,21 @@ function LecturerSearchStudentPanel() {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                 placeholder={searchType === 'name' ? 'Enter student name...' : 'Enter registration number...'}
               />
             </div>
             <select
               value={searchType}
               onChange={(e) => setSearchType(e.target.value as 'name' | 'regNo')}
-              className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+              className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
             >
               <option value="name">Name</option>
               <option value="regNo">Registration No.</option>
             </select>
             <button
               type="submit"
-              className="rounded-lg bg-emerald-500/20 px-6 py-2 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-500/30"
+              className="rounded-lg bg-blue-500/20 px-6 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-500/30"
             >
               Search
             </button>
@@ -6604,27 +6766,27 @@ function LecturerSearchStudentPanel() {
 
         {searchResults.length > 0 && !selectedStudent && (
           <div className="space-y-2">
-            <p className="text-xs text-slate-400">Found {searchResults.length} result(s)</p>
+            <p className="text-xs text-slate-600">Found {searchResults.length} result(s)</p>
             {searchResults.map((student) => (
               <button
                 key={student.id}
                 type="button"
                 onClick={() => setSelectedStudent(student)}
-                className="w-full rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-left transition hover:border-emerald-500/40 hover:bg-slate-900"
+                className="w-full rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:border-blue-500/40 hover:bg-slate-900"
               >
-                <p className="text-sm font-semibold text-emerald-300">{student.name}</p>
-                <p className="mt-1 text-xs text-slate-400">{student.regNo}</p>
+                <p className="text-sm font-semibold text-blue-700">{student.name}</p>
+                <p className="mt-1 text-xs text-slate-600">{student.regNo}</p>
               </button>
             ))}
           </div>
         )}
 
         {selectedStudent && (
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5 space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4">
             <div className="flex items-start justify-between">
               <div>
-                <h3 className="text-lg font-semibold text-emerald-300">{selectedStudent.name}</h3>
-                <p className="mt-1 text-sm text-slate-400">{selectedStudent.regNo}</p>
+                <h3 className="text-lg font-semibold text-blue-700">{selectedStudent.name}</h3>
+                <p className="mt-1 text-sm text-slate-600">{selectedStudent.regNo}</p>
               </div>
               <button
                 type="button"
@@ -6632,7 +6794,7 @@ function LecturerSearchStudentPanel() {
                   setSelectedStudent(null);
                   setSearchResults([]);
                 }}
-                className="text-slate-500 hover:text-slate-300"
+                className="text-slate-500 hover:text-slate-700"
               >
                 ×
               </button>
@@ -6641,12 +6803,12 @@ function LecturerSearchStudentPanel() {
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-500">Contact Information</p>
-                <p className="mt-2 text-sm text-slate-300">{selectedStudent.email}</p>
-                <p className="mt-1 text-sm text-slate-300">{selectedStudent.phone}</p>
+                <p className="mt-2 text-sm text-slate-700">{selectedStudent.email}</p>
+                <p className="mt-1 text-sm text-slate-700">{selectedStudent.phone}</p>
               </div>
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-500">Academic Performance</p>
-                <p className="mt-2 text-sm font-semibold text-emerald-300">GPA: {selectedStudent.gpa}</p>
+                <p className="mt-2 text-sm font-semibold text-blue-700">GPA: {selectedStudent.gpa}</p>
               </div>
             </div>
 
@@ -6654,7 +6816,7 @@ function LecturerSearchStudentPanel() {
               <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">Enrolled Courses</p>
               <div className="flex flex-wrap gap-2">
                 {selectedStudent.courses.map((course: string) => (
-                  <span key={course} className="rounded-lg bg-slate-800 px-3 py-1 text-xs text-slate-300">
+                  <span key={course} className="rounded-lg bg-slate-800 px-3 py-1 text-xs text-slate-700">
                     {course}
                   </span>
                 ))}
@@ -6664,7 +6826,7 @@ function LecturerSearchStudentPanel() {
         )}
 
         {searchQuery && searchResults.length === 0 && (
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5 text-center text-sm text-slate-400">
+          <div className="rounded-xl border border-slate-200 bg-white p-5 text-center text-sm text-slate-600">
             No students found matching your search.
           </div>
         )}
@@ -6725,14 +6887,14 @@ function LecturerMonthlyReportPanel() {
       <div className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <label className="block text-xs text-slate-400 mb-2">Report Type</label>
+            <label className="block text-xs text-slate-600 mb-2">Report Type</label>
             <select
               value={reportType}
               onChange={(e) => {
                 setReportType(e.target.value as 'attendance' | 'grading' | 'curriculum');
                 setGenerated(false);
               }}
-              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
             >
               <option value="attendance">Attendance Summary</option>
               <option value="grading">Grading Progress</option>
@@ -6740,7 +6902,7 @@ function LecturerMonthlyReportPanel() {
             </select>
           </div>
           <div>
-            <label className="block text-xs text-slate-400 mb-2">Month</label>
+            <label className="block text-xs text-slate-600 mb-2">Month</label>
             <input
               type="month"
               value={month}
@@ -6748,40 +6910,40 @@ function LecturerMonthlyReportPanel() {
                 setMonth(e.target.value);
                 setGenerated(false);
               }}
-              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
             />
           </div>
         </div>
 
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5">
-          <h3 className="text-sm font-semibold text-slate-200 mb-4">{reportData[reportType].title}</h3>
+        <div className="rounded-xl border border-slate-200 bg-white p-5">
+          <h3 className="text-sm font-semibold text-slate-800 mb-4">{reportData[reportType].title}</h3>
           <div className="grid gap-4 sm:grid-cols-3">
             {reportData[reportType].stats.map((stat, idx) => (
-              <div key={idx} className="rounded-lg border border-slate-800 bg-slate-950/60 p-4">
+              <div key={idx} className="rounded-lg border border-slate-200 bg-white p-4">
                 <p className="text-xs uppercase tracking-wide text-slate-500">{stat.label}</p>
-                <p className="mt-2 text-2xl font-semibold text-emerald-300">{stat.value}</p>
+                <p className="mt-2 text-2xl font-semibold text-blue-700">{stat.value}</p>
               </div>
             ))}
           </div>
         </div>
 
         {generated && (
-          <div className="rounded-lg border border-emerald-500/50 bg-emerald-500/10 p-4">
-            <p className="text-sm text-emerald-300 mb-3">
+          <div className="rounded-lg border border-blue-500/50 bg-blue-500/10 p-4">
+            <p className="text-sm text-blue-700 mb-3">
               Report generated for {new Date(month + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
             </p>
             <div className="flex gap-3">
               <button
                 type="button"
                 onClick={handleDownload}
-                className="rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-500/30"
+                className="rounded-lg bg-blue-500/20 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-500/30"
               >
                 Download PDF
               </button>
               <button
                 type="button"
                 onClick={handleDownload}
-                className="rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2 text-sm font-semibold text-slate-300 transition hover:bg-slate-800"
+                className="rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-800"
               >
                 Export Excel
               </button>
@@ -6792,7 +6954,7 @@ function LecturerMonthlyReportPanel() {
         <button
           type="button"
           onClick={handleGenerateReport}
-          className="w-full rounded-lg bg-emerald-500/20 px-4 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-500/30"
+          className="w-full rounded-lg bg-blue-500/20 px-4 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-500/30"
         >
           Generate Report
         </button>
@@ -6847,7 +7009,7 @@ function LecturerAccountSettingsPanel() {
       description="Update your credentials, notification preferences, and recovery information."
     >
       <div className="space-y-4">
-        <div className="flex gap-2 border-b border-slate-800">
+        <div className="flex gap-2 border-b border-slate-200">
           {(['password', 'profile', 'notifications'] as const).map((tab) => (
             <button
               key={tab}
@@ -6858,8 +7020,8 @@ function LecturerAccountSettingsPanel() {
               }}
               className={`px-4 py-2 text-sm font-medium transition ${
                 activeTab === tab
-                  ? 'border-b-2 border-emerald-500 text-emerald-300'
-                  : 'text-slate-400 hover:text-slate-300'
+                  ? 'border-b-2 border-blue-500 text-blue-700'
+                  : 'text-slate-600 hover:text-slate-700'
               }`}
             >
               {tab === 'password' ? 'Password' : tab === 'profile' ? 'Profile' : 'Notifications'}
@@ -6869,42 +7031,42 @@ function LecturerAccountSettingsPanel() {
 
         {activeTab === 'password' && (
           <form onSubmit={handlePasswordChange} className="space-y-4">
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5 space-y-4">
+            <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4">
               <div>
-                <label className="block text-xs text-slate-400 mb-2">Current Password</label>
+                <label className="block text-xs text-slate-600 mb-2">Current Password</label>
                 <input
                   type="password"
                   value={passwordForm.current}
                   onChange={(e) => setPasswordForm({ ...passwordForm, current: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   required
                 />
               </div>
               <div>
-                <label className="block text-xs text-slate-400 mb-2">New Password</label>
+                <label className="block text-xs text-slate-600 mb-2">New Password</label>
                 <input
                   type="password"
                   value={passwordForm.new}
                   onChange={(e) => setPasswordForm({ ...passwordForm, new: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   required
                   minLength={6}
                 />
               </div>
               <div>
-                <label className="block text-xs text-slate-400 mb-2">Confirm New Password</label>
+                <label className="block text-xs text-slate-600 mb-2">Confirm New Password</label>
                 <input
                   type="password"
                   value={passwordForm.confirm}
                   onChange={(e) => setPasswordForm({ ...passwordForm, confirm: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   required
                 />
               </div>
             </div>
             <button
               type="submit"
-              className="w-full rounded-lg bg-emerald-500/20 px-4 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-500/30"
+              className="w-full rounded-lg bg-blue-500/20 px-4 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-500/30"
             >
               Change Password
             </button>
@@ -6913,36 +7075,36 @@ function LecturerAccountSettingsPanel() {
 
         {activeTab === 'profile' && (
           <form onSubmit={handleProfileSave} className="space-y-4">
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5 space-y-4">
+            <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4">
               <div>
-                <label className="block text-xs text-slate-400 mb-2">Email Address</label>
+                <label className="block text-xs text-slate-600 mb-2">Email Address</label>
                 <input
                   type="email"
                   value={profileForm.email}
                   onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   required
                 />
               </div>
               <div>
-                <label className="block text-xs text-slate-400 mb-2">Phone Number</label>
+                <label className="block text-xs text-slate-600 mb-2">Phone Number</label>
                 <input
                   type="tel"
                   value={profileForm.phone}
                   onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   required
                 />
               </div>
             </div>
             {saved && (
-              <div className="rounded-lg border border-emerald-500/50 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+              <div className="rounded-lg border border-blue-500/50 bg-blue-500/10 p-3 text-sm text-blue-700">
                 Profile updated successfully!
               </div>
             )}
             <button
               type="submit"
-              className="w-full rounded-lg bg-emerald-500/20 px-4 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-500/30"
+              className="w-full rounded-lg bg-blue-500/20 px-4 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-500/30"
             >
               Save Changes
             </button>
@@ -6951,14 +7113,14 @@ function LecturerAccountSettingsPanel() {
 
         {activeTab === 'notifications' && (
           <div className="space-y-4">
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-5 space-y-4">
+            <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4">
               {Object.entries(notifications).map(([key, value]) => (
                 <div key={key} className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-slate-200">
+                    <p className="text-sm font-medium text-slate-800">
                       {key === 'email' ? 'Email Notifications' : key === 'sms' ? 'SMS Notifications' : key === 'deadlineReminders' ? 'Deadline Reminders' : 'Grade Updates'}
                     </p>
-                    <p className="mt-1 text-xs text-slate-400">
+                    <p className="mt-1 text-xs text-slate-600">
                       {key === 'email' ? 'Receive updates via email' : key === 'sms' ? 'Receive updates via SMS' : key === 'deadlineReminders' ? 'Get notified about upcoming deadlines' : 'Get notified when grades are updated'}
                     </p>
                   </div>
@@ -6966,7 +7128,7 @@ function LecturerAccountSettingsPanel() {
                     type="button"
                     onClick={() => handleNotificationToggle(key as keyof typeof notifications)}
                     className={`relative inline-flex h-6 w-11 items-center rounded-full transition ${
-                      value ? 'bg-emerald-500' : 'bg-slate-700'
+                      value ? 'bg-blue-500' : 'bg-slate-700'
                     }`}
                   >
                     <span
@@ -6979,7 +7141,7 @@ function LecturerAccountSettingsPanel() {
               ))}
             </div>
             {saved && (
-              <div className="rounded-lg border border-emerald-500/50 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+              <div className="rounded-lg border border-blue-500/50 bg-blue-500/10 p-3 text-sm text-blue-700">
                 Notification preferences saved!
               </div>
             )}
@@ -7055,26 +7217,26 @@ function LoginPortal({
       )}
       
       {showLecturerOnly && (
-        <div className="rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-900/90 to-slate-950/90 p-8 shadow-xl">
+        <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-900/90 to-slate-950/90 p-8 shadow-xl">
           <div className="mb-6">
             <div className="mb-4 flex items-center gap-3">
-              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-500/20">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-500/20">
                 <span className="text-2xl">🎓</span>
               </div>
               <div>
-                <h3 className="text-lg font-bold text-slate-100">
+                <h3 className="text-lg font-bold text-slate-900">
                   Lecturer Account
                 </h3>
-                <p className="text-xs text-slate-400">Teaching Staff</p>
+                <p className="text-xs text-slate-600">Teaching Staff</p>
               </div>
             </div>
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-slate-600">
               Access your personal teaching dashboard and role-specific workflows.
             </p>
           </div>
           <form onSubmit={handleLecturerSubmit} className="space-y-4">
             <div>
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">
+              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                 Select Lecturer
               </label>
               <select
@@ -7083,7 +7245,7 @@ function LoginPortal({
                   setSelectedLecturer(event.target.value);
                   onClearError();
                 }}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-100 transition focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
               >
                 <option value="">Choose a lecturer...</option>
                 {lecturers.map((user: User) => (
@@ -7094,7 +7256,7 @@ function LoginPortal({
               </select>
             </div>
             <div>
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">
+              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                 Password
               </label>
               <input
@@ -7105,44 +7267,44 @@ function LoginPortal({
                   onClearError();
                 }}
                 placeholder="Enter your password"
-                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 transition focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
               />
             </div>
             <button
               type="submit"
               disabled={!selectedLecturer || !lecturerPassword.trim()}
-              className="w-full rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-700 px-6 py-3 text-sm font-bold text-white shadow-lg transition hover:from-emerald-500 hover:to-emerald-600 hover:shadow-xl disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:from-emerald-600 disabled:hover:to-emerald-700"
+              className="w-full rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-700 px-6 py-3 text-sm font-bold text-white shadow-lg transition hover:from-blue-500 hover:to-emerald-600 hover:shadow-xl disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:from-emerald-600 disabled:hover:to-emerald-700"
             >
               Sign In as Lecturer
             </button>
             <p className="text-center text-xs text-slate-500">
-              Default password: <span className="font-mono text-slate-400">{DEFAULT_PASSWORD}</span>
+              Default password: <span className="font-mono text-slate-600">{DEFAULT_PASSWORD}</span>
             </p>
           </form>
         </div>
       )}
 
       {showAdminOnly && (
-        <div className="rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-900/90 to-slate-950/90 p-8 shadow-xl">
+        <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-900/90 to-slate-950/90 p-8 shadow-xl">
           <div className="mb-6">
             <div className="mb-4 flex items-center gap-3">
-              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-purple-500/20">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-500/20">
                 <span className="text-2xl">👤</span>
               </div>
               <div>
-                <h3 className="text-lg font-bold text-slate-100">
+                <h3 className="text-lg font-bold text-slate-900">
                   Admin Account
                 </h3>
-                <p className="text-xs text-slate-400">System Administrator</p>
+                <p className="text-xs text-slate-600">System Administrator</p>
               </div>
             </div>
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-slate-600">
               Access administrative controls to manage staff accounts and system settings.
             </p>
           </div>
           <form onSubmit={handleAdminSubmit} className="space-y-4">
             <div>
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">
+              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                 Select Admin
               </label>
               <select
@@ -7151,7 +7313,7 @@ function LoginPortal({
                   setSelectedAdmin(event.target.value);
                   onClearError();
                 }}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-100 transition focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
               >
                 <option value="">Choose an administrator...</option>
                 {admins.map((user: User) => (
@@ -7162,7 +7324,7 @@ function LoginPortal({
               </select>
             </div>
             <div>
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">
+              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                 Password
               </label>
               <input
@@ -7173,7 +7335,7 @@ function LoginPortal({
                   onClearError();
                 }}
                 placeholder="Enter your password"
-                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 transition focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
               />
             </div>
             <button
@@ -7184,7 +7346,7 @@ function LoginPortal({
               Sign In as Admin
             </button>
             <p className="text-center text-xs text-slate-500">
-              Default password: <span className="font-mono text-slate-400">{DEFAULT_PASSWORD}</span>
+              Default password: <span className="font-mono text-slate-600">{DEFAULT_PASSWORD}</span>
             </p>
           </form>
         </div>
@@ -7193,26 +7355,26 @@ function LoginPortal({
       {!showLecturerOnly && !showAdminOnly && (
         <div className="grid gap-8 lg:grid-cols-2">
           {/* Admin Login Form */}
-          <div className="rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-900/90 to-slate-950/90 p-8 shadow-xl">
+          <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-900/90 to-slate-950/90 p-8 shadow-xl">
             <div className="mb-6">
               <div className="mb-4 flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-purple-500/20">
+                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-500/20">
                   <span className="text-2xl">👤</span>
                 </div>
                 <div>
-                  <h3 className="text-lg font-bold text-slate-100">
+                  <h3 className="text-lg font-bold text-slate-900">
                     Admin Account
                   </h3>
-                  <p className="text-xs text-slate-400">System Administrator</p>
+                  <p className="text-xs text-slate-600">System Administrator</p>
                 </div>
               </div>
-              <p className="text-sm text-slate-400">
+              <p className="text-sm text-slate-600">
                 Access administrative controls to manage staff accounts and system settings.
               </p>
             </div>
             <form onSubmit={handleAdminSubmit} className="space-y-4">
               <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">
+                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                   Select Admin
                 </label>
                 <select
@@ -7221,7 +7383,7 @@ function LoginPortal({
                     setSelectedAdmin(event.target.value);
                     onClearError();
                   }}
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-100 transition focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
                 >
                   <option value="">Choose an administrator...</option>
                   {admins.map((user: User) => (
@@ -7232,7 +7394,7 @@ function LoginPortal({
                 </select>
               </div>
               <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">
+                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                   Password
                 </label>
                 <input
@@ -7243,7 +7405,7 @@ function LoginPortal({
                     onClearError();
                   }}
                   placeholder="Enter your password"
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 transition focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
                 />
               </div>
               <button
@@ -7254,32 +7416,32 @@ function LoginPortal({
                 Sign In as Admin
               </button>
               <p className="text-center text-xs text-slate-500">
-                Default password: <span className="font-mono text-slate-400">{DEFAULT_PASSWORD}</span>
+                Default password: <span className="font-mono text-slate-600">{DEFAULT_PASSWORD}</span>
               </p>
             </form>
           </div>
 
           {/* Lecturer Login Form */}
-          <div className="rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-900/90 to-slate-950/90 p-8 shadow-xl">
+          <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-900/90 to-slate-950/90 p-8 shadow-xl">
             <div className="mb-6">
               <div className="mb-4 flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-500/20">
+                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-500/20">
                   <span className="text-2xl">🎓</span>
                 </div>
                 <div>
-                  <h3 className="text-lg font-bold text-slate-100">
+                  <h3 className="text-lg font-bold text-slate-900">
                     Lecturer Account
                   </h3>
-                  <p className="text-xs text-slate-400">Teaching Staff</p>
+                  <p className="text-xs text-slate-600">Teaching Staff</p>
                 </div>
               </div>
-              <p className="text-sm text-slate-400">
+              <p className="text-sm text-slate-600">
                 Access your personal teaching dashboard and role-specific workflows.
               </p>
             </div>
             <form onSubmit={handleLecturerSubmit} className="space-y-4">
               <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">
+                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                   Select Lecturer
                 </label>
                 <select
@@ -7288,7 +7450,7 @@ function LoginPortal({
                     setSelectedLecturer(event.target.value);
                     onClearError();
                   }}
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-100 transition focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
                 >
                   <option value="">Choose a lecturer...</option>
                   {lecturers.map((user: User) => (
@@ -7299,7 +7461,7 @@ function LoginPortal({
                 </select>
               </div>
               <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">
+                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                   Password
                 </label>
                 <input
@@ -7310,18 +7472,18 @@ function LoginPortal({
                     onClearError();
                   }}
                   placeholder="Enter your password"
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 transition focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
                 />
               </div>
               <button
                 type="submit"
                 disabled={!selectedLecturer || !lecturerPassword.trim()}
-                className="w-full rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-700 px-6 py-3 text-sm font-bold text-white shadow-lg transition hover:from-emerald-500 hover:to-emerald-600 hover:shadow-xl disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:from-emerald-600 disabled:hover:to-emerald-700"
+                className="w-full rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-700 px-6 py-3 text-sm font-bold text-white shadow-lg transition hover:from-blue-500 hover:to-emerald-600 hover:shadow-xl disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:from-emerald-600 disabled:hover:to-emerald-700"
               >
                 Sign In as Lecturer
               </button>
               <p className="text-center text-xs text-slate-500">
-                Default password: <span className="font-mono text-slate-400">{DEFAULT_PASSWORD}</span>
+                Default password: <span className="font-mono text-slate-600">{DEFAULT_PASSWORD}</span>
               </p>
             </form>
           </div>
@@ -7400,35 +7562,35 @@ function WorkflowOrchestration({
               label="Submit Paper Draft"
               description="Setter sends paper to Team Lead with auto copy to Chief Examiner."
               onClick={onSetterSubmit}
-              tone="emerald"
+              tone="blue"
             />
             <ActionButton
               disabled={!canTeamLeadCompile}
               label="Compile & Forward"
               description="Team Lead merges submissions and pushes to vetters."
               onClick={onTeamLeadCompile}
-              tone="indigo"
+              tone="blue"
             />
             <ActionButton
               disabled={!canSanitize}
               label="Sanitize & Forward"
               description="Chief Examiner removes footprints and sends for revision."
               onClick={onSanitizeAndForward}
-              tone="emerald"
+              tone="blue"
             />
             <ActionButton
               disabled={!canConfirmRevision}
               label="Confirm Revisions Integrated"
               description="Team Lead confirms revisions and notifies Chief Examiner."
               onClick={onRevisionIntegrated}
-              tone="indigo"
+              tone="blue"
             />
             <ActionButton
               disabled={!canOpenApprovalPortal}
               label="Open Approval Portal"
               description="Chief Examiner reviews final packet before decision."
               onClick={onOpenApprovalPortal}
-              tone="emerald"
+              tone="blue"
             />
             <ActionButton
               disabled={!canRestart}
@@ -7439,8 +7601,8 @@ function WorkflowOrchestration({
             />
           </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-            <h3 className="text-sm font-semibold text-slate-200">
+          <div className="rounded-2xl border border-slate-200 bg-white p-5">
+            <h3 className="text-sm font-semibold text-slate-800">
               Final Approval Portal
             </h3>
             <p className="mt-2 text-xs text-slate-500">
@@ -7451,7 +7613,7 @@ function WorkflowOrchestration({
               value={approvalNotes}
               onChange={(event) => setApprovalNotes(event.target.value)}
               placeholder="Decision notes (optional)"
-              className="mt-3 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60"
+              className="mt-3 w-full rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60"
               disabled={!canDrawDecision}
             />
             <div className="mt-3 flex flex-wrap gap-3">
@@ -7462,7 +7624,7 @@ function WorkflowOrchestration({
                   onApprove(approvalNotes);
                   setApprovalNotes('');
                 }}
-                className="rounded-xl bg-emerald-500/90 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-emerald-500/40 disabled:text-emerald-900"
+                className="rounded-xl bg-blue-500/90 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-blue-500/40 disabled:text-emerald-900"
               >
                 Approve for Printing
               </button>
@@ -7479,8 +7641,8 @@ function WorkflowOrchestration({
               </button>
             </div>
             {lastDecision ? (
-              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/80 p-3 text-xs text-slate-400">
-                <p className="font-semibold uppercase tracking-wide text-slate-300">
+              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-900/80 p-3 text-xs text-slate-600">
+                <p className="font-semibold uppercase tracking-wide text-slate-700">
                   Last Decision — {lastDecision.type}
                 </p>
                 <p className="mt-1">
@@ -7490,7 +7652,7 @@ function WorkflowOrchestration({
                   </span>
                 </p>
                 {lastDecision.notes ? (
-                  <p className="mt-1 text-slate-300">
+                  <p className="mt-1 text-slate-700">
                     “{lastDecision.notes}”
                   </p>
                 ) : null}
@@ -7500,8 +7662,8 @@ function WorkflowOrchestration({
         </div>
 
         <div className="space-y-5">
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
-            <h3 className="text-sm font-semibold text-slate-200">
+          <div className="rounded-2xl border border-slate-200 bg-white p-4">
+            <h3 className="text-sm font-semibold text-slate-800">
               Version History Ledger
             </h3>
             <p className="mt-1 text-xs text-slate-500">
@@ -7511,15 +7673,15 @@ function WorkflowOrchestration({
               {versionHistory.map((entry) => (
                 <li
                   key={entry.id}
-                  className="rounded-xl border border-slate-800 bg-slate-900/70 p-3"
+                  className="rounded-xl border border-slate-200 bg-white p-3"
                 >
-                  <div className="flex items-center justify-between text-xs text-slate-400">
-                    <span className="font-semibold text-emerald-300">
+                  <div className="flex items-center justify-between text-xs text-slate-600">
+                    <span className="font-semibold text-blue-700">
                       {entry.versionLabel}
                     </span>
                     <span>{formatTimestamp(entry.timestamp)}</span>
                   </div>
-                  <p className="mt-1 text-sm text-slate-100">{entry.notes}</p>
+                  <p className="mt-1 text-sm text-slate-900">{entry.notes}</p>
                   <p className="mt-1 text-xs text-slate-500">
                     Owner: {entry.actor}
                   </p>
@@ -7528,8 +7690,8 @@ function WorkflowOrchestration({
             </ul>
           </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
-            <h3 className="text-sm font-semibold text-slate-200">
+          <div className="rounded-2xl border border-slate-200 bg-white p-4">
+            <h3 className="text-sm font-semibold text-slate-800">
               Annotation Snapshot
             </h3>
             <p className="mt-1 text-xs text-slate-500">
@@ -7541,13 +7703,13 @@ function WorkflowOrchestration({
               {annotations.slice(0, 4).map((annotation) => (
                 <li
                   key={annotation.id}
-                  className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-xs text-slate-300"
+                  className="rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-700"
                 >
-                  <p className="text-sm text-slate-100">
+                  <p className="text-sm text-slate-900">
                     “{annotation.comment}”
                   </p>
                   <div className="mt-2 flex items-center justify-between">
-                    <span className="font-semibold text-emerald-300">
+                    <span className="font-semibold text-blue-700">
                       {annotation.author}
                     </span>
                     <span className="text-slate-500">
@@ -7566,8 +7728,8 @@ function WorkflowOrchestration({
         </div>
       </div>
 
-      <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-        <h3 className="text-sm font-semibold text-slate-200">Timeline Audit</h3>
+      <div className="rounded-2xl border border-slate-200 bg-white p-5">
+        <h3 className="text-sm font-semibold text-slate-800">Timeline Audit</h3>
         <p className="mt-1 text-xs text-slate-500">
           Full audit trail of how the paper progressed across the moderation
           lifecycle.
@@ -7576,11 +7738,11 @@ function WorkflowOrchestration({
           {workflow.timeline.map((event) => (
             <li
               key={event.id}
-              className="flex flex-col gap-1 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm text-slate-200 sm:flex-row sm:items-center sm:justify-between"
+              className="flex flex-col gap-1 rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-800 sm:flex-row sm:items-center sm:justify-between"
             >
               <div>
-                <p className="font-semibold text-emerald-300">{event.actor}</p>
-                <p className="text-slate-300">{event.message}</p>
+                <p className="font-semibold text-blue-700">{event.actor}</p>
+                <p className="text-slate-700">{event.message}</p>
                 <p className="text-xs uppercase tracking-wide text-slate-500">
                   {event.stage}
                 </p>
@@ -7601,17 +7763,17 @@ interface ActionButtonProps {
   description: string;
   onClick: () => void;
   disabled?: boolean;
-  tone?: 'emerald' | 'indigo' | 'amber';
+  tone?: 'blue' | 'red' | 'amber';
 }
 
 const toneButtonClasses: Record<
   NonNullable<ActionButtonProps['tone']>,
   string
 > = {
-  emerald:
-    'bg-emerald-500/90 text-emerald-950 hover:bg-emerald-400 disabled:bg-emerald-500/30 disabled:text-emerald-900',
-  indigo:
-    'bg-indigo-500/90 text-indigo-950 hover:bg-indigo-400 disabled:bg-indigo-500/30 disabled:text-indigo-900',
+  blue:
+    'bg-blue-500/90 text-blue-950 hover:bg-blue-400 disabled:bg-blue-500/30 disabled:text-blue-900',
+  red:
+    'bg-red-500/90 text-red-950 hover:bg-red-400 disabled:bg-red-500/30 disabled:text-red-900',
   amber:
     'bg-amber-400/90 text-amber-950 hover:bg-amber-300 disabled:bg-amber-500/30 disabled:text-amber-900',
 };
@@ -7621,17 +7783,17 @@ function ActionButton({
   description,
   onClick,
   disabled = false,
-  tone = 'emerald',
+  tone = 'blue',
 }: ActionButtonProps) {
   return (
     <button
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className={`rounded-2xl border border-slate-800 bg-slate-950/50 p-4 text-left transition ${
+      className={`rounded-2xl border border-slate-200 bg-slate-950/50 p-4 text-left transition ${
         disabled
           ? 'opacity-60'
-          : 'hover:border-emerald-500/40 hover:bg-slate-900'
+          : 'hover:border-blue-500/40 hover:bg-slate-900'
       }`}
     >
       <span
@@ -7639,7 +7801,7 @@ function ActionButton({
       >
         {label}
       </span>
-      <p className="mt-3 text-sm text-slate-300">{description}</p>
+      <p className="mt-3 text-sm text-slate-700">{description}</p>
     </button>
   );
 }
@@ -7718,9 +7880,9 @@ function VettingAndAnnotations({
       description="Enforce safe browser rules, coordinate real-time annotation, and cross-reference moderation checklists."
       actions={
         vettingSession.active && vettingCountdown ? (
-          <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-center text-sm font-semibold text-emerald-300">
+          <div className="rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-center text-sm font-semibold text-blue-700">
             Session Countdown
-            <div className="mt-1 text-2xl tracking-widest text-emerald-200">
+            <div className="mt-1 text-2xl tracking-widest text-blue-800">
               {vettingCountdown}
             </div>
           </div>
@@ -7735,8 +7897,8 @@ function VettingAndAnnotations({
     >
       <div className="grid gap-5 lg:grid-cols-[2fr_1fr]">
         <div className="space-y-5">
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-            <h3 className="text-sm font-semibold text-slate-200">
+          <div className="rounded-2xl border border-slate-200 bg-white p-5">
+            <h3 className="text-sm font-semibold text-slate-800">
               Safe Browser Controls
             </h3>
             <p className="mt-1 text-xs text-slate-500">
@@ -7748,7 +7910,7 @@ function VettingAndAnnotations({
                   key={item.label}
                   label={item.label}
                   active={item.active}
-                  tone={item.active ? 'emerald' : 'amber'}
+                  tone={item.active ? 'blue' : 'amber'}
                 />
               ))}
             </div>
@@ -7757,7 +7919,7 @@ function VettingAndAnnotations({
               <div>
                 <label
                   htmlFor="session-minutes"
-                  className="text-xs font-semibold uppercase tracking-wide text-slate-400"
+                  className="text-xs font-semibold uppercase tracking-wide text-slate-600"
                 >
                   Session Duration (minutes)
                 </label>
@@ -7770,7 +7932,7 @@ function VettingAndAnnotations({
                   onChange={(event) =>
                     setDuration(Number.parseInt(event.target.value, 10))
                   }
-                  className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
                 />
               </div>
               <div className="flex items-end gap-3">
@@ -7778,7 +7940,7 @@ function VettingAndAnnotations({
                   type="button"
                   onClick={() => onStartVetting(duration)}
                   disabled={!canStartSession}
-                  className="flex-1 rounded-xl bg-emerald-500/90 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-emerald-500/40 disabled:text-emerald-900"
+                  className="flex-1 rounded-xl bg-blue-500/90 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-blue-500/40 disabled:text-emerald-900"
                 >
                   Start Safe Session
                 </button>
@@ -7793,7 +7955,7 @@ function VettingAndAnnotations({
               </div>
             </div>
 
-            <ul className="mt-4 space-y-2 text-sm text-slate-300">
+            <ul className="mt-4 space-y-2 text-sm text-slate-700">
               {safeBrowserPolicies.map((policy) => (
                 <li key={policy} className="flex items-start gap-2">
                   <span className="mt-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
@@ -7803,8 +7965,8 @@ function VettingAndAnnotations({
             </ul>
           </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-            <h3 className="text-sm font-semibold text-slate-200">
+          <div className="rounded-2xl border border-slate-200 bg-white p-5">
+            <h3 className="text-sm font-semibold text-slate-800">
               Real-Time Digital Annotation
             </h3>
             <p className="mt-1 text-xs text-slate-500">
@@ -7818,13 +7980,13 @@ function VettingAndAnnotations({
                 value={annotationDraft}
                 onChange={(event) => setAnnotationDraft(event.target.value)}
                 placeholder="Add annotation (Bloom’s taxonomy reference, etc.)"
-                className="flex-1 rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60"
+                className="flex-1 rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60"
                 disabled={!vettingSession.active}
               />
               <button
                 type="submit"
                 disabled={!vettingSession.active}
-                className="rounded-xl bg-indigo-500/90 px-4 py-2 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-indigo-500/40 disabled:text-indigo-900"
+                className="rounded-xl bg-blue-500/90 px-4 py-2 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-blue-500/40 disabled:text-indigo-900"
               >
                 Publish Comment
               </button>
@@ -7839,13 +8001,13 @@ function VettingAndAnnotations({
                 annotations.map((annotation) => (
                   <div
                     key={annotation.id}
-                    className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-xs text-slate-300"
+                    className="rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-700"
                   >
-                    <p className="text-sm text-slate-100">
+                    <p className="text-sm text-slate-900">
                       “{annotation.comment}”
                     </p>
                     <div className="mt-2 flex items-center justify-between">
-                      <span className="font-semibold text-emerald-300">
+                      <span className="font-semibold text-blue-700">
                         {annotation.author}
                       </span>
                       <span className="text-slate-500">
@@ -7860,11 +8022,11 @@ function VettingAndAnnotations({
         </div>
 
         <div className="space-y-5">
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-            <h3 className="text-sm font-semibold text-slate-200">
+          <div className="rounded-2xl border border-slate-200 bg-white p-5">
+            <h3 className="text-sm font-semibold text-slate-800">
               Moderation Checklist — Course Outline
             </h3>
-            <ul className="mt-2 space-y-2 text-sm text-slate-300">
+            <ul className="mt-2 space-y-2 text-sm text-slate-700">
               {digitalChecklist.courseOutline.map((item) => (
                 <li key={item} className="flex items-start gap-2">
                   <span className="mt-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
@@ -7873,11 +8035,11 @@ function VettingAndAnnotations({
               ))}
             </ul>
           </div>
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-            <h3 className="text-sm font-semibold text-slate-200">
+          <div className="rounded-2xl border border-slate-200 bg-white p-5">
+            <h3 className="text-sm font-semibold text-slate-800">
               Bloom’s Taxonomy Coverage
             </h3>
-            <ul className="mt-2 space-y-2 text-sm text-slate-300">
+            <ul className="mt-2 space-y-2 text-sm text-slate-700">
               {digitalChecklist.bloomsTaxonomy.map((item) => (
                 <li key={item} className="flex items-start gap-2">
                   <span className="mt-1 h-1.5 w-1.5 rounded-full bg-indigo-400" />
@@ -7886,11 +8048,11 @@ function VettingAndAnnotations({
               ))}
             </ul>
           </div>
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-            <h3 className="text-sm font-semibold text-slate-200">
+          <div className="rounded-2xl border border-slate-200 bg-white p-5">
+            <h3 className="text-sm font-semibold text-slate-800">
               Compliance Checklist
             </h3>
-            <ul className="mt-2 space-y-2 text-sm text-slate-300">
+            <ul className="mt-2 space-y-2 text-sm text-slate-700">
               {digitalChecklist.compliance.map((item) => (
                 <li key={item} className="flex items-start gap-2">
                   <span className="mt-1 h-1.5 w-1.5 rounded-full bg-amber-400" />
@@ -7926,15 +8088,15 @@ function DigitalDestructionPanel({
         lastDecision ? (
           <StatusPill
             label={`Last Decision: ${lastDecision.type}`}
-            tone={lastDecision.type === 'Approved' ? 'emerald' : 'amber'}
+            tone={lastDecision.type === 'Approved' ? 'blue' : 'amber'}
           />
         ) : (
           <StatusPill label="Awaiting Decision" tone="slate" active={false} />
         )
       }
     >
-      <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-        <h3 className="text-sm font-semibold text-slate-200">
+      <div className="rounded-2xl border border-slate-200 bg-white p-5">
+        <h3 className="text-sm font-semibold text-slate-800">
           Secure Destruction Ledger
         </h3>
         <p className="mt-2 text-xs text-slate-500">
@@ -7942,24 +8104,24 @@ function DigitalDestructionPanel({
           notes.
         </p>
         {destructionLog.length === 0 ? (
-          <p className="mt-4 text-sm text-slate-400">
+          <p className="mt-4 text-sm text-slate-600">
             No destruction events logged yet. Rejecting a paper will add secure
             entries here.
           </p>
         ) : (
-          <ul className="mt-4 space-y-3 text-sm text-slate-300">
+          <ul className="mt-4 space-y-3 text-sm text-slate-700">
             {destructionLog.map((entry) => (
               <li
                 key={entry.id}
                 className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4"
               >
-                <div className="flex items-center justify-between text-xs text-slate-400">
+                <div className="flex items-center justify-between text-xs text-slate-600">
                   <span className="font-semibold text-rose-200">
                     {entry.versionLabel}
                   </span>
                   <span>{formatTimestamp(entry.timestamp)}</span>
                 </div>
-                <p className="mt-2 text-sm text-slate-100">{entry.details}</p>
+                <p className="mt-2 text-sm text-slate-900">{entry.details}</p>
               </li>
             ))}
           </ul>
