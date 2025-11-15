@@ -181,6 +181,13 @@ export interface PrivilegeElevation {
   granted_at: string;
   revoked_at?: string;
   is_active: boolean;
+  metadata?: {
+    faculty?: string;
+    department?: string;
+    course?: string;
+    semester?: string;
+    year?: string;
+  } | Record<string, any>;
 }
 
 

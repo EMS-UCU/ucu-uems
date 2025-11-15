@@ -4,12 +4,19 @@ import type { PrivilegeElevation } from './supabase';
 // Elevate a lecturer to Chief Examiner (Super Admin only)
 export async function elevateToChiefExaminer(
   lecturerId: string,
-  elevatedBy: string
+  elevatedBy: string,
+  assignmentDetails?: {
+    faculty?: string;
+    department?: string;
+    course?: string;
+    semester?: string;
+    year?: string;
+  }
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Get current user roles
+    // Get current user roles - using user_profiles instead of users
     const { data: user, error: userError } = await supabase
-      .from('users')
+      .from('user_profiles')
       .select('roles')
       .eq('id', lecturerId)
       .single();
@@ -26,9 +33,9 @@ export async function elevateToChiefExaminer(
     // Add Chief Examiner role
     const updatedRoles = [...currentRoles, 'Chief Examiner'];
 
-    // Update user roles
+    // Update user roles - using user_profiles instead of users
     const { error: updateError } = await supabase
-      .from('users')
+      .from('user_profiles')
       .update({ roles: updatedRoles })
       .eq('id', lecturerId);
 
@@ -36,7 +43,7 @@ export async function elevateToChiefExaminer(
       return { success: false, error: updateError.message };
     }
 
-    // Record privilege elevation
+    // Record privilege elevation with assignment details in metadata
     await supabase
       .from('privilege_elevations')
       .insert({
@@ -44,6 +51,13 @@ export async function elevateToChiefExaminer(
         elevated_by: elevatedBy,
         role_granted: 'Chief Examiner',
         is_active: true,
+        metadata: assignmentDetails ? {
+          faculty: assignmentDetails.faculty,
+          department: assignmentDetails.department,
+          course: assignmentDetails.course,
+          semester: assignmentDetails.semester,
+          year: assignmentDetails.year,
+        } : null,
       });
 
     return { success: true };
@@ -59,9 +73,9 @@ export async function appointRole(
   appointedBy: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Get current user roles
+    // Get current user roles - using user_profiles instead of users
     const { data: user, error: userError } = await supabase
-      .from('users')
+      .from('user_profiles')
       .select('roles')
       .eq('id', userId)
       .single();
@@ -78,9 +92,9 @@ export async function appointRole(
     // Add the role
     const updatedRoles = [...currentRoles, role];
 
-    // Update user roles
+    // Update user roles - using user_profiles instead of users
     const { error: updateError } = await supabase
-      .from('users')
+      .from('user_profiles')
       .update({ roles: updatedRoles })
       .eq('id', userId);
 
@@ -111,9 +125,9 @@ export async function revokeRole(
   revokedBy: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Get current user roles
+    // Get current user roles - using user_profiles instead of users
     const { data: user, error: userError } = await supabase
-      .from('users')
+      .from('user_profiles')
       .select('roles')
       .eq('id', userId)
       .single();
@@ -130,9 +144,9 @@ export async function revokeRole(
     // Remove the role (but keep base role)
     const updatedRoles = currentRoles.filter((r) => r !== role);
 
-    // Update user roles
+    // Update user roles - using user_profiles instead of users
     const { error: updateError } = await supabase
-      .from('users')
+      .from('user_profiles')
       .update({ roles: updatedRoles })
       .eq('id', userId);
 
