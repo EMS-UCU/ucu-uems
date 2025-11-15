@@ -6,6 +6,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from 'react';
+import { motion } from 'framer-motion';
 import HomePage from './HomePage';
 import { authenticateUser, getAllUsers } from './lib/auth';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
@@ -1497,7 +1498,7 @@ function App() {
   const adminDashboard: PanelConfig | null = isAuthenticated && isAdmin
     ? {
         id: 'overview',
-        label: 'Dashboard Overview',
+        label: 'Dashboard',
         visible: true,
         render: () => {
           const handleNavigate = (panelId: string) => {
@@ -1773,7 +1774,7 @@ function App() {
   const workflowDashboard: PanelConfig | null = isAuthenticated && !isAdmin && !isPureLecturer
     ? {
         id: 'overview',
-        label: 'Dashboard Overview',
+        label: 'Dashboard',
         visible: true,
         render: () => {
           const recentTimeline = workflow.timeline.slice(0, 5);
@@ -1913,102 +1914,18 @@ function App() {
     : null;
 
   // Lecturer Dashboard
-  const lecturerDashboard: PanelConfig | null = isAuthenticated && isPureLecturer
+  const lecturerDashboard: PanelConfig | null = isAuthenticated && isPureLecturer && currentUser
     ? {
         id: 'overview',
-        label: 'Dashboard Overview',
+        label: 'Dashboard',
         visible: true,
-        render: () => {
-          const academicMetrics = {
-            classesThisWeek: 6,
-            studentsEngaged: 180,
-            assignmentsPending: 3,
-            consultationsScheduled: 5,
-          };
-
-          const teachingPriorities = [
-            'Finalize lecture content for upcoming sessions.',
-            'Update attendance records and share feedback with students.',
-            'Coordinate study groups and office-hour consultations.',
-          ];
-          const facultyAnnouncements = [
-            'Faculty seminar on innovative assessment strategies — Friday at 2:00 PM.',
-            'Upload continuous assessment marks by the 15th of this month.',
-            'Submit teaching reflections for the mid-semester review.',
-          ];
-
-          return (
-            <div className="space-y-6">
-              {/* Dashboard Label */}
-              <div className="flex items-center justify-between rounded-xl border-2 border-red-600 bg-gradient-to-r from-red-50 to-pink-50 p-4 shadow-md">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-red-600 text-white">
-                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                    </svg>
-                  </div>
-                  <div>
-                    <h1 className="text-xl font-bold text-red-900">Lecturer Dashboard</h1>
-                    <p className="text-sm text-slate-600">Teaching & Academic Management</p>
-                  </div>
-                </div>
-                <div className="rounded-full bg-red-600 px-3 py-1 text-xs font-semibold text-white">
-                  LECTURER
-                </div>
-              </div>
-
-              <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <DashboardStat
-                  label="Classes This Week"
-                  value={`${academicMetrics.classesThisWeek}`}
-                  tone="blue"
-                />
-                <DashboardStat
-                  label="Students Engaged"
-                  value={`${academicMetrics.studentsEngaged}`}
-                />
-                <DashboardStat
-                  label="Assignments Pending"
-                  value={`${academicMetrics.assignmentsPending}`}
-                />
-                <DashboardStat
-                  label="Faculty Consultations"
-                  value={`${academicMetrics.consultationsScheduled}`}
-                />
-              </section>
-
-              <SectionCard
-                title="Teaching Priorities"
-                kicker="Week at a Glance"
-                description="Focus on these academic priorities to keep classes running smoothly."
-              >
-                <ul className="space-y-2 text-sm text-slate-700">
-                  {teachingPriorities.map((item) => (
-                    <li key={item} className="flex items-start gap-2">
-                      <span className="mt-1 h-1.5 w-1.5 rounded-full bg-blue-400" />
-                      <span>{item}</span>
-                    </li>
-                  ))}
-                </ul>
-              </SectionCard>
-
-              <SectionCard
-                title="Faculty Announcements"
-                kicker="Campus Communications"
-                description="Stay informed about departmental timelines and university-wide engagements."
-              >
-                <ul className="space-y-2 text-sm text-slate-700">
-                  {facultyAnnouncements.map((item) => (
-                    <li key={item} className="flex items-start gap-2">
-                      <span className="mt-1 h-1.5 w-1.5 rounded-full bg-indigo-400" />
-                      <span>{item}</span>
-                    </li>
-                  ))}
-                </ul>
-              </SectionCard>
-            </div>
-          );
-        },
+        render: () => (
+          <LecturerDashboard
+            currentUserId={currentUser.id}
+            userRoles={currentUser.roles}
+            baseRole={currentUser.baseRole}
+          />
+        ),
       }
     : null;
 
@@ -2101,35 +2018,14 @@ function App() {
       ]
     : [];
 
-  const lecturerPanels: PanelConfig[] =
-    isAuthenticated && currentUserHasRole('Lecturer')
+  // Always show lecturer panels for any user with baseRole === 'Lecturer' or Lecturer role
+  const isLecturer = isAuthenticated && currentUser && (
+    (currentUser.baseRole as BaseRole) === 'Lecturer' || 
+    currentUserHasRole('Lecturer')
+  );
+
+  const lecturerPanels: PanelConfig[] = isLecturer
     ? [
-        {
-          id: 'lecturer-dashboard',
-          label: 'Lecturer Dashboard',
-          visible: true,
-          render: () => (
-            <LecturerDashboardPanel
-              user={currentUser!}
-              deadlinesActive={deadlinesActive}
-              repositoriesActive={repositoriesActive}
-              workflowStage={workflow.stage}
-              isPureLecturer={isPureLecturer}
-            />
-          ),
-        },
-        {
-          id: 'lecturer-classes',
-          label: 'My Classes',
-          visible: true,
-          render: () => <LecturerMyClassesPanel />,
-        },
-        {
-          id: 'lecturer-scheduling',
-          label: 'Scheduling',
-          visible: true,
-          render: () => <LecturerSchedulingPanel />,
-        },
         {
           id: 'lecturer-enter-marks',
           label: 'Enter Marks',
@@ -2144,9 +2040,21 @@ function App() {
         },
         {
           id: 'lecturer-monthly-report',
-          label: 'Monthly Reports',
+          label: 'Make Reports',
           visible: true,
           render: () => <LecturerMonthlyReportPanel />,
+        },
+        {
+          id: 'lecturer-scheduling',
+          label: 'See Timetable',
+          visible: true,
+          render: () => <LecturerSchedulingPanel />,
+        },
+        {
+          id: 'lecturer-classes',
+          label: 'My Classes',
+          visible: true,
+          render: () => <LecturerMyClassesPanel />,
         },
         {
           id: 'lecturer-account-settings',
@@ -2346,7 +2254,7 @@ function App() {
     isAuthenticated && currentUser && (currentUser.baseRole === 'Lecturer' || currentUserHasRole('Lecturer'))
       ? {
           id: 'lecturer-role-dashboard',
-          label: 'My Dashboard',
+          label: 'Dashboard',
           visible: true,
           render: () => (
             <LecturerDashboard
@@ -2360,11 +2268,12 @@ function App() {
 
   const panelConfigs: PanelConfig[] = [
     ...(overviewPanel ? [overviewPanel] : []),
-    ...(lecturerRoleDashboard ? [lecturerRoleDashboard] : []),
+    // Only add lecturerRoleDashboard if it's different from overviewPanel (for non-pure lecturers)
+    ...(lecturerRoleDashboard && lecturerRoleDashboard.id !== overviewPanel?.id ? [lecturerRoleDashboard] : []),
     ...(isAdmin ? adminPanels : []),
     ...(chiefExaminerPrivilegePanel ? [chiefExaminerPrivilegePanel] : []),
-    // Show lecturer panels to anyone with Lecturer role (including Chief Examiners)
-    ...(isAuthenticated && currentUserHasRole('Lecturer') ? lecturerPanels : []),
+    // Show lecturer panels to anyone with Lecturer role or baseRole (including Chief Examiners)
+    ...(isLecturer ? lecturerPanels : []),
     ...roleSpecificPanels,
   ];
 
@@ -2426,8 +2335,18 @@ function App() {
         <nav className="flex-1 space-y-1 overflow-y-auto px-4 pb-6">
           {(() => {
             // Separate panels into categories
-            const dashboardPanels = panelConfigs.filter(p => p.id === 'overview');
-            const lecturerPanelsList = panelConfigs.filter(p => p.id.startsWith('lecturer-'));
+            // Include both 'overview' and 'lecturer-role-dashboard' for Dashboard button
+            // But prioritize lecturer-role-dashboard for lecturers (remove overview if lecturer-role-dashboard exists)
+            const allDashboardPanels = panelConfigs.filter(p => 
+              p.id === 'overview' || p.id === 'lecturer-role-dashboard'
+            );
+            const hasLecturerRoleDashboard = allDashboardPanels.some(p => p.id === 'lecturer-role-dashboard');
+            const dashboardPanels = hasLecturerRoleDashboard && isLecturer
+              ? allDashboardPanels.filter(p => p.id === 'lecturer-role-dashboard')
+              : allDashboardPanels;
+            const lecturerPanelsList = panelConfigs.filter(p => 
+              p.id.startsWith('lecturer-') && p.id !== 'lecturer-role-dashboard'
+            );
             const chiefExaminerPanels = panelConfigs.filter(p => p.id === 'chief-examiner-console' || p.id === 'vetting-suite' || p.id === 'destruction-log');
             const teamLeadPanels = panelConfigs.filter(p => p.id === 'team-lead-panel');
             const setterPanels = panelConfigs.filter(p => p.id === 'setter-panel');
@@ -2480,21 +2399,33 @@ function App() {
                 )}
 
                 {/* Dashboard Overview */}
-                {dashboardPanels.map((panel) => {
+                {dashboardPanels
+                  // Prioritize lecturer-role-dashboard for lecturers, then show others
+                  .sort((a, b) => {
+                    if (a.id === 'lecturer-role-dashboard') return -1;
+                    if (b.id === 'lecturer-role-dashboard') return 1;
+                    return 0;
+                  })
+                  .map((panel) => {
                   const isActive = panel.id === activePanelId;
                   return (
                     <button
                       key={panel.id}
                       type="button"
                       onClick={() => handlePanelSelect(panel.id)}
-                      className={`flex w-full items-center justify-between rounded-xl border px-4 py-2 text-left text-sm font-medium transition ${
+                      className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left text-sm font-medium transition-all ${
                         isActive
                           ? 'border-blue-300 bg-blue-500 text-white shadow-md'
-                          : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white'
+                          : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white hover:shadow-sm'
                       }`}
                     >
-                      <span>{panel.label}</span>
-                      <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
+                      <span className={`flex-shrink-0 ${isActive ? 'text-white' : 'text-blue-200'}`}>
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+                        </svg>
+                      </span>
+                      <span className="flex-1">{panel.label}</span>
+                      <span className={`text-xs flex-shrink-0 ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
                     </button>
                   );
                 })}
@@ -2624,19 +2555,70 @@ function App() {
                     </div>
                     {lecturerPanelsList.map((panel) => {
                       const isActive = panel.id === activePanelId;
+                      
+                      // Define icons for each panel
+                      const getIcon = () => {
+                        switch (panel.id) {
+                          case 'lecturer-enter-marks':
+                            return (
+                              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                              </svg>
+                            );
+                          case 'lecturer-search-student':
+                            return (
+                              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                              </svg>
+                            );
+                          case 'lecturer-monthly-report':
+                            return (
+                              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                              </svg>
+                            );
+                          case 'lecturer-scheduling':
+                            return (
+                              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                              </svg>
+                            );
+                          case 'lecturer-classes':
+                            return (
+                              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                              </svg>
+                            );
+                          case 'lecturer-account-settings':
+                            return (
+                              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                              </svg>
+                            );
+                          default:
+                            return null;
+                        }
+                      };
+                      
                       return (
                         <button
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`flex w-full items-center justify-between rounded-xl border px-4 py-2 text-left text-sm font-medium transition ${
+                          className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left text-sm font-medium transition-all ${
                             isActive
                               ? 'border-blue-300 bg-blue-500 text-white shadow-md'
-                              : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white'
+                              : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white hover:shadow-sm'
                           }`}
                         >
-                          <span>{panel.label}</span>
-                          <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
+                          <span className={`flex-shrink-0 ${isActive ? 'text-white' : 'text-blue-200'}`}>
+                            {getIcon()}
+                          </span>
+                          <span className="flex-1">{panel.label}</span>
+                          <span className={`text-xs flex-shrink-0 ${isActive ? 'text-white' : 'text-blue-200'}`}>
+                            {isActive ? '•' : '↗'}
+                          </span>
                         </button>
                       );
                     })}
@@ -3069,7 +3051,7 @@ function AdminViewLecturersPanel({
                 setFilterCategory(e.target.value as 'All' | 'Undergraduate' | 'Postgraduate');
                 setSelectedLecturer(null);
               }}
-              className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+              className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
             >
               <option value="All">All Lecturers</option>
               <option value="Undergraduate">Undergraduate Lecturers</option>
@@ -3102,46 +3084,91 @@ function AdminViewLecturersPanel({
           description={`${undergraduateLecturers.length} undergraduate lecturer${undergraduateLecturers.length !== 1 ? 's' : ''}`}
         >
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {undergraduateLecturers.map((lecturer) => {
+            {undergraduateLecturers.map((lecturer, index) => {
               const totalPrivs = getUserTotalPrivileges(lecturer);
               const hasVettingRole = lecturer.roles.includes('Vetter') || lecturer.roles.includes('Team Lead') || lecturer.roles.includes('Setter');
               
               return (
-                <button
+                <motion.button
                   key={lecturer.id}
                   type="button"
                   onClick={() => setSelectedLecturer(lecturer)}
-                  className={`rounded-xl border p-4 text-left transition ${
+                  className={`group relative rounded-xl border-2 p-4 text-left overflow-hidden transition-all duration-300 ${
                     selectedLecturer?.id === lecturer.id
-                      ? 'border-green-500/50 bg-green-500/10'
-                      : 'border-slate-200 bg-white hover:border-green-500/40'
+                      ? 'border-green-500 bg-gradient-to-br from-green-50 to-white shadow-lg'
+                      : 'border-green-200 bg-gradient-to-br from-white to-green-50/30 hover:border-green-400 hover:shadow-md'
                   }`}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3, delay: index * 0.05 }}
+                  whileHover={{ scale: 1.02, y: -2 }}
                 >
-                  <div className="flex items-start justify-between mb-2">
-                    <div className="flex-1">
-                      <p className="text-sm font-semibold text-slate-800">{lecturer.name}</p>
-                      {lecturer.department && (
-                        <p className="text-xs text-slate-600 mt-1">{lecturer.department}</p>
+                  {/* Animated background gradient on hover */}
+                  <motion.div
+                    className="absolute inset-0 bg-gradient-to-r from-green-100/0 to-green-100/50 opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+                    initial={false}
+                  />
+                  
+                  <div className="relative z-10">
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        {/* Avatar */}
+                        <div className="flex-shrink-0 w-12 h-12 rounded-full bg-gradient-to-br from-green-400 to-green-600 flex items-center justify-center text-white font-bold text-base shadow-md">
+                          {lecturer.name?.charAt(0)?.toUpperCase() || 'L'}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-bold text-green-900 truncate">{lecturer.name}</p>
+                          {lecturer.department && (
+                            <p className="text-xs text-green-600 mt-0.5 flex items-center gap-1">
+                              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                              </svg>
+                              {lecturer.department}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                        <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-gradient-to-br from-green-500 to-green-600 text-white text-xs font-bold shadow-md">
+                          UG
+                        </span>
+                        {hasVettingRole && (
+                          <motion.span
+                            className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-gradient-to-br from-amber-400 to-amber-500 text-white text-xs font-bold shadow-md"
+                            whileHover={{ scale: 1.1 }}
+                          >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                            </svg>
+                          </motion.span>
+                        )}
+                      </div>
+                    </div>
+                    
+                    {/* Roles */}
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {lecturer.roles.length > 0 ? (
+                        lecturer.roles.map((role) => (
+                          <motion.div key={role} whileHover={{ scale: 1.05 }}>
+                            <RoleBadge role={role} />
+                          </motion.div>
+                        ))
+                      ) : (
+                        <span className="text-xs px-2.5 py-1 rounded-full bg-gray-100 text-gray-500 border border-gray-200">
+                          No roles
+                        </span>
                       )}
                     </div>
-                    <span className="text-xs font-semibold text-green-700 bg-green-500/20 px-2 py-1 rounded">
-                      UG
-                    </span>
-                    {hasVettingRole && (
-                      <span className="text-xs font-semibold text-amber-400 bg-amber-500/20 px-2 py-1 rounded ml-1">
-                        Vetting
-                      </span>
-                    )}
+                    
+                    {/* Privileges count */}
+                    <div className="mt-3 flex items-center gap-1.5 text-xs font-semibold text-green-600 bg-green-50 px-2.5 py-1.5 rounded-full border border-green-200 inline-flex">
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                      </svg>
+                      {totalPrivs} total privileges
+                    </div>
                   </div>
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {lecturer.roles.map((role) => (
-                      <RoleBadge key={role} role={role} />
-                    ))}
-                  </div>
-                  <div className="mt-2 text-xs text-blue-700">
-                    {totalPrivs} total privileges
-                  </div>
-                </button>
+                </motion.button>
               );
             })}
           </div>
@@ -3156,46 +3183,91 @@ function AdminViewLecturersPanel({
           description={`${postgraduateLecturers.length} postgraduate lecturer${postgraduateLecturers.length !== 1 ? 's' : ''}`}
         >
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {postgraduateLecturers.map((lecturer) => {
+            {postgraduateLecturers.map((lecturer, index) => {
               const totalPrivs = getUserTotalPrivileges(lecturer);
               const hasVettingRole = lecturer.roles.includes('Vetter') || lecturer.roles.includes('Team Lead') || lecturer.roles.includes('Setter');
               
               return (
-                <button
+                <motion.button
                   key={lecturer.id}
                   type="button"
                   onClick={() => setSelectedLecturer(lecturer)}
-                  className={`rounded-xl border p-4 text-left transition ${
+                  className={`group relative rounded-xl border-2 p-4 text-left overflow-hidden transition-all duration-300 ${
                     selectedLecturer?.id === lecturer.id
-                      ? 'border-purple-500/50 bg-purple-500/10'
-                      : 'border-slate-200 bg-white hover:border-purple-500/40'
+                      ? 'border-purple-500 bg-gradient-to-br from-purple-50 to-white shadow-lg'
+                      : 'border-purple-200 bg-gradient-to-br from-white to-purple-50/30 hover:border-purple-400 hover:shadow-md'
                   }`}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3, delay: index * 0.05 }}
+                  whileHover={{ scale: 1.02, y: -2 }}
                 >
-                  <div className="flex items-start justify-between mb-2">
-                    <div className="flex-1">
-                      <p className="text-sm font-semibold text-slate-800">{lecturer.name}</p>
-                      {lecturer.department && (
-                        <p className="text-xs text-slate-600 mt-1">{lecturer.department}</p>
+                  {/* Animated background gradient on hover */}
+                  <motion.div
+                    className="absolute inset-0 bg-gradient-to-r from-purple-100/0 to-purple-100/50 opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+                    initial={false}
+                  />
+                  
+                  <div className="relative z-10">
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        {/* Avatar */}
+                        <div className="flex-shrink-0 w-12 h-12 rounded-full bg-gradient-to-br from-purple-400 to-purple-600 flex items-center justify-center text-white font-bold text-base shadow-md">
+                          {lecturer.name?.charAt(0)?.toUpperCase() || 'L'}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-bold text-purple-900 truncate">{lecturer.name}</p>
+                          {lecturer.department && (
+                            <p className="text-xs text-purple-600 mt-0.5 flex items-center gap-1">
+                              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                              </svg>
+                              {lecturer.department}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                        <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-purple-600 text-white text-xs font-bold shadow-md">
+                          PG
+                        </span>
+                        {hasVettingRole && (
+                          <motion.span
+                            className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-gradient-to-br from-amber-400 to-amber-500 text-white text-xs font-bold shadow-md"
+                            whileHover={{ scale: 1.1 }}
+                          >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                            </svg>
+                          </motion.span>
+                        )}
+                      </div>
+                    </div>
+                    
+                    {/* Roles */}
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {lecturer.roles.length > 0 ? (
+                        lecturer.roles.map((role) => (
+                          <motion.div key={role} whileHover={{ scale: 1.05 }}>
+                            <RoleBadge role={role} />
+                          </motion.div>
+                        ))
+                      ) : (
+                        <span className="text-xs px-2.5 py-1 rounded-full bg-gray-100 text-gray-500 border border-gray-200">
+                          No roles
+                        </span>
                       )}
                     </div>
-                    <span className="text-xs font-semibold text-purple-700 bg-purple-500/20 px-2 py-1 rounded">
-                      PG
-                    </span>
-                    {hasVettingRole && (
-                      <span className="text-xs font-semibold text-amber-400 bg-amber-500/20 px-2 py-1 rounded ml-1">
-                        Vetting
-                      </span>
-                    )}
+                    
+                    {/* Privileges count */}
+                    <div className="mt-3 flex items-center gap-1.5 text-xs font-semibold text-purple-600 bg-purple-50 px-2.5 py-1.5 rounded-full border border-purple-200 inline-flex">
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                      </svg>
+                      {totalPrivs} total privileges
+                    </div>
                   </div>
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {lecturer.roles.map((role) => (
-                      <RoleBadge key={role} role={role} />
-                    ))}
-                  </div>
-                  <div className="mt-2 text-xs text-blue-700">
-                    {totalPrivs} total privileges
-                  </div>
-                </button>
+                </motion.button>
               );
             })}
           </div>
@@ -3346,7 +3418,7 @@ function AdminAddLecturerPanel({
           value={lecturerName}
           onChange={(event) => setLecturerName(event.target.value)}
           placeholder="e.g. Dr. Jane Mwangi"
-          className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
         />
         <button
           type="submit"
@@ -3377,7 +3449,7 @@ function AdminAddLecturerPanel({
           <button
             type="button"
             onClick={() => setShowPrivileges(!showPrivileges)}
-            className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-800"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
           >
             {showPrivileges ? 'Hide Details' : 'Show Details'}
           </button>
@@ -3417,7 +3489,7 @@ function AdminAddAdminPanel({
           value={adminName}
           onChange={(event) => setAdminName(event.target.value)}
           placeholder="e.g. Prof. Samuel Otieno"
-          className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
         />
         <button
           type="submit"
@@ -3627,7 +3699,7 @@ function SuperUserChiefExaminerPanel({
                       setPromotionTarget(event.target.value);
                       setShowPrivilegeGain(true);
                     }}
-                    className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50 disabled:cursor-not-allowed"
                     disabled={!chiefExaminerRoleEnabled || eligibleLecturers.length === 0}
                   >
                     <option value="">
@@ -3688,7 +3760,7 @@ function SuperUserChiefExaminerPanel({
 
                     {showPrivilegeGain && (
                       <div className="mt-4 space-y-3">
-                        <div className="rounded-lg border border-blue-500/30 bg-slate-900/50 p-4">
+                        <div className="rounded-lg border border-blue-500/30 bg-slate-50 p-4">
                           <p className="text-xs font-semibold text-blue-700 mb-3">
                             New Privileges ({privilegeGain} additional)
                           </p>
@@ -3745,7 +3817,7 @@ function SuperUserChiefExaminerPanel({
                   <select
                     value={removalTarget}
                     onChange={(event) => setRemovalTarget(event.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-500/40"
+                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:border-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-500/40"
                   >
                     <option value="">Choose a Chief Examiner...</option>
                     {currentChiefExaminers.map((user) => (
@@ -3855,7 +3927,7 @@ function SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
                       setSelectedUser(user);
                       setShowPrivileges(true);
                     }}
-                    className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm transition hover:border-blue-500/40 hover:bg-slate-900"
+                    className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm transition hover:border-blue-500/40 hover:bg-slate-50"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-semibold text-slate-900">{user.name}</span>
@@ -3898,7 +3970,7 @@ function SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
             <button
               type="button"
               onClick={() => setShowPrivileges(false)}
-              className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-800"
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
             >
               Close
             </button>
@@ -4004,7 +4076,7 @@ function SuperUserSystemStatsPanel({ users, workflow }: SuperUserSystemStatsPane
                   <span className="text-xs text-slate-600">{roleCount} users</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
+                  <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
                     <div
                       className="h-full bg-blue-500"
                       style={{ width: `${(rolePriv.totalPrivileges / totalPrivileges) * 100}%` }}
@@ -4075,7 +4147,7 @@ function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPane
               setSelectedUserId(e.target.value);
               setAction('view');
             }}
-            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none"
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none"
           >
             <option value="">Choose a user...</option>
             {users.map((user) => (
@@ -4131,7 +4203,7 @@ function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPane
                   className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition ${
                     action === 'view'
                       ? 'bg-blue-500/20 text-blue-700 border border-blue-500/40'
-                      : 'bg-slate-800/50 text-slate-700 border border-slate-700 hover:bg-slate-800'
+                      : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
                   }`}
                 >
                   View Details
@@ -4142,7 +4214,7 @@ function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPane
                   className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition ${
                     action === 'edit'
                       ? 'bg-blue-500/20 text-blue-700 border border-blue-500/40'
-                      : 'bg-slate-800/50 text-slate-700 border border-slate-700 hover:bg-slate-800'
+                      : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
                   }`}
                 >
                   Edit User
@@ -4216,7 +4288,7 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
                 type="text"
                 value={settings.systemName}
                 onChange={(e) => setSettings({ ...settings, systemName: e.target.value })}
-                className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
               />
             </div>
             <div>
@@ -4229,7 +4301,7 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
                 max="120"
                 value={settings.sessionTimeout}
                 onChange={(e) => setSettings({ ...settings, sessionTimeout: parseInt(e.target.value) || 30 })}
-                className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
               />
             </div>
             <div>
@@ -4239,7 +4311,7 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
               <select
                 value={settings.passwordPolicy}
                 onChange={(e) => setSettings({ ...settings, passwordPolicy: e.target.value })}
-                className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
               >
                 <option value="low">Low (6+ characters)</option>
                 <option value="medium">Medium (8+ characters, mixed case)</option>
@@ -4258,7 +4330,7 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
                 type="checkbox"
                 checked={settings.emailNotifications}
                 onChange={(e) => setSettings({ ...settings, emailNotifications: e.target.checked })}
-                className="h-5 w-5 rounded border-slate-700 bg-slate-800 text-purple-600 focus:ring-purple-500"
+                className="h-5 w-5 rounded border-slate-200 bg-slate-100 text-purple-600 focus:ring-purple-500"
               />
             </label>
             <label className="flex items-center justify-between cursor-pointer">
@@ -4267,7 +4339,7 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
                 type="checkbox"
                 checked={settings.smsNotifications}
                 onChange={(e) => setSettings({ ...settings, smsNotifications: e.target.checked })}
-                className="h-5 w-5 rounded border-slate-700 bg-slate-800 text-purple-600 focus:ring-purple-500"
+                className="h-5 w-5 rounded border-slate-200 bg-slate-100 text-purple-600 focus:ring-purple-500"
               />
             </label>
           </div>
@@ -4281,7 +4353,7 @@ function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
               type="checkbox"
               checked={settings.maintenanceMode}
               onChange={(e) => setSettings({ ...settings, maintenanceMode: e.target.checked })}
-              className="h-5 w-5 rounded border-slate-700 bg-slate-800 text-amber-600 focus:ring-amber-500"
+              className="h-5 w-5 rounded border-slate-200 bg-slate-100 text-amber-600 focus:ring-amber-500"
             />
           </label>
           {settings.maintenanceMode && (
@@ -4316,7 +4388,7 @@ function AdminAuditLogPanel({ workflow }: AdminAuditLogPanelProps) {
           <h3 className="text-sm font-semibold text-slate-800">Activity Timeline</h3>
           <button
             type="button"
-            className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-800"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
           >
             Export Log
           </button>
@@ -4395,7 +4467,7 @@ function AdminStaffManagementPanel({ users, setUsers }: AdminStaffManagementPane
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Search by name or role..."
-              className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+              className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
             />
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 max-h-96 overflow-y-auto">
@@ -4526,7 +4598,7 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
           type="file"
           accept=".pdf"
           onChange={handleFileSelect}
-          className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 file:mr-4 file:rounded-lg file:border-0 file:bg-blue-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-indigo-950 file:cursor-pointer hover:file:bg-indigo-400"
+          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 file:mr-4 file:rounded-lg file:border-0 file:bg-blue-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-indigo-950 file:cursor-pointer hover:file:bg-indigo-400"
         />
         {selectedFile && (
           <p className="mt-2 text-xs text-blue-700">
@@ -4545,7 +4617,7 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
             value={courseCode}
             onChange={(e) => setCourseCode(e.target.value)}
             placeholder="e.g., CSC 302"
-            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           />
         </div>
 
@@ -4558,7 +4630,7 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
             value={courseUnit}
             onChange={(e) => setCourseUnit(e.target.value)}
             placeholder="e.g., Advanced Algorithms"
-            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           />
         </div>
 
@@ -4569,7 +4641,7 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
           <select
             value={semester}
             onChange={(e) => setSemester(e.target.value)}
-            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           >
             <option value="">Select semester...</option>
             <option value="Fall">Fall</option>
@@ -4587,7 +4659,7 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
             value={year}
             onChange={(e) => setYear(e.target.value)}
             placeholder="e.g., 2024"
-            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           />
         </div>
       </div>
@@ -4727,7 +4799,7 @@ function ChiefExaminerConsole({
                 <select
                   value={awardUserId}
                   onChange={(event) => setAwardUserId(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
                 >
                   <option value="">Choose a lecturer...</option>
                   {eligibleUsers.map((user) => (
@@ -4744,7 +4816,7 @@ function ChiefExaminerConsole({
                 <select
                   value={awardRole}
                   onChange={(event) => setAwardRole(event.target.value as Role)}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
                 >
                   {awardableRoles.map((role) => (
                     <option key={role} value={role}>
@@ -4858,7 +4930,7 @@ function ChiefExaminerConsole({
                         {usersWithRole.map(user => (
                           <div
                             key={user.id}
-                            className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-900/50 px-3 py-2"
+                            className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
                           >
                             <span className="text-sm text-slate-800">{user.name}</span>
                             <div className="flex items-center gap-2">
@@ -4938,7 +5010,7 @@ function ChiefExaminerConsole({
                   <button
                     type="button"
                     onClick={() => setShowSetterDurationSettings(true)}
-                    className="w-full rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-800"
+                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
                   >
                     {setterDeadlineActive ? 'Update Deadline Duration' : 'Set Deadline Duration'}
                   </button>
@@ -4973,7 +5045,7 @@ function ChiefExaminerConsole({
                           max="30"
                           value={setterDurationForm.days}
                           onChange={(e) => setSetterDurationForm({ ...setterDurationForm, days: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
+                          className="w-full rounded-lg border border-slate-200 bg-white px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
                           placeholder="0"
                         />
                       </div>
@@ -4985,7 +5057,7 @@ function ChiefExaminerConsole({
                           max="23"
                           value={setterDurationForm.hours}
                           onChange={(e) => setSetterDurationForm({ ...setterDurationForm, hours: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
+                          className="w-full rounded-lg border border-slate-200 bg-white px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
                           placeholder="0"
                         />
                       </div>
@@ -4997,7 +5069,7 @@ function ChiefExaminerConsole({
                           max="59"
                           value={setterDurationForm.minutes}
                           onChange={(e) => setSetterDurationForm({ ...setterDurationForm, minutes: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
+                          className="w-full rounded-lg border border-slate-200 bg-white px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
                           placeholder="0"
                         />
                       </div>
@@ -5025,7 +5097,7 @@ function ChiefExaminerConsole({
                         setShowSetterDurationSettings(false);
                         setSetterDurationForm(setterDeadlineDuration);
                       }}
-                      className="flex-1 rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-800"
+                      className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
                     >
                       Cancel
                     </button>
@@ -5071,7 +5143,7 @@ function ChiefExaminerConsole({
                   <button
                     type="button"
                     onClick={() => setShowTeamLeadDurationSettings(true)}
-                    className="w-full rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-800"
+                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
                   >
                     {teamLeadDeadlineActive ? 'Update Deadline Duration' : 'Set Deadline Duration'}
                   </button>
@@ -5114,7 +5186,7 @@ function ChiefExaminerConsole({
                           max="30"
                           value={teamLeadDurationForm.days}
                           onChange={(e) => setTeamLeadDurationForm({ ...teamLeadDurationForm, days: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
+                          className="w-full rounded-lg border border-slate-200 bg-white px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
                           placeholder="0"
                         />
                       </div>
@@ -5126,7 +5198,7 @@ function ChiefExaminerConsole({
                           max="23"
                           value={teamLeadDurationForm.hours}
                           onChange={(e) => setTeamLeadDurationForm({ ...teamLeadDurationForm, hours: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
+                          className="w-full rounded-lg border border-slate-200 bg-white px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
                           placeholder="0"
                         />
                       </div>
@@ -5138,7 +5210,7 @@ function ChiefExaminerConsole({
                           max="59"
                           value={teamLeadDurationForm.minutes}
                           onChange={(e) => setTeamLeadDurationForm({ ...teamLeadDurationForm, minutes: parseInt(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
+                          className="w-full rounded-lg border border-slate-200 bg-white px-4 py-3 text-lg font-semibold text-slate-800 text-center focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
                           placeholder="0"
                         />
                       </div>
@@ -5166,7 +5238,7 @@ function ChiefExaminerConsole({
                         setShowTeamLeadDurationSettings(false);
                         setTeamLeadDurationForm(teamLeadDeadlineDuration);
                       }}
-                      className="flex-1 rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-800"
+                      className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
                     >
                       Cancel
                     </button>
@@ -5418,7 +5490,7 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
           accept=".pdf"
           onChange={handleFileSelect}
           disabled={!canSubmit}
-          className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 file:mr-4 file:rounded-lg file:border-0 file:bg-pink-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-pink-950 file:cursor-pointer hover:file:bg-pink-400 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 file:mr-4 file:rounded-lg file:border-0 file:bg-pink-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-pink-950 file:cursor-pointer hover:file:bg-pink-400 disabled:opacity-50 disabled:cursor-not-allowed"
         />
         {selectedFile && (
           <p className="mt-2 text-xs text-blue-700">
@@ -5438,7 +5510,7 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
             onChange={(e) => setCourseCode(e.target.value)}
             placeholder="e.g., CSC 302"
             disabled={!canSubmit}
-            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
+            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
           />
         </div>
 
@@ -5452,7 +5524,7 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
             onChange={(e) => setCourseUnit(e.target.value)}
             placeholder="e.g., Advanced Algorithms"
             disabled={!canSubmit}
-            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
+            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
           />
         </div>
 
@@ -5464,7 +5536,7 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
             value={semester}
             onChange={(e) => setSemester(e.target.value)}
             disabled={!canSubmit}
-            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
+            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
           >
             <option value="">Select semester...</option>
             <option value="Fall">Fall</option>
@@ -5483,7 +5555,7 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
             onChange={(e) => setYear(e.target.value)}
             placeholder="e.g., 2024"
             disabled={!canSubmit}
-            className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
+            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
           />
         </div>
       </div>
@@ -5900,7 +5972,7 @@ function TeamLeadPanel({
                 accept=".pdf"
                 onChange={handleFileSelect}
                 disabled={!canSubmit}
-                className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 file:mr-4 file:rounded-lg file:border-0 file:bg-blue-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-indigo-950 file:cursor-pointer hover:file:bg-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 file:mr-4 file:rounded-lg file:border-0 file:bg-blue-500/90 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-indigo-950 file:cursor-pointer hover:file:bg-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed"
               />
               {selectedFile && (
                 <p className="mt-2 text-xs text-blue-700">
@@ -5920,7 +5992,7 @@ function TeamLeadPanel({
                   onChange={(e) => setCourseCode(e.target.value)}
                   placeholder="e.g., CSC 302"
                   disabled={!canSubmit}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
                 />
               </div>
 
@@ -5934,7 +6006,7 @@ function TeamLeadPanel({
                   onChange={(e) => setCourseUnit(e.target.value)}
                   placeholder="e.g., Advanced Algorithms"
                   disabled={!canSubmit}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
                 />
               </div>
 
@@ -5946,7 +6018,7 @@ function TeamLeadPanel({
                   value={semester}
                   onChange={(e) => setSemester(e.target.value)}
                   disabled={!canSubmit}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
                 >
                   <option value="">Select semester...</option>
                   <option value="Fall">Fall</option>
@@ -5965,7 +6037,7 @@ function TeamLeadPanel({
                   onChange={(e) => setYear(e.target.value)}
                   placeholder="e.g., 2024"
                   disabled={!canSubmit}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-950 px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
                 />
               </div>
             </div>
@@ -6091,7 +6163,7 @@ function TeamLeadPanel({
                   <div className="flex flex-col gap-2 ml-4">
                     <button
                       type="button"
-                      className="px-3 py-1.5 rounded-lg bg-slate-800/50 hover:bg-slate-700/50 text-xs font-medium text-slate-700 transition"
+                      className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 text-xs font-medium text-slate-700 transition"
                       onClick={() => {
                         // In a real app, this would download or view the paper
                         alert(`Viewing paper: ${paper.fileName}`);
@@ -6248,7 +6320,7 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
       case 'high': return 'bg-amber-500/20 text-amber-300 border-amber-500/40';
       case 'medium': return 'bg-yellow-500/20 text-yellow-300 border-yellow-500/40';
       case 'low': return 'bg-blue-500/20 text-blue-700 border-blue-500/40';
-      default: return 'bg-slate-800 text-slate-700 border-slate-700';
+      default: return 'bg-slate-100 text-slate-700 border-slate-200';
     }
   };
 
@@ -6277,7 +6349,7 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
                   setSelectedCourse(e.target.value);
                   setSimilarityResults([]);
                 }}
-                className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
               >
                 <option value="">Choose a course unit...</option>
                 {courseUnits.map((course) => (
@@ -6370,12 +6442,12 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
                     </div>
                     
                     {showDetails === `${idx}` && (
-                      <div className="mt-3 pt-3 border-t border-slate-700 space-y-2">
+                      <div className="mt-3 pt-3 border-t border-slate-200 space-y-2">
                         <div>
                           <p className="text-xs font-semibold text-slate-700 mb-1">Matched Sections:</p>
                           <div className="flex flex-wrap gap-2">
                             {result.matchedSections.map((section, sIdx) => (
-                              <span key={sIdx} className="px-2 py-1 rounded bg-slate-800/50 text-xs text-slate-700">
+                              <span key={sIdx} className="px-2 py-1 rounded bg-white text-xs text-slate-700">
                                 {section}
                               </span>
                             ))}
@@ -6576,7 +6648,7 @@ function LecturerMyClassesPanel() {
               className={`w-full rounded-xl border p-4 text-left transition ${
                 selectedClass === classItem.id
                   ? 'border-blue-500/50 bg-blue-500/10'
-                  : 'border-slate-200 bg-white hover:border-blue-500/40 hover:bg-slate-900'
+                  : 'border-slate-200 bg-white hover:border-blue-500/40 hover:bg-slate-50'
               }`}
             >
               <div className="flex items-start justify-between">
@@ -6622,7 +6694,7 @@ function LecturerMyClassesPanel() {
           </p>
             <button
               type="button"
-              className="mt-3 w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-800"
+              className="mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
             >
               Upload Materials
             </button>
@@ -6703,7 +6775,7 @@ function LecturerSchedulingPanel() {
                   type="text"
                   value={newEvent.title}
                   onChange={(e) => setNewEvent({ ...newEvent, title: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   placeholder="Event title"
                 />
               </div>
@@ -6714,7 +6786,7 @@ function LecturerSchedulingPanel() {
                     type="date"
                     value={newEvent.date}
                     onChange={(e) => setNewEvent({ ...newEvent, date: e.target.value })}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   />
                 </div>
                 <div>
@@ -6723,7 +6795,7 @@ function LecturerSchedulingPanel() {
                     type="time"
                     value={newEvent.time}
                     onChange={(e) => setNewEvent({ ...newEvent, time: e.target.value })}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   />
                 </div>
               </div>
@@ -6733,7 +6805,7 @@ function LecturerSchedulingPanel() {
                   type="text"
                   value={newEvent.location}
                   onChange={(e) => setNewEvent({ ...newEvent, location: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   placeholder="Location"
                 />
               </div>
@@ -6758,10 +6830,10 @@ function LecturerEnterMarksPanel() {
   const [submitted, setSubmitted] = useState(false);
 
   const students = [
-    { id: '1', name: 'John Doe', regNo: 'REG001' },
-    { id: '2', name: 'Jane Smith', regNo: 'REG002' },
-    { id: '3', name: 'Bob Johnson', regNo: 'REG003' },
-    { id: '4', name: 'Alice Williams', regNo: 'REG004' },
+    { id: '1', name: 'John Doe', accessNumber: 'a001' },
+    { id: '2', name: 'Jane Smith', accessNumber: 'a002' },
+    { id: '3', name: 'Bob Johnson', accessNumber: 'a003' },
+    { id: '4', name: 'Alice Williams', accessNumber: 'a004' },
   ];
 
   const classes = [
@@ -6799,7 +6871,7 @@ function LecturerEnterMarksPanel() {
             <select
               value={selectedClass}
               onChange={(e) => setSelectedClass(e.target.value)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
             >
               {classes.map((cls) => (
                 <option key={cls.id} value={cls.id}>{cls.name}</option>
@@ -6811,7 +6883,7 @@ function LecturerEnterMarksPanel() {
             <select
               value={assessmentType}
               onChange={(e) => setAssessmentType(e.target.value)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
             >
               <option value="assignment">Assignment</option>
               <option value="test">Test</option>
@@ -6825,13 +6897,13 @@ function LecturerEnterMarksPanel() {
           <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
             <div className="grid grid-cols-12 gap-4 p-4 text-xs font-semibold text-slate-600 border-b border-slate-200">
               <div className="col-span-5">Student Name</div>
-              <div className="col-span-3">Registration No.</div>
+              <div className="col-span-3">Access Number</div>
               <div className="col-span-4">Marks (0-100)</div>
             </div>
             {students.map((student) => (
               <div key={student.id} className="grid grid-cols-12 gap-4 p-4 border-b border-slate-200 last:border-0">
                 <div className="col-span-5 text-sm text-slate-700">{student.name}</div>
-                <div className="col-span-3 text-sm text-slate-600">{student.regNo}</div>
+                <div className="col-span-3 text-sm text-slate-600">{student.accessNumber}</div>
                 <div className="col-span-4">
                   <input
                     type="number"
@@ -6839,7 +6911,7 @@ function LecturerEnterMarksPanel() {
                     max="100"
                     value={marks[student.id] || ''}
                     onChange={(e) => handleMarkChange(student.id, e.target.value)}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                     placeholder="0-100"
                     required
                   />
@@ -6868,15 +6940,15 @@ function LecturerEnterMarksPanel() {
 
 function LecturerSearchStudentPanel() {
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchType, setSearchType] = useState<'name' | 'regNo'>('name');
+  const [searchType, setSearchType] = useState<'name' | 'accessNumber'>('accessNumber');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [selectedStudent, setSelectedStudent] = useState<any | null>(null);
 
   const allStudents = [
-    { id: '1', name: 'John Doe', regNo: 'REG001', email: 'john.doe@student.ucu.ac.ug', phone: '+256 700 000001', courses: ['CSC 302', 'CSC 301'], gpa: 3.8 },
-    { id: '2', name: 'Jane Smith', regNo: 'REG002', email: 'jane.smith@student.ucu.ac.ug', phone: '+256 700 000002', courses: ['CSC 302', 'CSC 303'], gpa: 3.9 },
-    { id: '3', name: 'Bob Johnson', regNo: 'REG003', email: 'bob.johnson@student.ucu.ac.ug', phone: '+256 700 000003', courses: ['CSC 301'], gpa: 3.5 },
-    { id: '4', name: 'Alice Williams', regNo: 'REG004', email: 'alice.williams@student.ucu.ac.ug', phone: '+256 700 000004', courses: ['CSC 302', 'CSC 301', 'CSC 303'], gpa: 4.0 },
+    { id: '1', name: 'John Doe', accessNumber: 'a001', email: 'john.doe@student.ucu.ac.ug', phone: '+256 700 000001', courses: ['CSC 302', 'CSC 301'], gpa: 3.8 },
+    { id: '2', name: 'Jane Smith', accessNumber: 'a002', email: 'jane.smith@student.ucu.ac.ug', phone: '+256 700 000002', courses: ['CSC 302', 'CSC 303'], gpa: 3.9 },
+    { id: '3', name: 'Bob Johnson', accessNumber: 'a003', email: 'bob.johnson@student.ucu.ac.ug', phone: '+256 700 000003', courses: ['CSC 301'], gpa: 3.5 },
+    { id: '4', name: 'Alice Williams', accessNumber: 'a004', email: 'alice.williams@student.ucu.ac.ug', phone: '+256 700 000004', courses: ['CSC 302', 'CSC 301', 'CSC 303'], gpa: 4.0 },
   ];
 
   const handleSearch = (e: FormEvent) => {
@@ -6891,7 +6963,7 @@ function LecturerSearchStudentPanel() {
       if (searchType === 'name') {
         return student.name.toLowerCase().includes(query);
       } else {
-        return student.regNo.toLowerCase().includes(query);
+        return student.accessNumber.toLowerCase().includes(query);
       }
     });
     setSearchResults(results);
@@ -6916,17 +6988,17 @@ function LecturerSearchStudentPanel() {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
-                placeholder={searchType === 'name' ? 'Enter student name...' : 'Enter registration number...'}
+                className="w-full rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                placeholder={searchType === 'name' ? 'Enter student name...' : 'Enter access number (e.g., a001)...'}
               />
             </div>
             <select
               value={searchType}
-              onChange={(e) => setSearchType(e.target.value as 'name' | 'regNo')}
-              className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+              onChange={(e) => setSearchType(e.target.value as 'name' | 'accessNumber')}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
             >
+              <option value="accessNumber">Access Number</option>
               <option value="name">Name</option>
-              <option value="regNo">Registration No.</option>
             </select>
             <button
               type="submit"
@@ -6945,10 +7017,10 @@ function LecturerSearchStudentPanel() {
                 key={student.id}
                 type="button"
                 onClick={() => setSelectedStudent(student)}
-                className="w-full rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:border-blue-500/40 hover:bg-slate-900"
+                className="w-full rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:border-blue-500/40 hover:bg-slate-50"
               >
                 <p className="text-sm font-semibold text-blue-700">{student.name}</p>
-                <p className="mt-1 text-xs text-slate-600">{student.regNo}</p>
+                <p className="mt-1 text-xs text-slate-600">Access: {student.accessNumber}</p>
               </button>
             ))}
           </div>
@@ -6959,7 +7031,7 @@ function LecturerSearchStudentPanel() {
             <div className="flex items-start justify-between">
               <div>
                 <h3 className="text-lg font-semibold text-blue-700">{selectedStudent.name}</h3>
-                <p className="mt-1 text-sm text-slate-600">{selectedStudent.regNo}</p>
+                <p className="mt-1 text-sm text-slate-600">Access Number: {selectedStudent.accessNumber}</p>
               </div>
               <button
                 type="button"
@@ -6989,7 +7061,7 @@ function LecturerSearchStudentPanel() {
               <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">Enrolled Courses</p>
               <div className="flex flex-wrap gap-2">
                 {selectedStudent.courses.map((course: string) => (
-                  <span key={course} className="rounded-lg bg-slate-800 px-3 py-1 text-xs text-slate-700">
+                  <span key={course} className="rounded-lg bg-slate-100 px-3 py-1 text-xs text-slate-700">
                     {course}
                   </span>
                 ))}
@@ -7067,7 +7139,7 @@ function LecturerMonthlyReportPanel() {
                 setReportType(e.target.value as 'attendance' | 'grading' | 'curriculum');
                 setGenerated(false);
               }}
-              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
             >
               <option value="attendance">Attendance Summary</option>
               <option value="grading">Grading Progress</option>
@@ -7083,7 +7155,7 @@ function LecturerMonthlyReportPanel() {
                 setMonth(e.target.value);
                 setGenerated(false);
               }}
-              className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
             />
           </div>
         </div>
@@ -7116,7 +7188,7 @@ function LecturerMonthlyReportPanel() {
               <button
                 type="button"
                 onClick={handleDownload}
-                className="rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-800"
+                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
               >
                 Export Excel
               </button>
@@ -7211,7 +7283,7 @@ function LecturerAccountSettingsPanel() {
                   type="password"
                   value={passwordForm.current}
                   onChange={(e) => setPasswordForm({ ...passwordForm, current: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   required
                 />
               </div>
@@ -7221,7 +7293,7 @@ function LecturerAccountSettingsPanel() {
                   type="password"
                   value={passwordForm.new}
                   onChange={(e) => setPasswordForm({ ...passwordForm, new: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   required
                   minLength={6}
                 />
@@ -7232,7 +7304,7 @@ function LecturerAccountSettingsPanel() {
                   type="password"
                   value={passwordForm.confirm}
                   onChange={(e) => setPasswordForm({ ...passwordForm, confirm: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   required
                 />
               </div>
@@ -7255,7 +7327,7 @@ function LecturerAccountSettingsPanel() {
                   type="email"
                   value={profileForm.email}
                   onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   required
                 />
               </div>
@@ -7265,7 +7337,7 @@ function LecturerAccountSettingsPanel() {
                   type="tel"
                   value={profileForm.phone}
                   onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
                   required
                 />
               </div>
@@ -7418,7 +7490,7 @@ function LoginPortal({
                   setSelectedLecturer(event.target.value);
                   onClearError();
                 }}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                className="w-full rounded-xl border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
               >
                 <option value="">Choose a lecturer...</option>
                 {lecturers.map((user: User) => (
@@ -7440,7 +7512,7 @@ function LoginPortal({
                   onClearError();
                 }}
                 placeholder="Enter your password"
-                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                className="w-full rounded-xl border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
               />
             </div>
             <button
@@ -7486,7 +7558,7 @@ function LoginPortal({
                   setSelectedAdmin(event.target.value);
                   onClearError();
                 }}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                className="w-full rounded-xl border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
               >
                 <option value="">Choose an administrator...</option>
                 {admins.map((user: User) => (
@@ -7508,7 +7580,7 @@ function LoginPortal({
                   onClearError();
                 }}
                 placeholder="Enter your password"
-                className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                className="w-full rounded-xl border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
               />
             </div>
             <button
@@ -7556,7 +7628,7 @@ function LoginPortal({
                     setSelectedAdmin(event.target.value);
                     onClearError();
                   }}
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                  className="w-full rounded-xl border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
                 >
                   <option value="">Choose an administrator...</option>
                   {admins.map((user: User) => (
@@ -7578,7 +7650,7 @@ function LoginPortal({
                     onClearError();
                   }}
                   placeholder="Enter your password"
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                  className="w-full rounded-xl border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
                 />
               </div>
               <button
@@ -7623,7 +7695,7 @@ function LoginPortal({
                     setSelectedLecturer(event.target.value);
                     onClearError();
                   }}
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  className="w-full rounded-xl border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-900 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
                 >
                   <option value="">Choose a lecturer...</option>
                   {lecturers.map((user: User) => (
@@ -7645,7 +7717,7 @@ function LoginPortal({
                     onClearError();
                   }}
                   placeholder="Enter your password"
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  className="w-full rounded-xl border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-600 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
                 />
               </div>
               <button
@@ -7786,7 +7858,7 @@ function WorkflowOrchestration({
               value={approvalNotes}
               onChange={(event) => setApprovalNotes(event.target.value)}
               placeholder="Decision notes (optional)"
-              className="mt-3 w-full rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60"
+              className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60"
               disabled={!canDrawDecision}
             />
             <div className="mt-3 flex flex-wrap gap-3">
@@ -7814,7 +7886,7 @@ function WorkflowOrchestration({
               </button>
             </div>
             {lastDecision ? (
-              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-900/80 p-3 text-xs text-slate-600">
+              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
                 <p className="font-semibold uppercase tracking-wide text-slate-700">
                   Last Decision — {lastDecision.type}
                 </p>
@@ -7963,10 +8035,10 @@ function ActionButton({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className={`rounded-2xl border border-slate-200 bg-slate-950/50 p-4 text-left transition ${
+      className={`rounded-2xl border border-slate-200 bg-white/50 p-4 text-left transition ${
         disabled
           ? 'opacity-60'
-          : 'hover:border-blue-500/40 hover:bg-slate-900'
+          : 'hover:border-blue-500/40 hover:bg-slate-50'
       }`}
     >
       <span
@@ -8105,7 +8177,7 @@ function VettingAndAnnotations({
                   onChange={(event) =>
                     setDuration(Number.parseInt(event.target.value, 10))
                   }
-                  className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
                 />
               </div>
               <div className="flex items-end gap-3">
@@ -8153,7 +8225,7 @@ function VettingAndAnnotations({
                 value={annotationDraft}
                 onChange={(event) => setAnnotationDraft(event.target.value)}
                 placeholder="Add annotation (Bloom’s taxonomy reference, etc.)"
-                className="flex-1 rounded-xl border border-slate-200 bg-slate-950 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60"
+                className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60"
                 disabled={!vettingSession.active}
               />
               <button

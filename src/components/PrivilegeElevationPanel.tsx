@@ -103,8 +103,8 @@ export default function PrivilegeElevationPanel({
 
   return (
     <div className="space-y-6">
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-        <h2 className="text-xl font-semibold text-slate-100 mb-4">
+      <div className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6 shadow-md">
+        <h2 className="text-xl font-semibold text-blue-900 mb-4">
           {isSuperAdmin ? 'Elevate to Chief Examiner' : 'Appoint Roles'}
         </h2>
 
@@ -112,8 +112,8 @@ export default function PrivilegeElevationPanel({
           <div
             className={`mb-4 rounded-lg px-4 py-3 ${
               message.type === 'success'
-                ? 'bg-emerald-500/10 border border-emerald-500/40 text-emerald-200'
-                : 'bg-rose-500/10 border border-rose-500/40 text-rose-200'
+                ? 'bg-emerald-100 border border-emerald-300 text-emerald-700'
+                : 'bg-rose-100 border border-rose-300 text-rose-700'
             }`}
           >
             {message.text}
@@ -122,13 +122,13 @@ export default function PrivilegeElevationPanel({
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-semibold text-slate-300 mb-2">
+            <label className="block text-sm font-semibold text-blue-700 mb-2">
               Select Lecturer
             </label>
             <select
               value={selectedUserId}
               onChange={(e) => setSelectedUserId(e.target.value)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-slate-100 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+              className="w-full rounded-lg border border-blue-300 bg-white px-4 py-2 text-blue-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
             >
               <option value="">Choose a lecturer...</option>
               {lecturers.map((lecturer) => (
@@ -140,13 +140,13 @@ export default function PrivilegeElevationPanel({
           </div>
 
           <div>
-            <label className="block text-sm font-semibold text-slate-300 mb-2">
+            <label className="block text-sm font-semibold text-blue-700 mb-2">
               Role to Grant
             </label>
             <select
               value={selectedRole}
               onChange={(e) => setSelectedRole(e.target.value as any)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-slate-100 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+              className="w-full rounded-lg border border-blue-300 bg-white px-4 py-2 text-blue-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
               disabled={!isSuperAdmin && selectedRole === 'Chief Examiner'}
             >
               {isSuperAdmin && <option value="Chief Examiner">Chief Examiner</option>}
@@ -170,20 +170,20 @@ export default function PrivilegeElevationPanel({
         </div>
       </div>
 
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-        <h2 className="text-xl font-semibold text-slate-100 mb-4">Lecturers & Roles</h2>
+      <div className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6 shadow-md">
+        <h2 className="text-xl font-semibold text-blue-900 mb-4">Lecturers & Roles</h2>
         <div className="space-y-3">
           {lecturers.map((lecturer) => (
             <div
               key={lecturer.id}
-              className="rounded-lg border border-slate-700 bg-slate-950/60 p-4"
+              className="rounded-lg border border-blue-200 bg-white p-4 hover:shadow-md transition"
             >
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="font-semibold text-slate-100">{lecturer.name}</h3>
-                  <p className="text-sm text-slate-400">{lecturer.email}</p>
+                  <h3 className="font-semibold text-blue-900">{lecturer.name}</h3>
+                  <p className="text-sm text-blue-700">{lecturer.email}</p>
                   {lecturer.campus && (
-                    <p className="text-xs text-slate-500">Campus: {lecturer.campus}</p>
+                    <p className="text-xs text-blue-600">Campus: {lecturer.campus}</p>
                   )}
                 </div>
                 <div className="flex items-center gap-2">
@@ -191,7 +191,7 @@ export default function PrivilegeElevationPanel({
                     {lecturer.roles?.map((role) => (
                       <span
                         key={role}
-                        className="rounded-full bg-purple-500/20 px-3 py-1 text-xs font-semibold text-purple-300"
+                        className="rounded-full bg-purple-100 px-3 py-1 text-xs font-semibold text-purple-700 border border-purple-300"
                       >
                         {role}
                       </span>
@@ -200,7 +200,7 @@ export default function PrivilegeElevationPanel({
                   {lecturer.roles && lecturer.roles.length > 0 && (
                     <button
                       onClick={() => handleRevoke(lecturer.id, lecturer.roles[0])}
-                      className="ml-2 rounded px-2 py-1 text-xs text-rose-400 hover:text-rose-300"
+                      className="ml-2 rounded px-2 py-1 text-xs text-rose-600 hover:text-rose-500"
                       title="Revoke role"
                     >
                       Revoke
