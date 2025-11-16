@@ -57,6 +57,13 @@ interface User {
   lecturerCategory?: 'Undergraduate' | 'Postgraduate';
 }
 
+interface AppNotification {
+  id: string;
+  message: string;
+  timestamp: string;
+  read: boolean;
+}
+
 interface TimelineEvent {
   id: string;
   timestamp: string;
@@ -426,7 +433,7 @@ const formatTimestamp = (iso: string) =>
 const roleColours: Record<Role, string> = {
   'Admin': 'bg-blue-100 text-blue-700',
   Lecturer: 'bg-red-100 text-red-700',
-  'Chief Examiner': 'bg-blue-100 text-blue-700',
+  'Chief Examiner': 'bg-indigo-100 text-indigo-700',
   'Team Lead': 'bg-blue-100 text-blue-700',
   Vetter: 'bg-yellow-100 text-yellow-700',
   Setter: 'bg-yellow-100 text-yellow-700',
@@ -508,6 +515,9 @@ function App() {
   const [destructionLog, setDestructionLog] = useState<DestructionLogEntry[]>(
     []
   );
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [showNotificationPanel, setShowNotificationPanel] = useState(false);
+  const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
   const [submittedPapers, setSubmittedPapers] = useState<Array<{
     id: string;
     fileName: string;
@@ -950,11 +960,14 @@ function App() {
   const handleAssignRole = (userId: string, role: Role) => {
     const actor = currentUser?.name ?? 'Unknown';
     let assigned = false;
+    let targetUser: User | undefined;
+
     setUsers((prev) => {
       const updated = prev.map((user) => {
         if (user.id !== userId) {
           return user;
         }
+        targetUser = user;
         if (user.roles.includes(role)) {
           return user;
         }
@@ -970,14 +983,27 @@ function App() {
       return updated;
     });
 
-    if (assigned) {
-      const target = users.find((user) => user.id === userId);
-      if (target) {
-        pushWorkflowEvent(
-          `${actor} awarded the ${role} role to ${target.name}.`,
-          actor
+    if (assigned && targetUser) {
+      const message = `${role} role assigned to ${targetUser.name} by ${actor}.`;
+
+      pushWorkflowEvent(message, actor);
+
+      const notification: AppNotification = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        message,
+        timestamp: new Date().toISOString(),
+        read: false,
+      };
+
+      setNotifications((prev) => [notification, ...prev].slice(0, 20));
+      setActiveToast(notification);
+
+      // Auto-hide toast after a few seconds
+      setTimeout(() => {
+        setActiveToast((current) =>
+          current && current.id === notification.id ? null : current
         );
-      }
+      }, 5000);
     }
   };
 
@@ -1558,6 +1584,9 @@ function App() {
   const isAuthenticated = Boolean(currentUser);
   const isAdmin = currentUserHasRole('Admin');
   const isChiefExaminer = currentUserHasRole('Chief Examiner');
+  const isTeamLead = currentUserHasRole('Team Lead');
+  const isSetter = currentUserHasRole('Setter');
+  const isVetter = currentUserHasRole('Vetter');
   const isPureLecturer =
     isAuthenticated &&
     currentUserHasRole('Lecturer') &&
@@ -2142,6 +2171,7 @@ function App() {
       render: () => (
         <ChiefExaminerConsole
           users={users}
+          currentUser={currentUser}
           onAssignRole={handleAssignRole}
           onUnassignRole={handleUnassignRole}
           deadlinesActive={deadlinesActive}
@@ -2534,7 +2564,7 @@ function App() {
                 {filteredChiefExaminerPanels.length > 0 && (
                   <>
                     <div className="mt-4 mb-2 px-2">
-                      <p className="text-xs font-semibold uppercase tracking-wider text-blue-600">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-white drop-shadow-sm">
                         Chief Examiner
                       </p>
                     </div>
@@ -2542,28 +2572,29 @@ function App() {
                       const isActive = panel.id === activePanelId;
                       
                       // Define unique colors for each Chief Examiner panel
+                      // Give these a more "AI generated" neon-glow look with higher contrast
                       let panelStyles = {
-                        active: 'border-cyan-500/60 bg-gradient-to-r from-cyan-500/20 via-blue-500/20 to-cyan-500/20 text-cyan-200 shadow-cyan-500/30',
-                        inactive: 'border-cyan-500/40 bg-gradient-to-r from-cyan-500/10 via-blue-500/10 to-cyan-500/10 text-cyan-300 hover:border-cyan-500/60 hover:bg-gradient-to-r hover:from-cyan-500/20 hover:via-blue-500/20 hover:to-cyan-500/20 hover:shadow-cyan-500/40 hover:text-cyan-200',
-                        textColor: 'text-cyan-400',
-                        iconColor: 'text-cyan-500/60',
+                        active: 'border-cyan-400/80 bg-gradient-to-r from-cyan-400 via-sky-500 to-indigo-500 text-slate-900 shadow-[0_0_25px_rgba(34,211,238,0.65)]',
+                        inactive: 'border-cyan-300/40 bg-gradient-to-r from-cyan-500/15 via-sky-500/15 to-indigo-500/15 text-cyan-100 hover:border-cyan-300/80 hover:bg-gradient-to-r hover:from-cyan-400/25 hover:via-sky-500/25 hover:to-indigo-500/25 hover:shadow-[0_0_22px_rgba(56,189,248,0.55)] hover:text-cyan-50',
+                        textColor: 'text-cyan-50',
+                        iconColor: 'text-cyan-200',
                         labelParts: panel.label.split(' ')
                       };
 
                       if (panel.id === 'vetting-suite') {
                         panelStyles = {
-                          active: 'border-blue-500/60 bg-gradient-to-r from-blue-500/20 via-teal-500/20 to-emerald-500/20 text-blue-800 shadow-blue-500/30',
-                          inactive: 'border-blue-500/40 bg-gradient-to-r from-blue-500/10 via-teal-500/10 to-emerald-500/10 text-blue-700 hover:border-blue-500/60 hover:bg-gradient-to-r hover:from-blue-500/20 hover:via-teal-500/20 hover:to-emerald-500/20 hover:shadow-blue-500/40 hover:text-blue-800',
-                          textColor: 'text-blue-600',
-                          iconColor: 'text-emerald-500/60',
+                          active: 'border-emerald-400/80 bg-gradient-to-r from-emerald-400 via-teal-400 to-sky-500 text-slate-900 shadow-[0_0_25px_rgba(16,185,129,0.7)]',
+                          inactive: 'border-emerald-300/40 bg-gradient-to-r from-emerald-400/15 via-teal-400/15 to-sky-500/15 text-emerald-50 hover:border-emerald-300/80 hover:bg-gradient-to-r hover:from-emerald-400/25 hover:via-teal-400/25 hover:to-sky-500/25 hover:shadow-[0_0_22px_rgba(45,212,191,0.65)] hover:text-emerald-50',
+                          textColor: 'text-emerald-50',
+                          iconColor: 'text-emerald-100',
                           labelParts: panel.label.split(' & ')
                         };
                       } else if (panel.id === 'destruction-log') {
                         panelStyles = {
-                          active: 'border-rose-500/60 bg-gradient-to-r from-rose-500/20 via-red-500/20 to-rose-500/20 text-rose-200 shadow-rose-500/30',
-                          inactive: 'border-rose-500/40 bg-gradient-to-r from-rose-500/10 via-red-500/10 to-rose-500/10 text-rose-300 hover:border-rose-500/60 hover:bg-gradient-to-r hover:from-rose-500/20 hover:via-red-500/20 hover:to-rose-500/20 hover:shadow-rose-500/40 hover:text-rose-200',
-                          textColor: 'text-rose-400',
-                          iconColor: 'text-rose-500/60',
+                          active: 'border-rose-400/80 bg-gradient-to-r from-rose-400 via-fuchsia-500 to-purple-600 text-slate-900 shadow-[0_0_25px_rgba(244,63,94,0.7)]',
+                          inactive: 'border-rose-300/40 bg-gradient-to-r from-rose-500/15 via-fuchsia-500/15 to-purple-600/15 text-rose-100 hover:border-rose-300/80 hover:bg-gradient-to-r hover:from-rose-400/25 hover:via-fuchsia-500/25 hover:to-purple-600/25 hover:shadow-[0_0_22px_rgba(236,72,153,0.65)] hover:text-rose-50',
+                          textColor: 'text-rose-50',
+                          iconColor: 'text-rose-200',
                           labelParts: panel.label.split(' ')
                         };
                       }
@@ -2581,24 +2612,60 @@ function App() {
                         >
                           <span className="flex items-center gap-1.5">
                             {panel.id === 'chief-examiner-console' && (
-                              <span className="inline-flex items-center gap-1">
-                                <span className={`animate-heartbeat font-bold ${isActive ? 'text-cyan-300' : 'text-cyan-400'}`} style={{ animationDelay: '0s' }}>Chief</span>
-                                <span className={`animate-heartbeat font-bold ${isActive ? 'text-cyan-300' : 'text-cyan-400'}`} style={{ animationDelay: '0.15s' }}>Examiner</span>
-                                <span className={`ml-1 opacity-90 ${isActive ? 'text-cyan-200' : 'text-cyan-300'}`}>Console</span>
+                              <span className="inline-flex items-center gap-1 tracking-wide">
+                                <span
+                                  className={`animate-heartbeat font-semibold ${isActive ? 'text-slate-900' : 'text-slate-50'}`}
+                                  style={{ animationDelay: '0s' }}
+                                >
+                                  Chief
+                                </span>
+                                <span
+                                  className={`animate-heartbeat font-semibold ${isActive ? 'text-slate-900' : 'text-slate-50'}`}
+                                  style={{ animationDelay: '0.15s' }}
+                                >
+                                  Examiner
+                                </span>
+                                <span className={`ml-1 font-semibold ${isActive ? 'text-slate-900' : 'text-slate-50'}`}>
+                                  Console
+                                </span>
                               </span>
                             )}
                             {panel.id === 'vetting-suite' && (
-                              <span className="inline-flex items-center gap-1">
-                                <span className={`animate-heartbeat font-bold ${isActive ? 'text-blue-700' : 'text-blue-600'}`} style={{ animationDelay: '0s' }}>Vetting</span>
-                                <span className={`ml-1 opacity-90 ${isActive ? 'text-blue-800' : 'text-blue-700'}`}>&</span>
-                                <span className={`animate-heartbeat font-bold ${isActive ? 'text-blue-700' : 'text-blue-600'}`} style={{ animationDelay: '0.15s' }}>Annotations</span>
+                              <span className="inline-flex items-center gap-1 tracking-wide">
+                                <span
+                                  className={`animate-heartbeat font-semibold ${isActive ? 'text-slate-900' : 'text-slate-50'}`}
+                                  style={{ animationDelay: '0s' }}
+                                >
+                                  Vetting
+                                </span>
+                                <span className={`ml-1 font-semibold ${isActive ? 'text-slate-900' : 'text-slate-50'}`}>
+                                  &
+                                </span>
+                                <span
+                                  className={`animate-heartbeat font-semibold ${isActive ? 'text-slate-900' : 'text-slate-50'}`}
+                                  style={{ animationDelay: '0.15s' }}
+                                >
+                                  Annotations
+                                </span>
                               </span>
                             )}
                             {panel.id === 'destruction-log' && (
-                              <span className="inline-flex items-center gap-1">
-                                <span className={`animate-heartbeat font-bold ${isActive ? 'text-rose-300' : 'text-rose-400'}`} style={{ animationDelay: '0s' }}>Digital</span>
-                                <span className={`animate-heartbeat font-bold ${isActive ? 'text-rose-300' : 'text-rose-400'}`} style={{ animationDelay: '0.15s' }}>Destruction</span>
-                                <span className={`ml-1 opacity-90 ${isActive ? 'text-rose-200' : 'text-rose-300'}`}>Log</span>
+                              <span className="inline-flex items-center gap-1 tracking-wide">
+                                <span
+                                  className={`animate-heartbeat font-semibold ${isActive ? 'text-slate-900' : 'text-slate-50'}`}
+                                  style={{ animationDelay: '0s' }}
+                                >
+                                  Digital
+                                </span>
+                                <span
+                                  className={`animate-heartbeat font-semibold ${isActive ? 'text-slate-900' : 'text-slate-50'}`}
+                                  style={{ animationDelay: '0.15s' }}
+                                >
+                                  Destruction
+                                </span>
+                                <span className={`ml-1 font-semibold ${isActive ? 'text-slate-900' : 'text-slate-50'}`}>
+                                  Log
+                                </span>
                               </span>
                             )}
                             {!['chief-examiner-console', 'vetting-suite', 'destruction-log'].includes(panel.id) && (
@@ -2620,7 +2687,7 @@ function App() {
                         Teaching & Classes
                       </p>
                     </div>
-                    {lecturerPanelsList.map((panel) => {
+                    {lecturerPanelsList.map((panel, index) => {
                       const isActive = panel.id === activePanelId;
                       
                       // Define icons for each panel
@@ -2673,18 +2740,37 @@ function App() {
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left text-sm font-medium transition-all ${
+                          className={`group relative flex w-full items-center gap-3 rounded-2xl border px-4 py-3 text-left text-sm font-semibold shadow-sm transition-all duration-200 ${
                             isActive
-                              ? 'border-blue-300 bg-blue-500 text-white shadow-md'
-                              : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white hover:shadow-sm'
+                              ? 'border-emerald-400 bg-gradient-to-r from-emerald-500/20 via-sky-500/20 to-indigo-500/20 text-emerald-50 shadow-emerald-500/40'
+                              : 'border-transparent bg-blue-900/10 text-blue-100 hover:border-emerald-300 hover:bg-gradient-to-r hover:from-emerald-500/15 hover:via-sky-500/15 hover:to-indigo-500/15 hover:text-emerald-50 hover:shadow-lg'
                           }`}
                         >
-                          <span className={`flex-shrink-0 ${isActive ? 'text-white' : 'text-blue-200'}`}>
+                          {/* subtle glow pill behind icon */}
+                          <span
+                            className={`absolute inset-y-1 left-2 w-10 rounded-xl blur-xl opacity-0 group-hover:opacity-70 transition-opacity duration-300 ${
+                              isActive ? 'bg-emerald-400/60' : 'bg-sky-400/40'
+                            }`}
+                            aria-hidden="true"
+                          />
+                          <span className={`relative flex-shrink-0 flex h-8 w-8 items-center justify-center rounded-xl border ${isActive ? 'border-emerald-300 bg-emerald-500/20 text-emerald-50' : 'border-blue-300/40 bg-blue-500/10 text-blue-200 group-hover:border-emerald-300 group-hover:text-emerald-50'}`}>
                             {getIcon()}
                           </span>
-                          <span className="flex-1">{panel.label}</span>
-                          <span className={`text-xs flex-shrink-0 ${isActive ? 'text-white' : 'text-blue-200'}`}>
-                            {isActive ? '•' : '↗'}
+                          <span className="relative flex-1">
+                            <span className="block">
+                              {panel.label}
+                            </span>
+                            <span className="mt-0.5 block text-[0.7rem] text-blue-200/80 group-hover:text-emerald-100/90">
+                              {index === 0 && 'Quickly capture marks for your enrolled classes.'}
+                              {index === 1 && 'Search and inspect individual student records.'}
+                              {index === 2 && 'Generate rich monthly teaching and grading reports.'}
+                              {index === 3 && 'Review your AI-organised timetable for the semester.'}
+                              {index === 4 && 'See all the classes you are currently teaching.'}
+                              {index === 5 && 'Adjust your profile and notification preferences.'}
+                            </span>
+                          </span>
+                          <span className={`relative text-xs flex-shrink-0 ${isActive ? 'text-emerald-100' : 'text-blue-200/80 group-hover:text-emerald-100'}`}>
+                            {isActive ? 'Active' : 'Explore'}
                           </span>
                         </button>
                       );
@@ -2747,35 +2833,109 @@ function App() {
       </aside>
 
       <div className="flex-1 flex flex-col lg:ml-72">
-        <header className="border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
+        <header className="relative border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-600">
-                {isPureLecturer ? 'Faculty Updates' : isAdmin ? 'Admin Dashboard' : 'Current Stage'}
+                {isAdmin
+                  ? 'Admin Dashboard'
+                  : isChiefExaminer
+                  ? 'Chief Examiner Console'
+                  : isTeamLead
+                  ? 'Team Lead Console'
+                  : isVetter
+                  ? 'Vetting Console'
+                  : isSetter
+                  ? 'Setter Console'
+                  : isPureLecturer
+                  ? 'Lecturer Dashboard'
+                  : 'Current Stage'}
               </p>
               <h2 className="mt-2 text-2xl font-semibold text-blue-900 sm:text-3xl">
-                {isPureLecturer
-                  ? 'Teaching & Student Engagement'
-                  : isAdmin
+                {isAdmin
                   ? 'System Administration'
+                  : isChiefExaminer
+                  ? 'Your currently assigned Chief Examiner role'
+                  : isTeamLead
+                  ? 'Your currently assigned Team Lead role'
+                  : isVetter
+                  ? 'Your currently assigned Vetting role'
+                  : isSetter
+                  ? 'Your currently assigned Setter role'
+                  : isPureLecturer
+                  ? 'Teaching & Student Engagement'
                   : workflow.stage.replace(/-/g, ' ')}
               </h2>
               <p className="mt-1 text-sm text-slate-600">
-                {isAdmin ? 'Manage staff accounts and system configuration' : outstandingAction}
+                {isAdmin
+                  ? 'Manage staff accounts and system configuration'
+                  : isChiefExaminer
+                  ? 'You now have privileges to assign and manage the exam process.'
+                  : isTeamLead
+                  ? 'You now have privileges to coordinate setters, vetters and manage team submissions.'
+                  : isVetter
+                  ? 'You now have privileges to review and vet exam papers.'
+                  : isSetter
+                  ? 'You now have privileges to prepare and submit exam papers for moderation.'
+                  : isPureLecturer
+                  ? 'Use the dashboard below to manage your classes, students and reports.'
+                  : outstandingAction}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
-              <div className="rounded-xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white px-4 py-3 text-sm shadow-md sm:min-w-[220px]">
-                <p className="text-xs uppercase tracking-wide text-blue-600 font-semibold">
+              <div className="relative rounded-xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-indigo-50 px-3 py-2 text-xs shadow-sm sm:min-w-[210px]">
+                <div className="pointer-events-none absolute -right-6 -top-6 h-16 w-16 rounded-full bg-blue-200/40 blur-2xl" />
+                <p className="text-[0.6rem] font-semibold uppercase tracking-[0.25em] text-blue-600">
                   Signed In
                 </p>
-                <p className="mt-1 font-semibold text-blue-900">{currentUser?.name ?? 'Unknown'}</p>
-                <div className="mt-2 flex flex-wrap gap-1">
+                <p className="mt-1 text-sm font-semibold text-blue-900">
+                  {currentUser?.name ?? 'Unknown user'}
+                </p>
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                   {currentUser?.roles.map((role) => (
                     <RoleBadge key={`header-${role}`} role={role} />
                   )) ?? []}
+                  {currentUser?.roles.includes('Chief Examiner') && currentUser?.lecturerCategory && (
+                    <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-[0.65rem] font-semibold text-emerald-700 border border-emerald-200 shadow-inner">
+                      {currentUser.lecturerCategory === 'Undergraduate' ? 'UG Chief Examiner' : 'PG Chief Examiner'}
+                    </span>
+                  )}
                 </div>
               </div>
+              {/* Notification bell */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowNotificationPanel((open) => !open);
+                    setNotifications((prev) =>
+                      prev.map((n) => ({ ...n, read: true }))
+                    );
+                  }}
+                  className="relative flex h-10 w-10 items-center justify-center rounded-full border border-blue-200 bg-blue-50 text-blue-700 shadow-sm hover:bg-blue-100 hover:border-blue-300 transition"
+                  aria-label="Notifications"
+                >
+                  <svg
+                    className="h-5 w-5"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={1.8}
+                      d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
+                    />
+                  </svg>
+                  {notifications.some((n) => !n.read) && (
+                    <span className="absolute -top-1 -right-1 h-4 min-w-[1rem] rounded-full bg-rose-500 px-1 text-[0.65rem] font-semibold leading-4 text-white">
+                      {notifications.filter((n) => !n.read).length}
+                    </span>
+                  )}
+                </button>
+              </div>
+
               <button
                 type="button"
                 onClick={handleLogout}
@@ -2785,6 +2945,41 @@ function App() {
               </button>
             </div>
           </div>
+
+          {/* Notification dropdown panel */}
+          {showNotificationPanel && (
+            <div className="absolute right-4 top-full z-40 mt-3 w-full max-w-sm rounded-2xl border border-slate-200 bg-white/95 shadow-xl backdrop-blur-sm">
+              <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                <p className="text-sm font-semibold text-slate-900">Notifications</p>
+                <button
+                  type="button"
+                  className="text-xs text-slate-500 hover:text-slate-700"
+                  onClick={() => setShowNotificationPanel(false)}
+                >
+                  Close
+                </button>
+              </div>
+              <div className="max-h-72 overflow-y-auto px-4 py-3 space-y-2">
+                {notifications.length === 0 ? (
+                  <p className="text-xs text-slate-500">
+                    No notifications yet. Assign a role to a lecturer to see it here.
+                  </p>
+                ) : (
+                  notifications.map((note) => (
+                    <div
+                      key={note.id}
+                      className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-700"
+                    >
+                      <p>{note.message}</p>
+                      <p className="mt-1 text-[0.7rem] text-slate-400">
+                        {new Date(note.timestamp).toLocaleString()}
+                      </p>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
 
           <div className="mt-6 flex flex-wrap gap-3 lg:hidden">
             {panelConfigs.map((panel) => {
@@ -2806,6 +3001,35 @@ function App() {
             })}
           </div>
         </header>
+
+        {/* Toast notification for latest action */}
+        {activeToast && (
+          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-2xl border border-blue-200 bg-white/95 px-4 py-3 shadow-xl backdrop-blur-sm">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 h-6 w-6 flex items-center justify-center rounded-full bg-blue-500 text-white">
+                <svg
+                  className="h-4 w-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M13 16h-1v-4h-1m1-4h.01M12 2a10 10 0 100 20 10 10 0 000-20z"
+                  />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
+                  Role Assigned
+                </p>
+                <p className="mt-1 text-sm text-slate-800">{activeToast.message}</p>
+              </div>
+            </div>
+          </div>
+        )}
 
         <main
           ref={mainContentRef}
@@ -2840,7 +3064,7 @@ function SectionCard({
   return (
     <section
       id={id}
-      className="rounded-3xl border border-slate-200 bg-white p-6 shadow-md"
+      className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition-colors transition-shadow duration-200 hover:border-indigo-200 hover:bg-gradient-to-b hover:from-white hover:to-indigo-50 hover:shadow-md"
     >
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
@@ -2858,7 +3082,7 @@ function SectionCard({
         </div>
         {actions ? <div className="shrink-0">{actions}</div> : null}
       </div>
-      <div className="mt-6 space-y-4">{children}</div>
+      <div className="mt-4 space-y-3">{children}</div>
     </section>
   );
 }
@@ -3401,16 +3625,39 @@ function AdminViewLecturersPanel({
           kicker="Profile Information"
           description="Detailed information about this lecturer's account and privileges."
         >
-          <div className="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
+          <div className="relative overflow-hidden rounded-2xl border border-blue-100 bg-gradient-to-br from-slate-50 via-white to-blue-50 p-6 shadow-md space-y-5">
+            {/* soft background orbs */}
+            <div className="pointer-events-none absolute -left-16 -top-10 h-40 w-40 rounded-full bg-sky-300/20 blur-3xl" />
+            <div className="pointer-events-none absolute -right-10 top-24 h-40 w-40 rounded-full bg-indigo-300/20 blur-3xl" />
+            <div className="pointer-events-none absolute -bottom-16 left-1/3 h-40 w-40 rounded-full bg-emerald-300/20 blur-3xl" />
+
+            {/* main grid */}
+            <div className="relative grid gap-6 sm:grid-cols-2">
               <div>
-                <p className="text-xs text-slate-600 mb-1">Full Name</p>
-                <p className="text-sm font-semibold text-slate-800">{selectedLecturer.name}</p>
+                <p className="flex items-center gap-1 text-[0.7rem] font-semibold uppercase tracking-wide text-sky-600 mb-1">
+                  <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-sky-500/10 text-sky-600">
+                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M5.121 17.804A4 4 0 017 11h10a4 4 0 011.879 6.804L17 21H7l-1.879-3.196z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </span>
+                  Full Name
+                </p>
+                <p className="text-base font-semibold text-slate-900">{selectedLecturer.name}</p>
               </div>
               {selectedLecturer.department && (
               <div>
-                <p className="text-xs text-slate-600 mb-1">Department</p>
-                  <p className="text-sm font-semibold text-slate-800">{selectedLecturer.department}</p>
+                <p className="flex items-center gap-1 text-[0.7rem] font-semibold uppercase tracking-wide text-violet-600 mb-1">
+                  <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-violet-500/10 text-violet-600">
+                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M3 7l9-4 9 4-9 4-9-4z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M3 12l9 4 9-4" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M3 17l9 4 9-4" />
+                    </svg>
+                  </span>
+                  Department
+                </p>
+                  <p className="text-sm font-semibold text-slate-900">{selectedLecturer.department}</p>
                 </div>
               )}
               <div>
@@ -3480,22 +3727,59 @@ function AdminViewLecturersPanel({
                 )}
               </div>
               <div>
-                <p className="text-xs text-slate-600 mb-1">Base Role</p>
-                <p className="text-sm font-semibold text-slate-800">{selectedLecturer.baseRole}</p>
+                <p className="flex items-center gap-1 text-[0.7rem] font-semibold uppercase tracking-wide text-indigo-600 mb-1">
+                  <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-indigo-500/10 text-indigo-600">
+                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M5 13l4 4L19 7" />
+                    </svg>
+                  </span>
+                  Base Role
+                </p>
+                <p className="inline-flex items-center gap-2 rounded-full bg-indigo-500/10 px-3 py-1 text-xs font-semibold text-indigo-700 shadow-inner">
+                  <span className="h-2 w-2 rounded-full bg-indigo-500 animate-pulse" />
+                  {selectedLecturer.baseRole}
+                </p>
               </div>
               <div>
-                <p className="text-xs text-slate-600 mb-1">Total Privileges</p>
-                <p className="text-sm font-semibold text-blue-700">{getUserTotalPrivileges(selectedLecturer)}</p>
+                <p className="flex items-center gap-1 text-[0.7rem] font-semibold uppercase tracking-wide text-emerald-600 mb-1">
+                  <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600">
+                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M11 3v18m0 0l-4-4m4 4l4-4" />
+                    </svg>
+                  </span>
+                  Total Privileges
+                </p>
+                <p className="text-base font-semibold text-emerald-700">
+                  {getUserTotalPrivileges(selectedLecturer)}
+                </p>
               </div>
               {selectedLecturer.campus && (
                 <div>
-                  <p className="text-xs text-slate-600 mb-1">Campus</p>
-                  <p className="text-sm font-semibold text-slate-800">{selectedLecturer.campus}</p>
+                  <p className="flex items-center gap-1 text-[0.7rem] font-semibold uppercase tracking-wide text-sky-600 mb-1">
+                    <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-sky-500/10 text-sky-600">
+                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M12 11c1.657 0 3-1.343 3-3S13.657 5 12 5 9 6.343 9 8s1.343 3 3 3z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M19.5 10.5C18.194 14.357 15.457 17.5 12 19.5 8.543 17.5 5.806 14.357 4.5 10.5" />
+                      </svg>
+                    </span>
+                    Campus
+                  </p>
+                  <p className="text-sm font-semibold text-slate-900">{selectedLecturer.campus}</p>
                 </div>
               )}
             </div>
-            <div>
-              <p className="text-xs text-slate-600 mb-2">Assigned Roles</p>
+
+            {/* roles section */}
+            <div className="relative">
+              <p className="flex items-center gap-1 text-[0.7rem] font-semibold uppercase tracking-wide text-slate-600 mb-2">
+                <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-500/10 text-slate-600">
+                  <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M16 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M12 14c-4.418 0-8 1.79-8 4v1h16v-1c0-2.21-3.582-4-8-4z" />
+                  </svg>
+                </span>
+                Assigned Roles
+              </p>
               <div className="flex flex-wrap gap-2">
                 {selectedLecturer.roles.map((role) => (
                   <RoleBadge key={role} role={role} />
@@ -3503,9 +3787,17 @@ function AdminViewLecturersPanel({
               </div>
             </div>
             {(selectedLecturer.roles.includes('Vetter') || selectedLecturer.roles.includes('Team Lead') || selectedLecturer.roles.includes('Setter')) && (
-              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
-                <p className="text-xs font-semibold text-amber-300 mb-1">Vetting Staff Member</p>
-                <p className="text-xs text-amber-200">
+              <div className="relative rounded-xl border border-amber-400/40 bg-gradient-to-r from-amber-500/10 via-orange-500/10 to-rose-500/10 p-3.5 shadow-sm">
+                <div className="pointer-events-none absolute -right-4 -top-4 h-16 w-16 rounded-full bg-amber-300/30 blur-2xl" />
+                <p className="flex items-center gap-1 text-[0.7rem] font-semibold uppercase tracking-wide text-amber-200 mb-1">
+                  <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-amber-500/20 text-amber-100">
+                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M9 12l2 2 4-4m5-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </span>
+                  Vetting Staff Member
+                </p>
+                <p className="text-xs text-amber-100">
                   This lecturer is assigned to the moderation workflow as {selectedLecturer.roles.find(r => ['Vetter', 'Team Lead', 'Setter'].includes(r)) || 'Staff Member'}.
                 </p>
               </div>
@@ -3676,54 +3968,86 @@ function AdminAddAdminPanel({ onAddAdmin }: AdminAddAdminPanelProps) {
     >
       <form
         onSubmit={handleSubmit}
-        className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4"
+        className="relative overflow-hidden rounded-2xl border border-blue-100 bg-gradient-to-br from-slate-50 via-white to-indigo-50 p-5 space-y-5 shadow-md"
       >
-        <div>
-          <label className="text-xs font-semibold uppercase tracking-wide text-slate-600">
-            Admin full name *
-          </label>
-          <input
-            value={adminName}
-            onChange={(event) => setAdminName(event.target.value)}
-            placeholder="e.g. Prof. Samuel Otieno"
-            className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
-            required
-          />
+        {/* background accents */}
+        <div className="pointer-events-none absolute -left-16 -top-10 h-32 w-32 rounded-full bg-sky-300/25 blur-3xl" />
+        <div className="pointer-events-none absolute -right-12 top-10 h-32 w-32 rounded-full bg-indigo-300/25 blur-3xl" />
+        <div className="pointer-events-none absolute left-1/3 -bottom-14 h-32 w-32 rounded-full bg-emerald-300/25 blur-3xl" />
+
+        <div className="relative grid gap-4 md:grid-cols-2">
+          <div>
+            <label className="flex items-center gap-1 text-[0.7rem] font-semibold uppercase tracking-wide text-sky-600">
+              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-sky-500/10 text-sky-600">
+                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M5.121 17.804A4 4 0 017 11h10a4 4 0 011.879 6.804L17 21H7l-1.879-3.196z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+              </span>
+              Admin full name *
+            </label>
+            <input
+              value={adminName}
+              onChange={(event) => setAdminName(event.target.value)}
+              placeholder="e.g. Prof. Samuel Otieno"
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white/95 px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-500 shadow-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400/40"
+              required
+            />
+          </div>
+
+          <div>
+            <label className="flex items-center gap-1 text-[0.7rem] font-semibold uppercase tracking-wide text-violet-600">
+              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-violet-500/10 text-violet-600">
+                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M16 12a4 4 0 01-8 0" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M4 8a4 4 0 014-4h8a4 4 0 014 4v1a9 9 0 01-9 9 9 9 0 01-9-9V8z" />
+                </svg>
+              </span>
+              Admin email *
+            </label>
+            <input
+              type="email"
+              value={adminEmail}
+              onChange={(event) => setAdminEmail(event.target.value)}
+              placeholder="e.g. admin@university.ac.ke"
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white/95 px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-500 shadow-sm focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-400/40"
+              required
+            />
+          </div>
         </div>
 
-        <div>
-          <label className="text-xs font-semibold uppercase tracking-wide text-slate-600">
-            Admin email *
-          </label>
-          <input
-            type="email"
-            value={adminEmail}
-            onChange={(event) => setAdminEmail(event.target.value)}
-            placeholder="e.g. admin@university.ac.ke"
-            className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
-            required
-          />
-        </div>
-
-        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+        <div className="relative flex items-center gap-3 rounded-2xl border border-amber-200 bg-gradient-to-r from-amber-50/80 via-amber-50 to-rose-50 px-3 py-2.5 shadow-sm">
+          <span className="inline-flex h-7 w-7 items-center justify-center rounded-xl bg-amber-500/15 text-amber-600">
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.286 3.97a1 1 0 00.95.69h4.178c.969 0 1.371 1.24.588 1.81l-3.384 2.46a1 1 0 00-.364 1.118l1.287 3.97c.3.921-.755 1.688-1.54 1.118l-3.385-2.46a1 1 0 00-1.176 0l-3.385 2.46c-.784.57-1.838-.197-1.539-1.118l1.287-3.97a1 1 0 00-.364-1.118l-3.384-2.46c-.783-.57-.38-1.81.588-1.81h4.178a1 1 0 00.95-.69l1.286-3.97z" />
+            </svg>
+          </span>
+          <div className="flex-1">
+            <label htmlFor="isSuperAdmin" className="text-xs font-semibold text-amber-900 flex items-center gap-1">
+              Grant Super Admin privileges
+            </label>
+            <p className="text-[0.7rem] text-amber-700/90">
+              Super Admins can manage system-wide settings and staff accounts. Use this carefully.
+            </p>
+          </div>
           <input
             id="isSuperAdmin"
             type="checkbox"
             checked={isSuperAdminFlag}
             onChange={(e) => setIsSuperAdminFlag(e.target.checked)}
-            className="h-4 w-4 rounded border-slate-400 text-purple-600 focus:ring-purple-500"
+            className="h-4 w-4 rounded border-amber-400 text-amber-600 focus:ring-amber-500"
           />
-          <label htmlFor="isSuperAdmin" className="text-xs font-semibold text-slate-700">
-            Grant Super Admin privileges
-          </label>
         </div>
 
         <button
           type="submit"
           disabled={!adminName.trim() || !adminEmail.trim() || isSubmitting}
-          className="mt-2 w-full rounded-xl bg-blue-500/90 px-4 py-2 text-sm font-semibold text-purple-950 shadow transition hover:bg-purple-400 disabled:cursor-not-allowed disabled:bg-blue-500/30 disabled:text-purple-900"
+          className="relative mt-1 w-full overflow-hidden rounded-2xl bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500 px-4 py-2.5 text-sm font-semibold text-white shadow-md transition hover:from-blue-400 hover:via-indigo-400 hover:to-purple-400 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {isSubmitting ? 'Creating...' : 'Create Admin Account'}
+          <span className="absolute inset-0 bg-white/10 opacity-0 blur-3xl transition-opacity duration-200 hover:opacity-40" />
+          <span className="relative">
+            {isSubmitting ? 'Creating...' : 'Create Admin Account'}
+          </span>
         </button>
       </form>
     </SectionCard>
@@ -5117,6 +5441,7 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
 
 interface ChiefExaminerConsoleProps {
   users: User[];
+  currentUser: User | null;
   onAssignRole: (userId: string, role: Role) => void;
   onUnassignRole: (userId: string, role: Role) => void;
   deadlinesActive: boolean;
@@ -5153,6 +5478,7 @@ interface ChiefExaminerConsoleProps {
 
 function ChiefExaminerConsole({
   users,
+  currentUser,
   onAssignRole,
   onUnassignRole,
   deadlinesActive,
@@ -5185,10 +5511,22 @@ function ChiefExaminerConsole({
   const [teamLeadDurationForm, setTeamLeadDurationForm] = useState(teamLeadDeadlineDuration);
 
   const awardableRoles: Role[] = ['Team Lead', 'Vetter', 'Setter', 'Lecturer'];
-  const eligibleUsers = useMemo(
-    () => users.filter((user) => user.baseRole === 'Lecturer' || user.roles.includes('Lecturer')),
-    [users]
-  );
+
+  // Only show lecturers in the same category (Undergraduate/Postgraduate) as the Chief Examiner.
+  // If the Chief's category is not set, fall back to showing all lecturers.
+  const eligibleUsers = useMemo(() => {
+    const chiefCategory = currentUser?.lecturerCategory;
+
+    return users.filter((user) => {
+      const isLecturer =
+        user.baseRole === 'Lecturer' || user.roles.includes('Lecturer');
+
+      if (!isLecturer) return false;
+      if (!chiefCategory) return true;
+
+      return user.lecturerCategory === chiefCategory;
+    });
+  }, [users, currentUser]);
 
   const handleAward = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -5223,23 +5561,42 @@ function ChiefExaminerConsole({
         kicker="Operational Roles"
         description="Assign operational roles to lecturers to activate the moderation workflow pipeline."
       >
-        <div className="rounded-xl border border-slate-200 bg-white p-6">
-          <h3 className="text-base font-semibold text-slate-800 mb-2">
-            Award Operational Roles
-          </h3>
-          <p className="text-sm text-slate-600 mb-4">
-            Elevate lecturers into Team Leads, Vetters, or Setters to activate the moderation pipeline.
-          </p>
+        <div className="relative overflow-hidden rounded-xl border border-slate-200 bg-gradient-to-br from-indigo-50 via-white to-sky-50 p-6 transition-colors transition-shadow duration-200 hover:border-indigo-200 hover:from-white hover:via-sky-50 hover:to-indigo-50 hover:shadow-lg">
+          <div className="pointer-events-none absolute -right-10 -top-10 h-32 w-32 rounded-full bg-indigo-200/40 blur-3xl" />
+          <div className="pointer-events-none absolute -left-10 bottom-0 h-24 w-24 rounded-full bg-sky-200/40 blur-3xl" />
+
+          <div className="relative z-10 mb-4 flex items-start justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-sky-500 to-cyan-400 text-white shadow-md">
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M9 12l2 2 4-4m-9 8h10a2 2 0 002-2V7a2 2 0 00-2-2h-3.172a2 2 0 01-1.414-.586L9.586 3.586A2 2 0 008.172 3H6a2 2 0 00-2 2v13a2 2 0 002 2z"
+                  />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-slate-900">
+                  Award Operational Roles
+                </h3>
+                <p className="mt-1 text-sm text-slate-600">
+                  Elevate lecturers into Team Leads, Vetters, or Setters to activate the moderation pipeline.
+                </p>
+              </div>
+            </div>
+          </div>
           <form onSubmit={handleAward} className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-700 mb-2">
                   Select Lecturer
                 </label>
                 <select
                   value={awardUserId}
                   onChange={(event) => setAwardUserId(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 hover:border-indigo-400"
                 >
                   <option value="">Choose a lecturer...</option>
                   {eligibleUsers.map((user) => (
@@ -5250,13 +5607,13 @@ function ChiefExaminerConsole({
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-700 mb-2">
                   Select Role
                 </label>
                 <select
                   value={awardRole}
                   onChange={(event) => setAwardRole(event.target.value as Role)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 hover:border-indigo-400"
                 >
                   {awardableRoles.map((role) => (
                     <option key={role} value={role}>
@@ -5269,7 +5626,7 @@ function ChiefExaminerConsole({
             <button
               type="submit"
               disabled={!awardUserId}
-              className="w-full rounded-xl bg-blue-500/90 px-6 py-3 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-blue-500/40 disabled:text-indigo-900"
+              className="w-full rounded-xl bg-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-300 disabled:text-slate-200"
             >
               Assign Role
             </button>
@@ -5277,13 +5634,35 @@ function ChiefExaminerConsole({
         </div>
 
         {/* Assigned Roles Display */}
-        <div className="mt-6 rounded-xl border border-slate-200 bg-white p-6">
-          <h3 className="text-base font-semibold text-slate-800 mb-4">
-            Currently Assigned Roles
-          </h3>
-          <p className="text-sm text-slate-600 mb-4">
-            View all lecturers who have been assigned operational roles in the moderation workflow.
-          </p>
+        <div className="mt-6 relative overflow-hidden rounded-xl border border-slate-200 bg-gradient-to-br from-slate-50 via-white to-indigo-50 p-6 transition-colors transition-shadow duration-200 hover:border-indigo-200 hover:from-white hover:via-indigo-50 hover:to-slate-50 hover:shadow-lg">
+          <div className="pointer-events-none absolute -left-12 -top-8 h-28 w-28 rounded-full bg-emerald-200/40 blur-3xl" />
+          <div className="pointer-events-none absolute right-0 bottom-0 h-24 w-24 rounded-full bg-violet-200/40 blur-3xl" />
+
+          <div className="relative z-10 mb-4 flex items-start justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500 via-teal-500 to-cyan-500 text-white shadow-md">
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M17 20h5V4H2v16h5m10 0v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5m10 0H7"
+                  />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-slate-900">
+                  Currently Assigned Roles
+                </h3>
+                <p className="mt-1 text-sm text-slate-600">
+                  View all lecturers who have been assigned operational roles in the moderation workflow.
+                </p>
+              </div>
+            </div>
+            <span className="rounded-full bg-emerald-600/10 px-3 py-1 text-xs font-semibold text-emerald-700 border border-emerald-200">
+              Live overview
+            </span>
+          </div>
           
           {(() => {
             const operationalRoles: Role[] = ['Team Lead', 'Vetter', 'Setter'];
@@ -5329,27 +5708,27 @@ function ChiefExaminerConsole({
                     switch (r) {
                       case 'Team Lead':
                         return {
-                          title: 'text-violet-300',
-                          badge: 'bg-violet-500/20 text-violet-300 border-violet-500/30',
-                          active: 'bg-violet-500/30 text-violet-300 border-violet-500/50',
+                          title: 'text-indigo-800',
+                          badge: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+                          active: 'bg-indigo-600 text-white border-indigo-600',
                         };
                       case 'Vetter':
                         return {
-                          title: 'text-blue-700',
-                          badge: 'bg-blue-500/20 text-blue-700 border-blue-500/30',
-                          active: 'bg-blue-500/30 text-blue-700 border-blue-500/50',
+                          title: 'text-emerald-800',
+                          badge: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+                          active: 'bg-emerald-600 text-white border-emerald-600',
                         };
                       case 'Setter':
                         return {
-                          title: 'text-amber-300',
-                          badge: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
-                          active: 'bg-amber-500/30 text-amber-300 border-amber-500/50',
+                          title: 'text-amber-800',
+                          badge: 'bg-amber-50 text-amber-700 border-amber-200',
+                          active: 'bg-amber-500 text-white border-amber-500',
                         };
                       default:
                         return {
-                          title: 'text-slate-700',
-                          badge: 'bg-slate-500/20 text-slate-700 border-slate-500/30',
-                          active: 'bg-slate-500/30 text-slate-700 border-slate-500/50',
+                          title: 'text-slate-800',
+                          badge: 'bg-slate-50 text-slate-700 border-slate-200',
+                          active: 'bg-slate-700 text-white border-slate-700',
                         };
                     }
                   };
@@ -5357,7 +5736,7 @@ function ChiefExaminerConsole({
                   const roleStyles = getRoleStyles(role);
 
                   return (
-                    <div key={role} className="rounded-lg border border-slate-200 bg-white p-4">
+                    <div key={role} className="rounded-lg border border-slate-200 bg-white/80 p-4">
                       <div className="flex items-center justify-between mb-3">
                         <h4 className={`text-sm font-semibold ${roleStyles.title}`}>
                           {role}
@@ -5382,7 +5761,7 @@ function ChiefExaminerConsole({
                                     className={`px-2 py-0.5 rounded text-xs font-medium border ${
                                       assignedRole === role
                                         ? assignedStyles.active
-                                        : 'bg-slate-700/50 text-slate-600 border-slate-600/50'
+                                        : 'bg-slate-100 text-slate-600 border-slate-200'
                                     }`}
                                   >
                                     {assignedRole}
@@ -5392,7 +5771,7 @@ function ChiefExaminerConsole({
                               <button
                                 type="button"
                                 onClick={() => onUnassignRole(user.id, role)}
-                                className="px-2 py-1 rounded text-xs font-medium bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 transition"
+                                className="px-2 py-1 rounded text-xs font-semibold bg-rose-600 text-white hover:bg-rose-700 border border-rose-600 shadow-sm transition"
                                 title={`Remove ${role} role from ${user.name}`}
                               >
                                 Remove
@@ -5418,15 +5797,29 @@ function ChiefExaminerConsole({
       >
         <div className="grid gap-6 lg:grid-cols-2">
           {/* Setter Deadline Configuration */}
-          <div className="rounded-xl border border-slate-200 bg-white p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h3 className="text-base font-semibold text-pink-300">
-                  Setter Submission Deadline
-                </h3>
-                <p className="text-sm text-slate-600 mt-1">
-                  Set duration for Setter paper submissions
-                </p>
+          <div className="relative overflow-hidden rounded-xl border border-slate-200 bg-gradient-to-br from-rose-50 via-white to-pink-50 p-6">
+            <div className="pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full bg-pink-200/40 blur-3xl" />
+            <div className="pointer-events-none absolute -left-10 bottom-0 h-24 w-24 rounded-full bg-rose-200/40 blur-3xl" />
+            <div className="relative flex items-center justify-between mb-4">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-pink-500 via-rose-500 to-amber-400 text-white shadow-md">
+                  <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M12 8v4l2 2m6-2a8 8 0 11-16 0 8 8 0 0116 0z"
+                    />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-base font-semibold text-pink-700">
+                    Setter Submission Deadline
+                  </h3>
+                  <p className="text-sm text-slate-700 mt-1">
+                    Set duration for Setter paper submissions
+                  </p>
+                </div>
               </div>
               <StatusPill
                 label={setterDeadlineActive ? 'Active' : 'Inactive'}
@@ -5436,9 +5829,9 @@ function ChiefExaminerConsole({
             </div>
 
             {setterDeadlineActive && setterDeadlineStartTime && (
-              <div className="mb-4 rounded-lg border border-pink-500/30 bg-pink-500/10 p-4">
-                <p className="text-xs font-semibold text-pink-300 mb-1">Current Deadline Duration</p>
-                <p className="text-sm text-pink-200 font-medium">
+              <div className="mb-4 rounded-lg border border-pink-200 bg-pink-50 p-4">
+                <p className="text-xs font-semibold text-pink-700 mb-1">Current Deadline Duration</p>
+                <p className="text-sm text-pink-800 font-medium">
                   {setterDeadlineDuration.days} day{setterDeadlineDuration.days !== 1 ? 's' : ''}, {setterDeadlineDuration.hours} hour{setterDeadlineDuration.hours !== 1 ? 's' : ''}, {setterDeadlineDuration.minutes} minute{setterDeadlineDuration.minutes !== 1 ? 's' : ''}
                 </p>
               </div>
@@ -5514,9 +5907,9 @@ function ChiefExaminerConsole({
                         />
                       </div>
                     </div>
-                    <div className="mt-4 rounded-lg border border-pink-500/30 bg-pink-500/10 p-3">
-                      <p className="text-xs font-semibold text-pink-300 mb-1">Duration Preview</p>
-                      <p className="text-sm text-pink-200">
+                    <div className="mt-4 rounded-lg border border-pink-200 bg-pink-50 p-3">
+                      <p className="text-xs font-semibold text-pink-700 mb-1">Duration Preview</p>
+                      <p className="text-sm font-semibold text-pink-900">
                         {setterDurationForm.days} day{setterDurationForm.days !== 1 ? 's' : ''}, {setterDurationForm.hours} hour{setterDurationForm.hours !== 1 ? 's' : ''}, {setterDurationForm.minutes} minute{setterDurationForm.minutes !== 1 ? 's' : ''}
                       </p>
                     </div>
@@ -5548,18 +5941,32 @@ function ChiefExaminerConsole({
           </div>
 
           {/* Team Lead Deadline Configuration */}
-          <div className="rounded-xl border border-slate-200 bg-white p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h3 className="text-base font-semibold text-violet-300">
-                  Team Lead Submission Deadline
-                </h3>
-                <p className="text-sm text-slate-600 mt-1">
-                  Set duration for Team Lead paper submissions
-                </p>
-                <p className="text-xs text-slate-500 mt-1">
-                  Starts automatically when Setter deadline expires
-                </p>
+          <div className="relative overflow-hidden rounded-xl border border-slate-200 bg-gradient-to-br from-violet-50 via-white to-indigo-50 p-6">
+            <div className="pointer-events-none absolute -left-10 -top-10 h-28 w-28 rounded-full bg-violet-200/40 blur-3xl" />
+            <div className="pointer-events-none absolute right-0 bottom-0 h-24 w-24 rounded-full bg-indigo-200/40 blur-3xl" />
+            <div className="relative flex items-center justify-between mb-4">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-sky-400 text-white shadow-md">
+                  <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                    />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-base font-semibold text-violet-700">
+                    Team Lead Submission Deadline
+                  </h3>
+                  <p className="text-sm text-slate-700 mt-1">
+                    Set duration for Team Lead paper submissions
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Starts automatically when Setter deadline expires
+                  </p>
+                </div>
               </div>
               <StatusPill
                 label={teamLeadDeadlineActive ? 'Active' : 'Inactive'}
@@ -5569,9 +5976,9 @@ function ChiefExaminerConsole({
             </div>
 
             {teamLeadDeadlineActive && teamLeadDeadlineStartTime && (
-              <div className="mb-4 rounded-lg border border-violet-500/30 bg-violet-500/10 p-4">
-                <p className="text-xs font-semibold text-violet-300 mb-1">Current Deadline Duration</p>
-                <p className="text-sm text-violet-200 font-medium">
+              <div className="mb-4 rounded-lg border border-violet-200 bg-violet-50 p-4">
+                <p className="text-xs font-semibold text-violet-700 mb-1">Current Deadline Duration</p>
+                <p className="text-sm text-violet-800 font-medium">
                   {teamLeadDeadlineDuration.days} day{teamLeadDeadlineDuration.days !== 1 ? 's' : ''}, {teamLeadDeadlineDuration.hours} hour{teamLeadDeadlineDuration.hours !== 1 ? 's' : ''}, {teamLeadDeadlineDuration.minutes} minute{teamLeadDeadlineDuration.minutes !== 1 ? 's' : ''}
                 </p>
               </div>
@@ -5655,9 +6062,9 @@ function ChiefExaminerConsole({
                         />
                       </div>
                     </div>
-                    <div className="mt-4 rounded-lg border border-violet-500/30 bg-violet-500/10 p-3">
-                      <p className="text-xs font-semibold text-violet-300 mb-1">Duration Preview</p>
-                      <p className="text-sm text-violet-200">
+                    <div className="mt-4 rounded-lg border border-violet-200 bg-violet-50 p-3">
+                      <p className="text-xs font-semibold text-violet-700 mb-1">Duration Preview</p>
+                      <p className="text-sm font-semibold text-violet-900">
                         {teamLeadDurationForm.days} day{teamLeadDurationForm.days !== 1 ? 's' : ''}, {teamLeadDurationForm.hours} hour{teamLeadDurationForm.hours !== 1 ? 's' : ''}, {teamLeadDurationForm.minutes} minute{teamLeadDurationForm.minutes !== 1 ? 's' : ''}
                       </p>
                     </div>
@@ -5713,7 +6120,7 @@ function ChiefExaminerConsole({
                   onClick={() => onToggleRepositories(!repositoriesActive)}
                   className={`w-full rounded-xl px-6 py-3 text-sm font-semibold transition ${
                     repositoriesActive
-                      ? 'bg-amber-500/90 text-amber-950 hover:bg-amber-400'
+                      ? 'bg-emerald-500/90 text-emerald-950 hover:bg-emerald-400'
                       : 'bg-blue-500/90 text-emerald-950 hover:bg-blue-400'
                   }`}
                 >
