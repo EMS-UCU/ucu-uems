@@ -47,6 +47,7 @@ export interface DatabaseUser {
   is_super_admin?: boolean;
   campus?: string;
   department?: string;
+  course_unit?: string | null;
   lecturer_category?: 'Undergraduate' | 'Postgraduate';
   created_at: string;
   updated_at: string;
@@ -62,6 +63,7 @@ export interface UserProfile {
   isSuperAdmin?: boolean;
   campus?: string;
   department?: string;
+  courseUnit?: string;
   lecturerCategory?: 'Undergraduate' | 'Postgraduate';
 }
 

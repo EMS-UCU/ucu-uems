@@ -54,6 +54,7 @@ interface User {
   isSuperAdmin?: boolean;
   campus?: string;
   department?: string;
+  courseUnit?: string;
   lecturerCategory?: 'Undergraduate' | 'Postgraduate';
 }
 
@@ -5502,6 +5503,7 @@ function ChiefExaminerConsole({
   sectionId,
 }: ChiefExaminerConsoleProps) {
   const [awardUserId, setAwardUserId] = useState('');
+  const [selectedCourseUnit, setSelectedCourseUnit] = useState('');
   const [awardRole, setAwardRole] = useState<Role>('Team Lead');
   const [showDurationSettings, setShowDurationSettings] = useState(false);
   const [durationForm, setDurationForm] = useState(deadlineDuration);
@@ -5512,8 +5514,17 @@ function ChiefExaminerConsole({
 
   const awardableRoles: Role[] = ['Team Lead', 'Vetter', 'Setter', 'Lecturer'];
 
+  // Available course units from user profiles (non-empty, unique)
+  const courseUnits = useMemo(() => {
+    const units = users
+      .map((u) => u.courseUnit)
+      .filter((u): u is string => !!u && u.trim().length > 0);
+    return Array.from(new Set(units));
+  }, [users]);
+
   // Only show lecturers in the same category (Undergraduate/Postgraduate) as the Chief Examiner.
-  // If the Chief's category is not set, fall back to showing all lecturers.
+  // Also filter by selected course unit (if chosen).
+  // If the Chief's category is not set, fall back to showing all lecturers for that course unit.
   const eligibleUsers = useMemo(() => {
     const chiefCategory = currentUser?.lecturerCategory;
 
@@ -5522,11 +5533,17 @@ function ChiefExaminerConsole({
         user.baseRole === 'Lecturer' || user.roles.includes('Lecturer');
 
       if (!isLecturer) return false;
+
+       // If a course unit is chosen, user must belong to that course
+       if (selectedCourseUnit && user.courseUnit !== selectedCourseUnit) {
+         return false;
+       }
+
       if (!chiefCategory) return true;
 
       return user.lecturerCategory === chiefCategory;
     });
-  }, [users, currentUser]);
+  }, [users, currentUser, selectedCourseUnit]);
 
   const handleAward = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -5591,14 +5608,43 @@ function ChiefExaminerConsole({
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-wide text-slate-700 mb-2">
+                  Select Course Unit
+                </label>
+                <select
+                  value={selectedCourseUnit}
+                  onChange={(event) => {
+                    setSelectedCourseUnit(event.target.value);
+                    // Reset lecturer selection when course changes
+                    setAwardUserId('');
+                  }}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 hover:border-indigo-400"
+                >
+                  <option value="">Choose a course unit...</option>
+                  {courseUnits.length === 0 && (
+                    <option value="" disabled>
+                      No course units found
+                    </option>
+                  )}
+                  {courseUnits.map((unit) => (
+                    <option key={unit} value={unit}>
+                      {unit}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-700 mb-2">
                   Select Lecturer
                 </label>
                 <select
                   value={awardUserId}
                   onChange={(event) => setAwardUserId(event.target.value)}
                   className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 hover:border-indigo-400"
+                  disabled={!selectedCourseUnit}
                 >
-                  <option value="">Choose a lecturer...</option>
+                  <option value="">
+                    {selectedCourseUnit ? 'Choose a lecturer...' : 'Select a course unit first'}
+                  </option>
                   {eligibleUsers.map((user) => (
                     <option key={user.id} value={user.id}>
                       {user.name}
@@ -5625,7 +5671,7 @@ function ChiefExaminerConsole({
             </div>
             <button
               type="submit"
-              disabled={!awardUserId}
+              disabled={!selectedCourseUnit || !awardUserId}
               className="w-full rounded-xl bg-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-300 disabled:text-slate-200"
             >
               Assign Role

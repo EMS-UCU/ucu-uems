@@ -13,6 +13,7 @@ export function authUserToAppUser(authUser: any, profile: any): User {
     isSuperAdmin: profile?.is_super_admin || false,
     campus: profile?.campus,
     department: profile?.department,
+    courseUnit: profile?.course_unit || undefined,
     lecturerCategory: profile?.lecturer_category as 'Undergraduate' | 'Postgraduate' | undefined,
   };
 }
@@ -29,6 +30,7 @@ export function dbUserToAppUser(dbUser: DatabaseUser): User {
     isSuperAdmin: dbUser.is_super_admin || false,
     campus: dbUser.campus,
     department: dbUser.department,
+    courseUnit: dbUser.course_unit || undefined,
     lecturerCategory: dbUser.lecturer_category,
   };
 }
@@ -240,6 +242,7 @@ export async function getAllUsers(): Promise<User[]> {
       isSuperAdmin: profile.is_super_admin || false,
       campus: profile.campus,
       department: profile.department,
+      courseUnit: profile.course_unit || undefined,
       lecturerCategory: profile.lecturer_category as 'Undergraduate' | 'Postgraduate' | undefined,
     }));
 
