@@ -7,13 +7,26 @@ import {
   type ReactNode,
 } from 'react';
 import { motion } from 'framer-motion';
+import {
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Cell,
+} from 'recharts';
 import HomePage from './HomePage';
 import { authenticateUser, getAllUsers } from './lib/auth';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
 import LecturerDashboard from './components/LecturerDashboard';
 import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 import { supabase } from './lib/supabase';
-import { elevateToChiefExaminer } from './lib/privilegeElevation';
+import { elevateToChiefExaminer, appointRole } from './lib/privilegeElevation';
+import { createNotification, getUserNotifications } from './lib/examServices/notificationService';
 
 type BaseRole = 'Admin' | 'Lecturer';
 type Role =
@@ -116,6 +129,23 @@ interface DestructionLogEntry {
   versionLabel: string;
   timestamp: string;
   details: string;
+}
+
+interface SubmittedPaper {
+  id: string;
+  fileName: string;
+  submittedBy: string;
+  submittedAt: string;
+  fileSize?: number;
+  status: 'submitted' | 'in-vetting' | 'vetted' | 'approved';
+}
+
+interface SetterSubmission {
+  id: string;
+  fileName: string;
+  submittedBy: string;
+  submittedAt: string;
+  fileContent?: string;
 }
 
 interface Annotation {
@@ -519,21 +549,8 @@ function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
-  const [submittedPapers, setSubmittedPapers] = useState<Array<{
-    id: string;
-    fileName: string;
-    submittedBy: string;
-    submittedAt: string;
-    fileSize?: number;
-    status: 'submitted' | 'in-vetting' | 'vetted' | 'approved';
-  }>>([]);
-  const [setterSubmissions, setSetterSubmissions] = useState<Array<{
-    id: string;
-    fileName: string;
-    submittedBy: string;
-    submittedAt: string;
-    fileContent?: string; // Store file content or reference
-  }>>([]);
+  const [submittedPapers, setSubmittedPapers] = useState<SubmittedPaper[]>([]);
+  const [setterSubmissions, setSetterSubmissions] = useState<SetterSubmission[]>([]);
   const [repositoryPapers, setRepositoryPapers] = useState<Array<{
     id: string;
     courseUnit: string;
@@ -612,6 +629,30 @@ function App() {
 
     loadUsersFromSupabase();
   }, []);
+
+  // Load persisted notifications for the signed-in user from Supabase
+  useEffect(() => {
+    const loadNotifications = async () => {
+      if (!currentUser) {
+        setNotifications([]);
+        return;
+      }
+      try {
+        const dbNotifications = await getUserNotifications(currentUser.id);
+        const mapped: AppNotification[] = dbNotifications.map((n) => ({
+          id: n.id,
+          message: n.message,
+          timestamp: n.created_at,
+          read: n.is_read,
+        }));
+        setNotifications(mapped);
+      } catch (error) {
+        console.error('Error loading user notifications:', error);
+      }
+    };
+
+    void loadNotifications();
+  }, [currentUser]);
 
   // Persist users to localStorage whenever they change (as backup)
   useEffect(() => {
@@ -958,24 +999,22 @@ function App() {
     }
   };
 
-  const handleAssignRole = (userId: string, role: Role) => {
-    const actor = currentUser?.name ?? 'Unknown';
+  const handleAssignRole = async (userId: string, role: Role) => {
+    if (!currentUser) return;
+
+    const actor = currentUser.name ?? 'Unknown';
     let assigned = false;
     let targetUser: User | undefined;
 
+    // Update local state first so UI feels instant
     setUsers((prev) => {
       const updated = prev.map((user) => {
-        if (user.id !== userId) {
-          return user;
-        }
+        if (user.id !== userId) return user;
         targetUser = user;
-        if (user.roles.includes(role)) {
-          return user;
-        }
+        if (user.roles.includes(role)) return user;
         assigned = true;
         return { ...user, roles: [...user.roles, role] };
       });
-      // Persist immediately
       try {
         localStorage.setItem('ucu-moderation-users', JSON.stringify(updated));
       } catch (error) {
@@ -984,7 +1023,21 @@ function App() {
       return updated;
     });
 
-    if (assigned && targetUser) {
+    if (!assigned || !targetUser) {
+      return;
+    }
+
+    // Persist assignment to Supabase so it's saved in the DB
+    const dbResult =
+      role === 'Team Lead' || role === 'Vetter' || role === 'Setter'
+        ? await appointRole(targetUser.id, role, currentUser.id)
+        : await elevateToChiefExaminer(targetUser.id, currentUser.id);
+
+    if (!dbResult.success) {
+      console.error('Error saving role assignment to database:', dbResult.error);
+      // Optional: show an error toast or roll back the local change
+    }
+
       const message = `${role} role assigned to ${targetUser.name} by ${actor}.`;
 
       pushWorkflowEvent(message, actor);
@@ -996,8 +1049,18 @@ function App() {
         read: false,
       };
 
+    // Show toast + local bell update for the current user (Chief Examiner)
       setNotifications((prev) => [notification, ...prev].slice(0, 20));
       setActiveToast(notification);
+
+    // Also persist notification to DB for the appointed lecturer,
+    // so they see it next time they sign in.
+    void createNotification({
+      user_id: targetUser.id,
+      title: 'New Operational Role Assigned',
+      message,
+      type: 'success',
+    });
 
       // Auto-hide toast after a few seconds
       setTimeout(() => {
@@ -1005,7 +1068,6 @@ function App() {
           current && current.id === notification.id ? null : current
         );
       }, 5000);
-    }
   };
 
   const handleUnassignRole = (userId: string, role: Role) => {
@@ -1192,6 +1254,9 @@ function App() {
       actor,
       `Setter lodged the initial draft paper (${courseCode} - ${courseUnit}) and notified Chief Examiner. Paper added to repository for AI analysis.`
     );
+
+    // Previously we showed a toast + notification for draft submission.
+    // This has been removed per product feedback to keep the interface cleaner.
   };
 
   const handleTeamLeadSubmitPDF = (file: File, courseUnit: string, courseCode: string, semester: string, year: string) => {
@@ -2166,6 +2231,29 @@ function App() {
 
   if (isAuthenticated && isChiefExaminer) {
     roleSpecificPanels.push({
+      id: 'chief-examiner-dashboard',
+      label: 'Chief Examiner Dashboard',
+      visible: true,
+      render: () => (
+        <ChiefExaminerDashboardPanel
+          workflow={workflow}
+          submittedPapers={submittedPapers}
+          setterSubmissions={setterSubmissions}
+          annotations={annotations}
+        />
+      ),
+    });
+
+    roleSpecificPanels.push({
+      id: 'chief-examiner-track-paper',
+      label: 'Track Paper',
+      visible: true,
+      render: () => (
+        <PaperTrackingPanel workflow={workflow} submittedPapers={submittedPapers} />
+      ),
+    });
+
+    roleSpecificPanels.push({
       id: 'chief-examiner-console',
       label: 'Chief Examiner Console',
       visible: true,
@@ -2239,13 +2327,29 @@ function App() {
           deadlineActive={setterDeadlineActive}
           deadlineStartTime={setterDeadlineStartTime}
           deadlineDuration={setterDeadlineDuration}
+          currentUserCourseUnit={currentUser?.courseUnit}
         />
       ),
     });
   }
 
-  // Team Lead specific panel (only for pure Team Leads, not Chief Examiners)
+  // Team Lead specific panels (only for pure Team Leads, not Chief Examiners)
   if (isAuthenticated && currentUserHasRole('Team Lead') && !currentUserHasRole('Chief Examiner')) {
+    roleSpecificPanels.push({
+      id: 'team-lead-dashboard',
+      label: 'Team Lead Dashboard',
+      visible: true,
+      render: () => (
+        <TeamLeadDashboardPanel
+          workflow={workflow}
+          submittedPapers={submittedPapers.filter((p) => p.submittedBy === currentUser?.name)}
+          // Show all setter submissions relevant to this workflow so the Team Lead
+          // can see the true count of drafts coming in from Setters.
+          setterSubmissions={setterSubmissions}
+        />
+      ),
+    });
+
     roleSpecificPanels.push({
       id: 'team-lead-panel',
       label: 'Team Lead Submission',
@@ -2257,7 +2361,7 @@ function App() {
           deadlineDuration={teamLeadDeadlineDuration}
           repositoriesActive={repositoriesActive}
           onTeamLeadCompile={handleTeamLeadCompile}
-          submittedPapers={submittedPapers.filter(p => p.submittedBy === currentUser?.name)}
+          submittedPapers={submittedPapers.filter((p) => p.submittedBy === currentUser?.name)}
           setterSubmissions={setterSubmissions}
           workflowStage={workflow.stage}
           onSubmitPDF={handleTeamLeadSubmitPDF}
@@ -2445,8 +2549,14 @@ function App() {
             const lecturerPanelsList = panelConfigs.filter(p => 
               p.id.startsWith('lecturer-') && p.id !== 'lecturer-role-dashboard'
             );
-            const chiefExaminerPanels = panelConfigs.filter(p => p.id === 'chief-examiner-console' || p.id === 'vetting-suite' || p.id === 'destruction-log');
-            const teamLeadPanels = panelConfigs.filter(p => p.id === 'team-lead-panel');
+            const chiefExaminerPanels = panelConfigs.filter(p => 
+              p.id === 'chief-examiner-console' || 
+              p.id === 'vetting-suite' || 
+              p.id === 'destruction-log' ||
+              p.id === 'chief-examiner-dashboard' ||
+              p.id === 'chief-examiner-track-paper'
+            );
+            const teamLeadPanels = panelConfigs.filter(p => p.id === 'team-lead-panel' || p.id === 'team-lead-dashboard');
             const setterPanels = panelConfigs.filter(p => p.id === 'setter-panel');
             const adminPanelsList = panelConfigs.filter(p => p.id.startsWith('super-') || p.id.startsWith('admin-'));
             const otherPanels = panelConfigs.filter(p => 
@@ -2741,7 +2851,7 @@ function App() {
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`group relative flex w-full items-center gap-3 rounded-2xl border px-4 py-3 text-left text-sm font-semibold shadow-sm transition-all duration-200 ${
+                          className={`group relative flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs font-semibold shadow-sm transition-all duration-200 ${
                             isActive
                               ? 'border-emerald-400 bg-gradient-to-r from-emerald-500/20 via-sky-500/20 to-indigo-500/20 text-emerald-50 shadow-emerald-500/40'
                               : 'border-transparent bg-blue-900/10 text-blue-100 hover:border-emerald-300 hover:bg-gradient-to-r hover:from-emerald-500/15 hover:via-sky-500/15 hover:to-indigo-500/15 hover:text-emerald-50 hover:shadow-lg'
@@ -2754,14 +2864,14 @@ function App() {
                             }`}
                             aria-hidden="true"
                           />
-                          <span className={`relative flex-shrink-0 flex h-8 w-8 items-center justify-center rounded-xl border ${isActive ? 'border-emerald-300 bg-emerald-500/20 text-emerald-50' : 'border-blue-300/40 bg-blue-500/10 text-blue-200 group-hover:border-emerald-300 group-hover:text-emerald-50'}`}>
+                          <span className={`relative flex-shrink-0 flex h-7 w-7 items-center justify-center rounded-lg border ${isActive ? 'border-emerald-300 bg-emerald-500/20 text-emerald-50' : 'border-blue-300/40 bg-blue-500/10 text-blue-200 group-hover:border-emerald-300 group-hover:text-emerald-50'}`}>
                             {getIcon()}
                           </span>
                           <span className="relative flex-1">
-                            <span className="block">
+                            <span className="block text-[0.8rem]">
                               {panel.label}
                             </span>
-                            <span className="mt-0.5 block text-[0.7rem] text-blue-200/80 group-hover:text-emerald-100/90">
+                            <span className="mt-0.5 block text-[0.65rem] text-blue-200/80 group-hover:text-emerald-100/90">
                               {index === 0 && 'Quickly capture marks for your enrolled classes.'}
                               {index === 1 && 'Search and inspect individual student records.'}
                               {index === 2 && 'Generate rich monthly teaching and grading reports.'}
@@ -2901,6 +3011,21 @@ function App() {
                       {currentUser.lecturerCategory === 'Undergraduate' ? 'UG Chief Examiner' : 'PG Chief Examiner'}
                     </span>
                   )}
+                  {currentUser && (
+                    <span className="inline-flex items-center rounded-full bg-yellow-50 px-2.5 py-0.5 text-[0.65rem] font-semibold text-yellow-700 border border-yellow-200 shadow-inner">
+                      Semester: Advent
+                    </span>
+                  )}
+                  {currentUser?.courseUnit &&
+                    currentUser.courseUnit.toLowerCase().includes('network') && (
+                      <span className="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-0.5 text-[0.65rem] font-semibold text-indigo-700 border border-indigo-200 shadow-inner">
+                        {currentUser.roles.includes('Team Lead')
+                          ? 'Team Lead – Networking'
+                          : currentUser.roles.includes('Setter')
+                          ? 'Setter – Networking'
+                          : 'Networking'}
+                      </span>
+                    )}
                 </div>
               </div>
               {/* Notification bell */}
@@ -2947,20 +3072,37 @@ function App() {
             </div>
           </div>
 
-          {/* Notification dropdown panel */}
-          {showNotificationPanel && (
-            <div className="absolute right-4 top-full z-40 mt-3 w-full max-w-sm rounded-2xl border border-slate-200 bg-white/95 shadow-xl backdrop-blur-sm">
-              <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-                <p className="text-sm font-semibold text-slate-900">Notifications</p>
+          {/* Notification dropdown panel - light, AI-inspired */}
+          <div
+            className={`absolute right-4 top-full z-50 mt-3 w-[300px] sm:w-[340px] rounded-2xl border border-blue-100 bg-white/95 shadow-xl shadow-blue-200/60 backdrop-blur-md transition-all duration-300 origin-top-right transform ${
+              showNotificationPanel
+                ? 'pointer-events-auto opacity-100 translate-y-0 scale-100'
+                : 'pointer-events-none opacity-0 -translate-y-2 scale-95'
+            }`}
+          >
+            <div className="relative overflow-hidden rounded-2xl">
+              <div className="pointer-events-none absolute -right-10 -top-16 h-28 w-28 rounded-full bg-indigo-200/70 blur-3xl" />
+              <div className="pointer-events-none absolute -left-10 -bottom-16 h-32 w-32 rounded-full bg-cyan-200/60 blur-3xl" />
+
+              <div className="relative flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                <div>
+                  <p className="text-[0.65rem] font-semibold uppercase tracking-[0.22em] text-indigo-500/90">
+                    Activity Stream
+                  </p>
+                  <p className="mt-0.5 text-sm font-semibold text-slate-900">
+                    Notifications
+                  </p>
+                </div>
                 <button
                   type="button"
-                  className="text-xs text-slate-500 hover:text-slate-700"
+                  className="inline-flex items-center rounded-full border border-blue-100 bg-blue-50/70 px-2.5 py-1 text-[0.7rem] font-medium text-blue-800 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 hover:text-blue-900"
                   onClick={() => setShowNotificationPanel(false)}
                 >
                   Close
                 </button>
               </div>
-              <div className="max-h-72 overflow-y-auto px-4 py-3 space-y-2">
+
+              <div className="relative max-h-72 space-y-2 overflow-y-auto px-4 py-3">
                 {notifications.length === 0 ? (
                   <p className="text-xs text-slate-500">
                     No notifications yet. Assign a role to a lecturer to see it here.
@@ -2969,10 +3111,15 @@ function App() {
                   notifications.map((note) => (
                     <div
                       key={note.id}
-                      className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-700"
+                      className={`group relative overflow-hidden rounded-xl border px-3 py-2 text-xs text-slate-800 shadow-sm transition-all duration-300 ${
+                        note.read
+                          ? 'border-slate-100 bg-slate-50/80'
+                          : 'border-blue-200 bg-gradient-to-r from-blue-50 via-indigo-50 to-cyan-50 shadow-[0_0_0_1px_rgba(129,140,248,0.35)]'
+                      } hover:translate-y-[-1px] hover:shadow-md hover:shadow-blue-200/80`}
                     >
-                      <p>{note.message}</p>
-                      <p className="mt-1 text-[0.7rem] text-slate-400">
+                      <div className="pointer-events-none absolute inset-y-0 right-0 w-16 bg-gradient-to-l from-indigo-200/70 via-transparent to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
+                      <p className="relative pr-4">{note.message}</p>
+                      <p className="relative mt-1 text-[0.7rem] text-slate-400">
                         {new Date(note.timestamp).toLocaleString()}
                       </p>
                     </div>
@@ -2980,7 +3127,7 @@ function App() {
                 )}
               </div>
             </div>
-          )}
+          </div>
 
           <div className="mt-6 flex flex-wrap gap-3 lg:hidden">
             {panelConfigs.map((panel) => {
@@ -3005,7 +3152,7 @@ function App() {
 
         {/* Toast notification for latest action */}
         {activeToast && (
-          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-2xl border border-blue-200 bg-white/95 px-4 py-3 shadow-xl backdrop-blur-sm">
+          <div className="fixed top-20 right-4 z-50 max-w-sm rounded-2xl border border-blue-200 bg-white/98 px-4 py-3 shadow-xl backdrop-blur-sm">
             <div className="flex items-start gap-3">
               <div className="mt-0.5 h-6 w-6 flex items-center justify-center rounded-full bg-blue-500 text-white">
                 <svg
@@ -5409,9 +5556,9 @@ function AddPaperToRepositoryForm({ onAddPaper }: AddPaperToRepositoryFormProps)
             className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           >
             <option value="">Select semester...</option>
-            <option value="Fall">Fall</option>
-            <option value="Spring">Spring</option>
-            <option value="Summer">Summer</option>
+            <option value="Advent">Advent</option>
+            <option value="Easter">Easter</option>
+            <option value="Trinity">Trinity</option>
           </select>
         </div>
 
@@ -5513,6 +5660,16 @@ function ChiefExaminerConsole({
   const [teamLeadDurationForm, setTeamLeadDurationForm] = useState(teamLeadDeadlineDuration);
 
   const awardableRoles: Role[] = ['Team Lead', 'Vetter', 'Setter', 'Lecturer'];
+
+  // Helper to decorate lecturer options with campus icons when needed
+  const getCampusBadgeForLecturer = (campus?: string) => {
+    if (!campus) return '';
+    const lowered = campus.toLowerCase();
+    if (lowered.includes('main')) {
+      return '🏛 Main campus';
+    }
+    return `📍 ${campus}`;
+  };
 
   // Available course units from user profiles (non-empty, unique)
   const courseUnits = useMemo(() => {
@@ -5645,11 +5802,20 @@ function ChiefExaminerConsole({
                   <option value="">
                     {selectedCourseUnit ? 'Choose a lecturer...' : 'Select a course unit first'}
                   </option>
-                  {eligibleUsers.map((user) => (
-                    <option key={user.id} value={user.id}>
-                      {user.name}
-                    </option>
-                  ))}
+                  {eligibleUsers.map((user) => {
+                    const isNetworkingCourse =
+                      typeof selectedCourseUnit === 'string' &&
+                      selectedCourseUnit.toLowerCase().includes('network');
+                    const label =
+                      isNetworkingCourse && user.campus
+                        ? `${user.name} • ${getCampusBadgeForLecturer(user.campus)}`
+                        : user.name;
+                    return (
+                      <option key={user.id} value={user.id}>
+                        {label}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
               <div>
@@ -5791,38 +5957,139 @@ function ChiefExaminerConsole({
                           {usersWithRole.length} {usersWithRole.length === 1 ? 'person' : 'people'}
                         </span>
                       </div>
-                      <div className="space-y-2">
-                        {usersWithRole.map(user => (
+                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        {usersWithRole.map((user) => (
                           <div
                             key={user.id}
-                            className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
+                            className="relative overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-sky-50 p-3 shadow-sm"
                           >
-                            <span className="text-sm text-slate-800">{user.name}</span>
-                            <div className="flex items-center gap-2">
-                              {user.roles.filter(r => operationalRoles.includes(r)).map(assignedRole => {
-                                const assignedStyles = getRoleStyles(assignedRole);
-                                return (
-                                  <span
-                                    key={assignedRole}
-                                    className={`px-2 py-0.5 rounded text-xs font-medium border ${
-                                      assignedRole === role
-                                        ? assignedStyles.active
-                                        : 'bg-slate-100 text-slate-600 border-slate-200'
-                                    }`}
+                            <div className="pointer-events-none absolute -right-6 -top-6 h-16 w-16 rounded-full bg-sky-200/60 blur-2xl" />
+                            <div className="pointer-events-none absolute -left-10 -bottom-8 h-20 w-20 rounded-full bg-emerald-200/40 blur-2xl" />
+
+                            <div className="relative flex items-start justify-between gap-3 mb-2">
+                              <div>
+                                <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
+                                  {role} assigned
+                                </p>
+                                <p className="mt-0.5 text-sm font-semibold text-slate-900">
+                                  {user.name}
+                                </p>
+                                {user.email && (
+                                  <p className="text-[0.7rem] text-slate-500 truncate">
+                                    {user.email}
+                                  </p>
+                                )}
+                              </div>
+                              <div className="flex flex-col items-end gap-1">
+                                <span
+                                  className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[0.7rem] font-semibold border ${roleStyles.active}`}
+                                >
+                                  {role}
+                                </span>
+                                <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/80 shadow-sm text-indigo-600">
+                                  <svg
+                                    className="h-4 w-4"
+                                    fill="none"
+                                    viewBox="0 0 24 24"
+                                    stroke="currentColor"
                                   >
-                                    {assignedRole}
-                                  </span>
-                                );
-                              })}
-                              <button
-                                type="button"
-                                onClick={() => onUnassignRole(user.id, role)}
-                                className="px-2 py-1 rounded text-xs font-semibold bg-rose-600 text-white hover:bg-rose-700 border border-rose-600 shadow-sm transition"
-                                title={`Remove ${role} role from ${user.name}`}
-                              >
-                                Remove
-                              </button>
+                                    <path
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      strokeWidth={2}
+                                      d="M12 11c1.657 0 3-1.343 3-3S13.657 5 12 5 9 6.343 9 8s1.343 3 3 3z"
+                                    />
+                                    <path
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      strokeWidth={2}
+                                      d="M4 21v-1a7 7 0 0114 0v1"
+                                    />
+                                  </svg>
+                                </span>
+                              </div>
                             </div>
+
+                            <div className="relative mt-1 rounded-xl bg-white/90 border border-slate-100 px-3 py-2">
+                              <p className="mb-1 text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
+                                Assignment details
+                              </p>
+                              <div className="space-y-1.5 text-[0.75rem]">
+                                {user.lecturerCategory && (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-emerald-500 text-base leading-none">🎓</span>
+                                    <span className="font-semibold text-slate-600">
+                                      Category:
+                                    </span>
+                                    <span className="truncate text-slate-800">
+                                      {user.lecturerCategory}
+                                    </span>
+                                  </div>
+                                )}
+                                {user.department && (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-blue-500 text-base leading-none">🏫</span>
+                                    <span className="font-semibold text-slate-600">
+                                      Dept:
+                                    </span>
+                                    <span className="truncate text-slate-800">
+                                      {user.department}
+                                    </span>
+                                  </div>
+                                )}
+                                {user.courseUnit && (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-indigo-500 text-base leading-none">
+                                      📘
+                                    </span>
+                                    <span className="font-semibold text-slate-600">
+                                      Course:
+                                    </span>
+                                    <span className="truncate text-slate-800">
+                                      {user.courseUnit}
+                                    </span>
+                                  </div>
+                                )}
+                                {user.campus && (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-pink-500 text-base leading-none">
+                                      📍
+                                    </span>
+                                    <span className="font-semibold text-slate-600">
+                                      Campus:
+                                    </span>
+                                    <span className="truncate text-slate-800">
+                                      {user.campus}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => onUnassignRole(user.id, role)}
+                              className="relative mt-3 w-full overflow-hidden rounded-xl bg-gradient-to-r from-rose-500 to-rose-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:from-rose-600 hover:to-red-500"
+                              title={`Remove ${role} role from ${user.name}`}
+                            >
+                              <span className="absolute inset-0 bg-white/10 opacity-0 blur-3xl transition-opacity duration-200 hover:opacity-40" />
+                              <span className="relative flex items-center justify-center gap-1">
+                                <svg
+                                  className="h-3 w-3"
+                                  fill="none"
+                                  viewBox="0 0 24 24"
+                                  stroke="currentColor"
+                                >
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    strokeWidth={2}
+                                    d="M6 18L18 6M6 6l12 12"
+                                  />
+                                </svg>
+                                <span>Revoke</span>
+                              </span>
+                            </button>
                           </div>
                         ))}
                       </div>
@@ -6308,14 +6575,25 @@ interface SetterSubmissionFormProps {
   workflowStage: WorkflowStage;
   timeRemaining: { days: number; hours: number; minutes: number; seconds: number; expired: boolean } | null;
   deadlineActive: boolean;
+  defaultCourseUnit?: string | null;
 }
 
-function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemaining, deadlineActive }: SetterSubmissionFormProps) {
+function SetterSubmissionForm({
+  onSubmit,
+  canSubmit,
+  workflowStage,
+  timeRemaining,
+  deadlineActive,
+  defaultCourseUnit,
+}: SetterSubmissionFormProps) {
+  const currentYear = new Date().getFullYear().toString();
+  const currentSemester = 'Advent'; // default liturgical semester; adjust if you track this elsewhere
+
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [courseUnit, setCourseUnit] = useState('');
+  const [courseUnit, setCourseUnit] = useState(defaultCourseUnit ?? '');
   const [courseCode, setCourseCode] = useState('');
-  const [semester, setSemester] = useState('');
-  const [year, setYear] = useState('');
+  const [semester, setSemester] = useState(currentSemester);
+  const [year, setYear] = useState(currentYear);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -6335,8 +6613,8 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
       alert('Please select a PDF file.');
       return;
     }
-    if (!courseUnit || !courseCode || !semester || !year) {
-      alert('Please fill in all fields.');
+    if (!courseUnit || !semester || !year) {
+      alert('Please fill in the required details.');
       return;
     }
 
@@ -6344,10 +6622,10 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
     
     // Reset form
     setSelectedFile(null);
-    setCourseUnit('');
+    setCourseUnit(defaultCourseUnit ?? '');
     setCourseCode('');
-    setSemester('');
-    setYear('');
+    setSemester(currentSemester);
+    setYear(currentYear);
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     if (fileInput) fileInput.value = '';
   };
@@ -6395,13 +6673,13 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
           <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
-            Course Code
+            Course Code <span className="font-normal lowercase text-slate-400">(optional)</span>
           </label>
           <input
             type="text"
             value={courseCode}
             onChange={(e) => setCourseCode(e.target.value)}
-            placeholder="e.g., CSC 302"
+            placeholder="Auto-handled if left blank"
             disabled={!canSubmit}
             className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
           />
@@ -6411,14 +6689,20 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
           <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
             Course Unit
           </label>
-          <input
-            type="text"
-            value={courseUnit}
-            onChange={(e) => setCourseUnit(e.target.value)}
-            placeholder="e.g., Advanced Algorithms"
-            disabled={!canSubmit}
-            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
-          />
+          {defaultCourseUnit ? (
+            <div className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+              {defaultCourseUnit}
+            </div>
+          ) : (
+            <input
+              type="text"
+              value={courseUnit}
+              onChange={(e) => setCourseUnit(e.target.value)}
+              placeholder="e.g., Advanced Algorithms"
+              disabled={!canSubmit}
+              className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
+            />
+          )}
         </div>
 
         <div>
@@ -6432,9 +6716,9 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
             className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
           >
             <option value="">Select semester...</option>
-            <option value="Fall">Fall</option>
-            <option value="Spring">Spring</option>
-            <option value="Summer">Summer</option>
+            <option value="Advent">Advent</option>
+            <option value="Easter">Easter</option>
+            <option value="Trinity">Trinity</option>
           </select>
         </div>
 
@@ -6455,9 +6739,9 @@ function SetterSubmissionForm({ onSubmit, canSubmit, workflowStage, timeRemainin
 
       <button
         type="submit"
-        disabled={!canSubmit || !selectedFile || !courseUnit || !courseCode || !semester || !year}
+        disabled={!canSubmit || !selectedFile || !courseUnit || !semester || !year}
         className={`w-full rounded-xl px-6 py-4 text-sm font-semibold transition-all shadow-lg ${
-          canSubmit && selectedFile && courseUnit && courseCode && semester && year
+          canSubmit && selectedFile && courseUnit && semester && year
             ? 'bg-pink-500/90 text-pink-950 hover:bg-pink-400 shadow-pink-500/30'
             : 'bg-pink-500/40 text-pink-900 cursor-not-allowed'
         }`}
@@ -6498,6 +6782,7 @@ interface SetterPanelProps {
   deadlineActive: boolean;
   deadlineStartTime: number | null;
   deadlineDuration: { days: number; hours: number; minutes: number };
+  currentUserCourseUnit?: string;
 }
 
 function SetterPanel({
@@ -6506,6 +6791,7 @@ function SetterPanel({
   deadlineActive,
   deadlineStartTime,
   deadlineDuration,
+  currentUserCourseUnit,
 }: SetterPanelProps) {
   const [currentTime, setCurrentTime] = useState(Date.now());
 
@@ -6623,6 +6909,7 @@ function SetterPanel({
             workflowStage={workflowStage}
             timeRemaining={timeRemaining}
             deadlineActive={deadlineActive}
+            defaultCourseUnit={currentUserCourseUnit}
           />
         </div>
       </SectionCard>
@@ -6914,9 +7201,9 @@ function TeamLeadPanel({
                   className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-50"
                 >
                   <option value="">Select semester...</option>
-                  <option value="Fall">Fall</option>
-                  <option value="Spring">Spring</option>
-                  <option value="Summer">Summer</option>
+                  <option value="Advent">Advent</option>
+                  <option value="Easter">Easter</option>
+                  <option value="Trinity">Trinity</option>
                 </select>
               </div>
 
@@ -6976,50 +7263,106 @@ function TeamLeadPanel({
         <SectionCard
           title="Setter Submissions"
           kicker="Download Papers from Setters"
-          description="Download papers submitted by Setters for compilation and review."
+          description="Highly visible overview of drafts coming in from Setters for compilation and review."
         >
-          <div className="space-y-3">
-            {setterSubmissions.map((submission) => (
-              <div
-                key={submission.id}
-                className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4"
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-2">
-                      <h4 className="text-sm font-semibold text-slate-800">{submission.fileName}</h4>
-                      <span className="px-2 py-0.5 rounded-lg text-xs font-medium border bg-amber-500/20 text-amber-300 border-amber-500/30">
-                        From Setter
-                      </span>
-                    </div>
-                    <div className="space-y-1 text-xs text-slate-600">
-                      <p>Submitted by: <span className="text-slate-700">{submission.submittedBy}</span></p>
-                      <p>Submitted: {new Date(submission.submittedAt).toLocaleString()}</p>
-                    </div>
-                  </div>
-                  <div className="flex flex-col gap-2 ml-4">
-                    <button
-                      type="button"
-                      className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-xs font-medium text-amber-300 border border-amber-500/30 transition"
-                      onClick={() => {
-                        // Create a download link for the paper
-                        const blob = new Blob(['Draft paper content'], { type: 'application/pdf' });
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = submission.fileName;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        URL.revokeObjectURL(url);
-                      }}
-                    >
-                      Download
-                    </button>
-                  </div>
+          <div className="space-y-4">
+            {/* Header summary strip */}
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-gradient-to-r from-sky-900 via-indigo-900 to-slate-900 px-5 py-4 shadow-sm">
+              <div>
+                <p className="text-[0.65rem] font-semibold uppercase tracking-[0.25em] text-sky-200">
+                  Incoming Drafts
+                </p>
+                <p className="text-xs text-sky-100/80">
+                  {setterSubmissions.length === 1
+                    ? '1 draft ready for compilation.'
+                    : `${setterSubmissions.length} drafts ready for compilation.`}
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 rounded-xl bg-sky-800/80 px-3 py-1.5 text-xs text-sky-100 shadow-inner">
+                  <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="font-semibold">Live queue</span>
                 </div>
               </div>
-            ))}
+            </div>
+
+            {/* Draft cards */}
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {setterSubmissions.map((submission, index) => (
+                <div
+                  key={submission.id}
+                  className="group relative overflow-hidden rounded-2xl border border-sky-100 bg-gradient-to-br from-slate-50 via-white to-sky-50 p-4 shadow-sm transition-transform hover:-translate-y-1 hover:shadow-xl"
+                >
+                  <div className="pointer-events-none absolute -right-10 -top-10 h-32 w-32 rounded-full bg-sky-200/40 blur-3xl" />
+                  <div className="pointer-events-none absolute bottom-0 left-0 h-16 w-16 rounded-full bg-amber-200/50 blur-2xl" />
+
+                  <div className="relative z-10 flex items-start justify-between gap-3">
+                    <div className="flex-1 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-md">
+                          <span className="text-xs font-semibold">{index + 1}</span>
+                        </span>
+                        <div className="min-w-0">
+                          <h4 className="truncate text-sm font-semibold text-slate-900">
+                            {submission.fileName}
+                          </h4>
+                          <p className="text-[0.7rem] text-slate-500">
+                            From Setter •{' '}
+                            <span className="font-medium text-slate-700">
+                              {submission.submittedBy}
+                            </span>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-[0.7rem] text-slate-600">
+                        <div className="space-y-0.5">
+                          <p className="font-semibold uppercase tracking-wide text-slate-500">
+                            Submitted
+                          </p>
+                          <p className="text-slate-700">
+                            {new Date(submission.submittedAt).toLocaleString()}
+                          </p>
+                        </div>
+                        <div className="space-y-0.5">
+                          <p className="font-semibold uppercase tracking-wide text-slate-500">
+                            Status
+                          </p>
+                          <p className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[0.65rem] font-semibold text-emerald-700 ring-1 ring-emerald-100">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                            Awaiting compilation
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col items-end gap-2">
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded-lg bg-gradient-to-r from-amber-400 to-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-950 shadow-sm transition hover:from-amber-300 hover:to-amber-400"
+                        onClick={() => {
+                          const blob = new Blob(['Draft paper content'], { type: 'application/pdf' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = submission.fileName;
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                          URL.revokeObjectURL(url);
+                        }}
+                      >
+                        <span>Download</span>
+                      </button>
+
+                      <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[0.6rem] font-medium uppercase tracking-wide text-sky-700">
+                        Setter draft
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </SectionCard>
       )}
@@ -7084,6 +7427,111 @@ function TeamLeadPanel({
   );
 }
 
+interface TeamLeadDashboardPanelProps {
+  workflow: WorkflowState;
+  submittedPapers: SubmittedPaper[];
+  setterSubmissions: SetterSubmission[];
+}
+
+function TeamLeadDashboardPanel({
+  workflow,
+  submittedPapers,
+  setterSubmissions,
+}: TeamLeadDashboardPanelProps) {
+  const timelineData = useMemo(
+    () =>
+      workflow.timeline.map((event, index) => ({
+        step: index + 1,
+        label: event.stage,
+        stageIndex: index + 1,
+      })),
+    [workflow.timeline]
+  );
+
+  const compiledCount = submittedPapers.length;
+  const setterDrafts = setterSubmissions.length;
+
+  return (
+    <SectionCard
+      title="Team Lead Dashboard"
+      kicker="Coordination & Submission Flow"
+      description="Soft overview of drafts coming from setters and compiled packages forwarded to the Chief Examiner."
+    >
+      <div className="grid gap-6 lg:grid-cols-3">
+        <div className="space-y-4 rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50 via-sky-50 to-blue-50 p-5 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">
+            Role Snapshot
+          </p>
+          <p className="text-sm text-slate-700">
+            Current workflow stage:{' '}
+            <span className="font-semibold text-indigo-700">
+              {workflow.stage}
+            </span>
+          </p>
+          <div className="grid grid-cols-2 gap-3 pt-2 text-xs text-slate-700">
+            <div className="rounded-xl bg-white/80 p-3 shadow-sm">
+              <p className="text-[0.65rem] uppercase tracking-wide text-slate-500">
+                Setter drafts
+              </p>
+              <p className="mt-1 text-lg font-semibold text-indigo-700">
+                {setterDrafts}
+              </p>
+            </div>
+            <div className="rounded-xl bg-white/80 p-3 shadow-sm">
+              <p className="text-[0.65rem] uppercase tracking-wide text-slate-500">
+                Compiled packages
+              </p>
+              <p className="mt-1 text-lg font-semibold text-emerald-600">
+                {compiledCount}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="col-span-1 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm">
+          <p className="text-[0.65rem] font-semibold uppercase tracking-[0.25em] text-indigo-500">
+            Journey Line
+          </p>
+          <p className="text-xs text-slate-500">
+            Light line view of how this paper has moved through the stages.
+          </p>
+          <div className="mt-3 h-44">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={timelineData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis dataKey="step" tick={{ fontSize: 10 }} />
+                <YAxis tick={{ fontSize: 10 }} />
+                <Tooltip />
+                <Line
+                  type="monotone"
+                  dataKey="stageIndex"
+                  stroke="#22c55e"
+                  strokeWidth={2}
+                  dot={{ r: 3, strokeWidth: 1, stroke: '#166534', fill: '#4ade80' }}
+                  isAnimationActive
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="space-y-3 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm">
+          <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
+            Next Coordination Step
+          </p>
+          <p className="text-sm text-slate-700">
+            {setterDrafts === 0
+              ? 'Remind setters to upload their drafts into the workflow.'
+              : compiledCount === 0
+              ? 'Compile received drafts into a single package for vetting.'
+              : 'Forward compiled package to the Chief Examiner and monitor vetting feedback.'}
+          </p>
+        </div>
+      </div>
+    </SectionCard>
+  );
+}
+
 interface Paper {
   id: string;
   courseUnit: string;
@@ -7140,7 +7588,7 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
 
   // Separate current semester papers from historical papers
   const currentYear = new Date().getFullYear().toString();
-  const currentSemester = 'Fall'; // You can make this dynamic based on current date
+  const currentSemester = 'Advent'; // Match liturgical semesters (Advent, Easter, Trinity)
   const submittedPapers = allRepositoryPapers.filter(p => p.year === currentYear && p.semester === currentSemester);
   const historicalPapers = allRepositoryPapers.filter(p => !(p.year === currentYear && p.semester === currentSemester));
 
@@ -7508,6 +7956,350 @@ function LecturerDashboardPanel({
               {item}
             </p>
           ))}
+        </div>
+      </div>
+    </SectionCard>
+  );
+}
+
+interface ChiefExaminerDashboardPanelProps {
+  workflow: WorkflowState;
+  submittedPapers: SubmittedPaper[];
+  setterSubmissions: SetterSubmission[];
+  annotations: Annotation[];
+}
+
+function ChiefExaminerDashboardPanel({
+  workflow,
+  submittedPapers,
+  setterSubmissions,
+  annotations,
+}: ChiefExaminerDashboardPanelProps) {
+  const paperStatusData = useMemo(() => {
+    const statusCounts: Record<SubmittedPaper['status'], number> = {
+      'submitted': 0,
+      'in-vetting': 0,
+      'vetted': 0,
+      'approved': 0,
+    };
+
+    submittedPapers.forEach((paper) => {
+      statusCounts[paper.status] += 1;
+    });
+
+    return Object.entries(statusCounts).map(([name, value]) => ({
+      name,
+      value,
+    }));
+  }, [submittedPapers]);
+
+  const timelineData = useMemo(
+    () =>
+      workflow.timeline.map((event, index) => ({
+        step: index + 1,
+        label: event.stage,
+        stageIndex: index + 1,
+      })),
+    [workflow.timeline]
+  );
+
+  const totalSubmissions = setterSubmissions.length;
+  const totalAnnotations = annotations.length;
+
+  const pieColours = ['#6366f1', '#22c55e', '#eab308', '#f97316'];
+  const lastEvent = workflow.timeline[workflow.timeline.length - 1];
+
+  const nextSuggestedStep = (() => {
+    switch (workflow.stage) {
+      case 'Awaiting Setter':
+        return 'Nudge the setter to upload the draft paper into the workflow.';
+      case 'Submitted to Team Lead':
+        return 'Ask the Team Lead to compile drafts and forward them for vetting.';
+      case 'Compiled for Vetting':
+        return 'Schedule or launch a vetting session with your moderation team.';
+      case 'Vetting in Progress':
+        return 'Monitor vetting annotations and prepare guidance for revisions.';
+      case 'Revision Complete':
+        return 'Review the revised paper and move it to final approval.';
+      case 'Approved':
+        return 'Trigger secure printing and confirm destruction rules for draft versions.';
+      default:
+        return 'Review the latest timeline event and confirm the next checkpoint.';
+    }
+  })();
+
+  return (
+    <SectionCard
+      title="Chief Examiner Dashboard"
+      kicker="Exam Processes & Overview"
+      description="AI-styled cockpit showing how papers move through setting, vetting, approval and secure print preparation."
+    >
+      <div className="space-y-5">
+        {/* AI status strip */}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-indigo-100 bg-gradient-to-r from-indigo-50 via-sky-50 to-cyan-50 px-4 py-3">
+          <div className="flex items-center gap-2 text-xs text-slate-700">
+            <span className="relative inline-flex h-2.5 w-2.5 items-center justify-center">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400/60 opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+            </span>
+            <span className="font-semibold uppercase tracking-[0.25em] text-indigo-600">
+              AI Insights Online
+            </span>
+          </div>
+          {lastEvent && (
+            <p className="text-xs text-slate-600">
+              Latest event:{' '}
+              <span className="font-medium text-slate-800">{lastEvent.message}</span>
+            </p>
+          )}
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-3">
+          {/* Workflow pulse */}
+          <div className="space-y-4 rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50 via-sky-50 to-indigo-50 p-5 shadow-sm">
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">
+              Workflow Pulse
+            </p>
+            <p className="text-sm text-slate-700">
+              Current stage:{' '}
+              <span className="font-semibold text-indigo-700">
+                {workflow.stage}
+              </span>
+            </p>
+            <div className="grid grid-cols-2 gap-3 pt-2 text-xs text-slate-700">
+              <div className="rounded-xl bg-white/80 p-3 shadow-sm">
+                <p className="text-[0.65rem] uppercase tracking-wide text-slate-500">
+                  Setter submissions
+                </p>
+                <p className="mt-1 text-lg font-semibold text-indigo-700">
+                  {totalSubmissions}
+                </p>
+              </div>
+              <div className="rounded-xl bg-white/80 p-3 shadow-sm">
+                <p className="text-[0.65rem] uppercase tracking-wide text-slate-500">
+                  Vetting notes
+                </p>
+                <p className="mt-1 text-lg font-semibold text-emerald-600">
+                  {totalAnnotations}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Spinning pie chart */}
+          <div className="relative col-span-1 rounded-2xl border border-blue-100 bg-white/90 p-4 shadow-sm">
+            <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-indigo-300/10 via-sky-300/10 to-cyan-300/10" />
+            <div className="relative flex items-center justify-between pb-2">
+              <div>
+                <p className="text-[0.65rem] font-semibold uppercase tracking-[0.25em] text-indigo-500">
+                  Paper Pipeline
+                </p>
+                <p className="text-xs text-slate-500">
+                  Spinning distribution by workflow status
+                </p>
+              </div>
+              <div className="h-6 w-6 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+            </div>
+            <div className="relative h-44">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    dataKey="value"
+                    data={paperStatusData}
+                    innerRadius={40}
+                    outerRadius={70}
+                    paddingAngle={4}
+                    isAnimationActive
+                  >
+                    {paperStatusData.map((entry, index) => (
+                      <Cell key={entry.name} fill={pieColours[index % pieColours.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            {/* Legend for statuses */}
+            <div className="relative mt-3 grid grid-cols-2 gap-2 text-[0.7rem] text-slate-600">
+              {paperStatusData.map((entry, index) => (
+                <div key={entry.name} className="flex items-center gap-2">
+                  <span
+                    className="h-2 w-2 rounded-full"
+                    style={{ backgroundColor: pieColours[index % pieColours.length] }}
+                  />
+                  <span className="capitalize">{entry.name}</span>
+                  <span className="ml-auto font-semibold text-slate-800">
+                    {entry.value}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Line chart */}
+          <div className="col-span-1 rounded-2xl border border-indigo-100 bg-white/90 p-4 shadow-sm">
+            <p className="text-[0.65rem] font-semibold uppercase tracking-[0.25em] text-indigo-500">
+              Journey Line
+            </p>
+            <p className="text-xs text-slate-500">
+              Line graph of how the paper has progressed across stages.
+            </p>
+            <div className="mt-3 h-44">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={timelineData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                  <XAxis dataKey="step" tick={{ fontSize: 10 }} />
+                  <YAxis tick={{ fontSize: 10 }} />
+                  <Tooltip />
+                  <Line
+                    type="monotone"
+                    dataKey="stageIndex"
+                    stroke="#6366f1"
+                    strokeWidth={2}
+                    dot={{ r: 3, strokeWidth: 1, stroke: '#312e81', fill: '#818cf8' }}
+                    isAnimationActive
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </div>
+
+        {/* Extra AI guidance row */}
+        <div className="grid gap-4 md:grid-cols-3">
+          <div className="md:col-span-2 rounded-2xl border border-slate-100 bg-white/95 p-4 shadow-sm">
+            <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
+              Recommended Next Action
+            </p>
+            <p className="mt-2 text-sm text-slate-700">{nextSuggestedStep}</p>
+          </div>
+          <div className="rounded-2xl border border-slate-100 bg-gradient-to-br from-indigo-500/10 via-sky-500/10 to-cyan-500/10 p-4 text-xs text-slate-700">
+            <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-indigo-600">
+              Snapshot
+            </p>
+            <ul className="mt-2 space-y-1">
+              <li>
+                <span className="font-semibold text-slate-800">
+                  {workflow.timeline.length}
+                </span>{' '}
+                timeline checkpoints
+              </li>
+              <li>
+                <span className="font-semibold text-slate-800">
+                  {submittedPapers.length}
+                </span>{' '}
+                papers in this cycle
+              </li>
+              <li>
+                <span className="font-semibold text-slate-800">
+                  {paperStatusData.find((p) => p.name === 'approved')?.value ?? 0}
+                </span>{' '}
+                approved &amp; ready for print
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </SectionCard>
+  );
+}
+
+interface PaperTrackingPanelProps {
+  workflow: WorkflowState;
+  submittedPapers: SubmittedPaper[];
+}
+
+function PaperTrackingPanel({
+  workflow,
+  submittedPapers,
+}: PaperTrackingPanelProps) {
+  const stages: Array<{ id: WorkflowStage | 'Printing'; label: string }> = [
+    { id: 'Awaiting Setter', label: 'Paper is being set' },
+    { id: 'Submitted to Team Lead', label: 'Team Lead collecting drafts' },
+    { id: 'Compiled for Vetting', label: 'Compiled for moderation' },
+    { id: 'Vetting in Progress', label: 'Vetting & annotations' },
+    { id: 'Revision Complete', label: 'Revised & sanitized' },
+    { id: 'Approved', label: 'Approved by Chief Examiner' },
+    { id: 'Printing', label: 'Released for secure printing' },
+  ];
+
+  const currentIndex = stages.findIndex((s) => s.id === workflow.stage);
+  const effectiveIndex =
+    currentIndex === -1 && workflow.stage === 'Vetted & Returned to Chief Examiner'
+      ? 4
+      : currentIndex;
+
+  const totalApproved = submittedPapers.filter(
+    (p) => p.status === 'approved'
+  ).length;
+
+  return (
+    <SectionCard
+      title="Track Paper Journey"
+      kicker="From Setting to Printing"
+      description="Visual trace of where the current semester paper is in the moderation pipeline."
+    >
+      <div className="space-y-6">
+        <div className="rounded-2xl border border-blue-100 bg-gradient-to-r from-blue-50 via-indigo-50 to-sky-50 p-4">
+          <p className="text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">
+            Current Position
+          </p>
+          <p className="mt-1 text-sm text-slate-700">
+            The paper is currently in{' '}
+            <span className="font-semibold text-indigo-700">{workflow.stage}</span>
+          </p>
+        </div>
+
+        <div className="relative">
+          <div className="absolute inset-x-4 top-5 h-0.5 bg-gradient-to-r from-blue-200 via-indigo-300 to-sky-300" />
+          <div className="relative flex justify-between gap-2 px-2">
+            {stages.map((stage, index) => {
+              const isCompleted = effectiveIndex > index;
+              const isActive = effectiveIndex === index;
+              return (
+                <div key={stage.id} className="flex flex-col items-center text-center">
+                  <div
+                    className={`flex h-10 w-10 items-center justify-center rounded-full border-2 text-xs font-semibold transition-all ${
+                      isActive
+                        ? 'border-indigo-500 bg-indigo-500 text-white shadow-[0_0_18px_rgba(79,70,229,0.6)]'
+                        : isCompleted
+                        ? 'border-emerald-400 bg-emerald-50 text-emerald-700'
+                        : 'border-slate-200 bg-white text-slate-500'
+                    }`}
+                  >
+                    {index + 1}
+                  </div>
+                  <p className="mt-2 text-[0.7rem] font-medium text-slate-700">
+                    {stage.id}
+                  </p>
+                  <p className="mt-1 text-[0.65rem] text-slate-500">{stage.label}</p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="rounded-2xl border border-slate-100 bg-white p-4">
+            <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
+              Approved and Ready
+            </p>
+            <p className="mt-1 text-2xl font-bold text-indigo-600">{totalApproved}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              papers marked as ready for secure printing.
+            </p>
+          </div>
+          <div className="rounded-2xl border border-slate-100 bg-white p-4">
+            <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
+              Timeline Events
+            </p>
+            <p className="mt-1 text-2xl font-bold text-slate-800">
+              {workflow.timeline.length}
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+              recorded checkpoints for this paper&apos;s journey.
+            </p>
+          </div>
         </div>
       </div>
     </SectionCard>
