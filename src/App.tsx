@@ -746,17 +746,14 @@ function App() {
     }
   }, [chiefExaminerRoleEnabled]);
 
+  // Global ticking clock used for vetting sessions and deadline logic
   useEffect(() => {
-    if (!vettingSession.active || !vettingSession.expiresAt) {
-      return;
-    }
-
     const timer = window.setInterval(() => {
       setCurrentTime(Date.now());
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [vettingSession.active, vettingSession.expiresAt]);
+  }, []);
 
   useEffect(() => {
     if (
@@ -1360,8 +1357,37 @@ function App() {
       `Setter lodged the initial draft paper (${courseCode} - ${courseUnit}) and notified Chief Examiner. Paper added to repository for AI analysis.`
     );
 
-    // Previously we showed a toast + notification for draft submission.
-    // This has been removed per product feedback to keep the interface cleaner.
+    // Notify Team Lead(s) that a new draft has arrived
+    const message = `New draft "${file.name}" submitted by ${actor} for ${courseCode} - ${courseName}.`;
+    const toast: AppNotification = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      message,
+      timestamp: new Date().toISOString(),
+      read: false,
+    };
+
+    // Show toast locally if the current user has Team Lead role (e.g. multi-role account)
+    if (currentUserHasRole('Team Lead')) {
+      setNotifications((prev) => [toast, ...prev].slice(0, 20));
+      setActiveToast(toast);
+      setTimeout(() => {
+        setActiveToast((current) => (current && current.id === toast.id ? null : current));
+      }, 5000);
+    }
+
+    // Persist notification for all users who have Team Lead role
+    users
+      .filter((u) => u.roles.includes('Team Lead'))
+      .forEach((teamLead) => {
+        if (teamLead.id) {
+          void createNotification({
+            user_id: teamLead.id,
+            title: 'New Setter Draft Submitted',
+            message,
+            type: 'info',
+          });
+        }
+      });
   };
 
   const handleTeamLeadSubmitPDF = (file: File, courseUnit: string, courseCode: string, semester: string, year: string) => {
@@ -1792,6 +1818,51 @@ function App() {
     Approved: 'Workflow closed successfully. Prepare for printing.',
     Rejected: 'Assign a new setter and restart the workflow cycle.',
   };
+
+  // Automatically start Team Lead deadline when Setter deadline expires
+  useEffect(() => {
+    if (!setterDeadlineActive || !setterDeadlineStartTime) {
+      return;
+    }
+    if (teamLeadDeadlineActive && teamLeadDeadlineStartTime) {
+      return;
+    }
+
+    const setterTotalMs =
+      setterDeadlineDuration.days * 24 * 60 * 60 * 1000 +
+      setterDeadlineDuration.hours * 60 * 60 * 1000 +
+      setterDeadlineDuration.minutes * 60 * 1000;
+
+    const setterElapsed = currentTime - setterDeadlineStartTime;
+
+    if (setterElapsed >= setterTotalMs) {
+      // Start Team Lead deadline immediately when Setter window closes
+      setSetterDeadlineActive(false);
+      const now = Date.now();
+      setTeamLeadDeadlineActive(true);
+      setTeamLeadDeadlineStartTime(now);
+
+      const actor = currentUser?.name ?? 'System';
+      const durationText = `${teamLeadDeadlineDuration.days} day${teamLeadDeadlineDuration.days !== 1 ? 's' : ''}, ${teamLeadDeadlineDuration.hours} hour${teamLeadDeadlineDuration.hours !== 1 ? 's' : ''}, ${teamLeadDeadlineDuration.minutes} minute${teamLeadDeadlineDuration.minutes !== 1 ? 's' : ''}`;
+      pushWorkflowEvent(
+        `Setter submission window closed. Activated Team Lead submission deadline (${durationText}).`,
+        actor
+      );
+    }
+  }, [
+    currentTime,
+    setterDeadlineActive,
+    setterDeadlineStartTime,
+    setterDeadlineDuration.days,
+    setterDeadlineDuration.hours,
+    setterDeadlineDuration.minutes,
+    teamLeadDeadlineActive,
+    teamLeadDeadlineStartTime,
+    teamLeadDeadlineDuration.days,
+    teamLeadDeadlineDuration.hours,
+    teamLeadDeadlineDuration.minutes,
+    currentUser?.name,
+  ]);
 
   const latestVersionLabel =
     versionHistory[0]?.versionLabel ?? `v${workflow.currentVersion}.x`;
@@ -2434,6 +2505,7 @@ function App() {
           deadlineDuration={setterDeadlineDuration}
           currentUserCourseUnit={currentUser?.courseUnit}
           currentUserCampus={currentUser?.campus}
+          mySubmissions={setterSubmissions.filter((s) => s.submittedBy === currentUser?.name)}
         />
       ),
     });
@@ -5730,6 +5802,49 @@ interface ChiefExaminerConsoleProps {
   sectionId?: string;
 }
 
+interface CountdownPillProps {
+  startTime: number;
+  duration: { days: number; hours: number; minutes: number };
+}
+
+function CountdownPill({ startTime, duration }: CountdownPillProps) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const totalMs =
+    duration.days * 24 * 60 * 60 * 1000 +
+    duration.hours * 60 * 60 * 1000 +
+    duration.minutes * 60 * 1000;
+  const remaining = Math.max(totalMs - (now - startTime), 0);
+
+  const hours = Math.floor(remaining / (60 * 60 * 1000));
+  const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+  const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
+
+  const expired = remaining <= 0;
+
+  return (
+    <span
+      className={`inline-flex items-center justify-center rounded-full px-3 py-1 text-xs font-semibold ${
+        expired
+          ? 'bg-rose-100 text-rose-700'
+          : 'bg-emerald-100 text-emerald-700'
+      }`}
+    >
+      {expired ? 'Deadline expired' : `${hours.toString().padStart(2, '0')}:${minutes
+        .toString()
+        .padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`}
+    </span>
+  );
+}
+
 function ChiefExaminerConsole({
   users,
   currentUser,
@@ -6248,11 +6363,16 @@ function ChiefExaminerConsole({
             </div>
 
             {setterDeadlineActive && setterDeadlineStartTime && (
-              <div className="mb-4 rounded-lg border border-pink-200 bg-pink-50 p-4">
-                <p className="text-xs font-semibold text-pink-700 mb-1">Current Deadline Duration</p>
+              <div className="mb-4 rounded-lg border border-pink-200 bg-pink-50 p-4 flex flex-col gap-1">
+                <p className="text-xs font-semibold text-pink-700">Current Deadline Duration</p>
                 <p className="text-sm text-pink-800 font-medium">
                   {setterDeadlineDuration.days} day{setterDeadlineDuration.days !== 1 ? 's' : ''}, {setterDeadlineDuration.hours} hour{setterDeadlineDuration.hours !== 1 ? 's' : ''}, {setterDeadlineDuration.minutes} minute{setterDeadlineDuration.minutes !== 1 ? 's' : ''}
                 </p>
+                <p className="text-xs font-semibold text-pink-700 mt-2">Time Remaining</p>
+                <CountdownPill
+                  startTime={setterDeadlineStartTime}
+                  duration={setterDeadlineDuration}
+                />
               </div>
             )}
 
@@ -6395,11 +6515,16 @@ function ChiefExaminerConsole({
             </div>
 
             {teamLeadDeadlineActive && teamLeadDeadlineStartTime && (
-              <div className="mb-4 rounded-lg border border-violet-200 bg-violet-50 p-4">
-                <p className="text-xs font-semibold text-violet-700 mb-1">Current Deadline Duration</p>
+              <div className="mb-4 rounded-lg border border-violet-200 bg-violet-50 p-4 flex flex-col gap-1">
+                <p className="text-xs font-semibold text-violet-700">Current Deadline Duration</p>
                 <p className="text-sm text-violet-800 font-medium">
                   {teamLeadDeadlineDuration.days} day{teamLeadDeadlineDuration.days !== 1 ? 's' : ''}, {teamLeadDeadlineDuration.hours} hour{teamLeadDeadlineDuration.hours !== 1 ? 's' : ''}, {teamLeadDeadlineDuration.minutes} minute{teamLeadDeadlineDuration.minutes !== 1 ? 's' : ''}
                 </p>
+                <p className="text-xs font-semibold text-violet-700 mt-2">Time Remaining</p>
+                <CountdownPill
+                  startTime={teamLeadDeadlineStartTime}
+                  duration={teamLeadDeadlineDuration}
+                />
               </div>
             )}
 
@@ -6749,9 +6874,39 @@ function SetterSubmissionForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
-      <div className="rounded-lg border border-pink-500/30 bg-pink-500/10 p-4">
-        <p className="text-xs font-semibold text-pink-300 mb-2">Current Workflow Stage</p>
-        <p className="text-sm text-pink-200 font-medium">{workflowStage}</p>
+      {/* Current workflow stage banner - high contrast, AI-inspired card */}
+      <div className="relative overflow-hidden rounded-2xl border border-pink-200 bg-gradient-to-r from-white via-pink-50 to-rose-50 p-4 sm:p-5 shadow-sm">
+        <div className="pointer-events-none absolute -right-12 -top-12 h-24 w-24 rounded-full bg-pink-300/20 blur-2xl" />
+        <div className="pointer-events-none absolute -left-10 bottom-0 h-16 w-16 rounded-full bg-rose-200/40 blur-2xl" />
+
+        <div className="relative z-10 flex items-start gap-3">
+          <div className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-pink-500 to-rose-500 text-white shadow-md">
+            <svg
+              className="h-5 w-5"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 6v6l3 3" />
+            </svg>
+          </div>
+
+          <div className="flex-1 space-y-1">
+            <p className="text-[0.7rem] font-semibold uppercase tracking-[0.2em] text-pink-700">
+              Current Workflow Stage
+            </p>
+            <p className="text-base font-semibold text-slate-900">
+              {workflowStage}
+            </p>
+            <p className="text-xs text-slate-500">
+              This tells you exactly where your paper is in the moderation journey right now.
+            </p>
+          </div>
+        </div>
       </div>
       
       {!canSubmit && (
@@ -6922,6 +7077,7 @@ interface SetterPanelProps {
   deadlineDuration: { days: number; hours: number; minutes: number };
   currentUserCourseUnit?: string;
   currentUserCampus?: string;
+  mySubmissions: SetterSubmission[];
 }
 
 function SetterPanel({
@@ -6932,6 +7088,7 @@ function SetterPanel({
   deadlineDuration,
   currentUserCourseUnit,
   currentUserCampus,
+  mySubmissions,
 }: SetterPanelProps) {
   const [currentTime, setCurrentTime] = useState(Date.now());
 
@@ -7054,6 +7211,59 @@ function SetterPanel({
           />
         </div>
       </SectionCard>
+
+      {/* Setter's own submission copy/history */}
+      {mySubmissions.length > 0 && (
+        <SectionCard
+          title="My Submitted Drafts"
+          kicker="Personal Copy"
+          description="A quick history of drafts you have submitted for this paper. You can always download a copy from here."
+        >
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {mySubmissions.map((submission) => (
+              <div
+                key={submission.id}
+                className="group relative overflow-hidden rounded-2xl border border-pink-100 bg-gradient-to-br from-pink-50 via-white to-slate-50 p-4 shadow-sm"
+              >
+                <div className="pointer-events-none absolute -right-10 -top-10 h-24 w-24 rounded-full bg-pink-200/40 blur-2xl" />
+                <div className="relative z-10 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <h4 className="truncate text-sm font-semibold text-slate-900">
+                      {submission.fileName}
+                    </h4>
+                    <span className="rounded-full bg-pink-100 px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-pink-700">
+                      My copy
+                    </span>
+                  </div>
+                  <p className="text-[0.7rem] text-slate-600">
+                    Submitted on{' '}
+                    <span className="font-medium text-slate-800">
+                      {new Date(submission.submittedAt).toLocaleString()}
+                    </span>
+                  </p>
+                  <button
+                    type="button"
+                    className="mt-2 inline-flex items-center justify-center rounded-lg bg-gradient-to-r from-pink-500 to-pink-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:from-pink-400 hover:to-pink-500"
+                    onClick={() => {
+                      const blob = new Blob(['Draft paper content'], { type: 'application/pdf' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = submission.fileName;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                    }}
+                  >
+                    Download my draft
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+      )}
     </div>
   );
 }
