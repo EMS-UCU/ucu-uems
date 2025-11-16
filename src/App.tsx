@@ -138,6 +138,11 @@ interface SubmittedPaper {
   submittedAt: string;
   fileSize?: number;
   status: 'submitted' | 'in-vetting' | 'vetted' | 'approved';
+  courseUnit?: string;
+  courseCode?: string;
+  semester?: string;
+  year?: string;
+  fileUrl?: string;
 }
 
 interface SetterSubmission {
@@ -572,6 +577,67 @@ function App() {
     [authUserId, users]
   );
 
+  // Load persisted exam papers from Supabase so they survive refresh/login
+  useEffect(() => {
+    const loadExamPapersFromSupabase = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('exam_papers')
+          .select('*')
+          .order('created_at', { ascending: false });
+
+        if (error || !data) {
+          console.error('Error loading exam papers from Supabase:', error);
+          return;
+        }
+
+        // Map exam_papers rows into SubmittedPaper + repositoryPapers structures
+        const submitted: SubmittedPaper[] = data.map((paper: any) => ({
+          id: paper.id,
+          fileName: paper.file_name || paper.course_name || 'Exam Paper',
+          submittedBy: paper.setter_id || paper.team_lead_id || 'Unknown',
+          submittedAt: paper.submitted_at || paper.created_at,
+          fileSize: paper.file_size || undefined,
+          status:
+            paper.status === 'approved_for_printing'
+              ? 'approved'
+              : paper.status === 'appointed_for_vetting' ||
+                paper.status === 'vetting_in_progress' ||
+                paper.status === 'vetted_with_comments'
+              ? 'in-vetting'
+              : paper.status === 'integrated_by_team_lead'
+              ? 'vetted'
+              : 'submitted',
+          courseCode: paper.course_code,
+          courseUnit: paper.course_name,
+          semester: paper.semester,
+          year: paper.academic_year,
+          fileUrl: paper.file_url || undefined,
+        }));
+
+        const repo = data.map((paper: any) => ({
+          id: paper.id,
+          courseUnit: paper.course_name,
+          courseCode: paper.course_code,
+          semester: paper.semester,
+          year: paper.academic_year,
+          submittedBy: paper.setter_id || paper.team_lead_id || 'Unknown',
+          submittedAt: paper.submitted_at || paper.created_at,
+          fileName: paper.file_name || 'Exam Paper',
+          content: paper.file_url || '',
+          fileSize: paper.file_size || undefined,
+        }));
+
+        setSubmittedPapers(submitted);
+        setRepositoryPapers(repo);
+      } catch (err) {
+        console.error('Unexpected error loading exam papers:', err);
+      }
+    };
+
+    loadExamPapersFromSupabase();
+  }, []);
+
   // Helper: upload exam paper file to Supabase Storage + log metadata in exam_papers table
   const saveExamPaperToSupabase = async (
     file: File,
@@ -953,7 +1019,13 @@ function App() {
       setUsers((prev) => [...prev, newUser]);
     }
   };
-  const addAdminAccount = async (name: string, email: string, isSuperAdmin: boolean) => {
+  const addAdminAccount = async (
+    name: string,
+    email: string,
+    isSuperAdmin: boolean,
+    campus: string,
+    department: string
+  ) => {
     const trimmedName = name.trim();
     if (!trimmedName || !email.trim()) {
       return;
@@ -970,6 +1042,8 @@ function App() {
       roles: isSuperAdmin ? ['Admin'] : ['Admin'],
       password: DEFAULT_PASSWORD,
       isSuperAdmin,
+      campus: campus.trim(),
+      department: department.trim(),
     });
 
     if (error) {
@@ -1386,13 +1460,17 @@ function App() {
 
     const actor = currentUser?.name ?? 'Unknown';
     const paperId = createId();
-    const newPaper = {
+    const newPaper: SubmittedPaper = {
       id: paperId,
       fileName: file.name,
       submittedBy: actor,
       submittedAt: new Date().toISOString(),
       fileSize: file.size,
       status: 'submitted' as const,
+      courseUnit,
+      courseCode,
+      semester,
+      year,
     };
 
     setSubmittedPapers(prev => [...prev, newPaper]);
@@ -2448,7 +2526,9 @@ function App() {
       render: () => (
         <TeamLeadDashboardPanel
           workflow={workflow}
-          submittedPapers={submittedPapers.filter((p) => p.submittedBy === currentUser?.name)}
+          submittedPapers={submittedPapers.filter(
+            (p) => p.courseUnit === currentUser?.courseUnit
+          )}
           // Show all setter submissions relevant to this workflow so the Team Lead
           // can see the true count of drafts coming in from Setters.
           setterSubmissions={setterSubmissions}
@@ -2467,7 +2547,9 @@ function App() {
           deadlineDuration={teamLeadDeadlineDuration}
           repositoriesActive={repositoriesActive}
           onTeamLeadCompile={handleTeamLeadCompile}
-          submittedPapers={submittedPapers.filter((p) => p.submittedBy === currentUser?.name)}
+          submittedPapers={submittedPapers.filter(
+            (p) => p.courseUnit === currentUser?.courseUnit
+          )}
           setterSubmissions={setterSubmissions}
           workflowStage={workflow.stage}
           onSubmitPDF={handleTeamLeadSubmitPDF}
@@ -4188,25 +4270,35 @@ function AdminAddLecturerPanel({
 }
 
 interface AdminAddAdminPanelProps {
-  onAddAdmin: (name: string, email: string, isSuperAdmin: boolean) => Promise<void>;
+  onAddAdmin: (
+    name: string,
+    email: string,
+    isSuperAdmin: boolean,
+    campus: string,
+    department: string
+  ) => Promise<void>;
 }
 
 function AdminAddAdminPanel({ onAddAdmin }: AdminAddAdminPanelProps) {
   const [adminName, setAdminName] = useState('');
   const [adminEmail, setAdminEmail] = useState('');
   const [isSuperAdminFlag, setIsSuperAdminFlag] = useState(false);
+  const [adminCampus, setAdminCampus] = useState('');
+  const [adminDepartment, setAdminDepartment] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!adminName.trim() || !adminEmail.trim()) return;
+    if (!adminName.trim() || !adminEmail.trim() || !adminCampus.trim() || !adminDepartment.trim()) return;
 
     setIsSubmitting(true);
     try {
-      await onAddAdmin(adminName, adminEmail, isSuperAdminFlag);
+      await onAddAdmin(adminName, adminEmail, isSuperAdminFlag, adminCampus, adminDepartment);
       setAdminName('');
       setAdminEmail('');
       setIsSuperAdminFlag(false);
+      setAdminCampus('');
+      setAdminDepartment('');
     } catch (error) {
       console.error('Error creating admin:', error);
     } finally {
@@ -4270,6 +4362,40 @@ function AdminAddAdminPanel({ onAddAdmin }: AdminAddAdminPanelProps) {
           </div>
         </div>
 
+        <div className="grid gap-4 md:grid-cols-2 relative z-10">
+          <div>
+            <label className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-600">
+              Campus *
+            </label>
+            <select
+              value={adminCampus}
+              onChange={(event) => setAdminCampus(event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white/95 px-3 py-2.5 text-sm text-slate-900 shadow-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400/40"
+              required
+            >
+              <option value="">Select campus...</option>
+              <option value="Main">Main</option>
+              <option value="Kabale">Kabale</option>
+              <option value="Kampala">Kampala</option>
+              <option value="Mbale">Mbale</option>
+              <option value="Arua">Arua</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-600">
+              Department *
+            </label>
+            <input
+              value={adminDepartment}
+              onChange={(event) => setAdminDepartment(event.target.value)}
+              placeholder="e.g. Computing and Technology"
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white/95 px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-500 shadow-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400/40"
+              required
+            />
+          </div>
+        </div>
+
         <div className="relative flex items-center gap-3 rounded-2xl border border-amber-200 bg-gradient-to-r from-amber-50/80 via-amber-50 to-rose-50 px-3 py-2.5 shadow-sm">
           <span className="inline-flex h-7 w-7 items-center justify-center rounded-xl bg-amber-500/15 text-amber-600">
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -4295,7 +4421,13 @@ function AdminAddAdminPanel({ onAddAdmin }: AdminAddAdminPanelProps) {
 
         <button
           type="submit"
-          disabled={!adminName.trim() || !adminEmail.trim() || isSubmitting}
+          disabled={
+            !adminName.trim() ||
+            !adminEmail.trim() ||
+            !adminCampus.trim() ||
+            !adminDepartment.trim() ||
+            isSubmitting
+          }
           className="relative mt-1 w-full overflow-hidden rounded-2xl bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500 px-4 py-2.5 text-sm font-semibold text-white shadow-md transition hover:from-blue-400 hover:via-indigo-400 hover:to-purple-400 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <span className="absolute inset-0 bg-white/10 opacity-0 blur-3xl transition-opacity duration-200 hover:opacity-40" />
@@ -7541,12 +7673,47 @@ function TeamLeadPanel({
                     <button
                       type="button"
                       className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-xs font-medium text-slate-700 transition"
-                      onClick={() => {
-                        // In a real app, this would download or view the paper
-                        alert(`Viewing paper: ${paper.fileName}`);
+                      onClick={async () => {
+                        if (!paper.fileUrl) {
+                          alert('No file is available to view for this paper yet.');
+                          return;
+                        }
+                        const { data } = supabase.storage
+                          .from('exam_papers')
+                          .getPublicUrl(paper.fileUrl);
+                        if (!data?.publicUrl) {
+                          alert('Unable to generate a view link for this paper.');
+                          return;
+                        }
+                        window.open(data.publicUrl, '_blank');
                       }}
                     >
                       View
+                    </button>
+                    <button
+                      type="button"
+                      className="px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/40 hover:bg-emerald-500/20 text-xs font-medium text-emerald-700 transition"
+                      onClick={async () => {
+                        if (!paper.fileUrl) {
+                          alert('No file is available to download for this paper yet.');
+                          return;
+                        }
+                        const { data } = supabase.storage
+                          .from('exam_papers')
+                          .getPublicUrl(paper.fileUrl);
+                        if (!data?.publicUrl) {
+                          alert('Unable to generate a download link for this paper.');
+                          return;
+                        }
+                        const link = document.createElement('a');
+                        link.href = data.publicUrl;
+                        link.download = paper.fileName || 'exam-paper.pdf';
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                      }}
+                    >
+                      Download
                     </button>
                     {paper.status === 'vetted' && (
                       <button

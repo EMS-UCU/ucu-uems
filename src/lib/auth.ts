@@ -263,6 +263,9 @@ export async function createUser(userData: {
   password: string;
   lecturerCategory?: 'Undergraduate' | 'Postgraduate';
   isSuperAdmin?: boolean;
+  campus?: string;
+  department?: string;
+  courseUnit?: string;
 }): Promise<{ user: User | null; error: string | null }> {
   try {
     if (!userData.email) {
@@ -281,6 +284,9 @@ export async function createUser(userData: {
           roles: userData.roles,
           lecturer_category: userData.lecturerCategory || null,
           is_super_admin: userData.isSuperAdmin ?? false,
+          campus: userData.campus || null,
+          department: userData.department || null,
+          course_unit: userData.courseUnit || null,
         },
         emailRedirectTo: undefined, // No email confirmation for admin-created users
       },
@@ -315,6 +321,9 @@ export async function createUser(userData: {
             roles: userData.roles,
             is_super_admin: userData.isSuperAdmin ?? false,
             lecturer_category: userData.lecturerCategory || null,
+            campus: userData.campus || null,
+            department: userData.department || null,
+            course_unit: userData.courseUnit || null,
           },
         ]);
 
