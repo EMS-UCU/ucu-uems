@@ -13,6 +13,7 @@ import SuperAdminDashboard from './components/SuperAdminDashboard';
 import LecturerDashboard from './components/LecturerDashboard';
 import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 import { supabase } from './lib/supabase';
+import { elevateToChiefExaminer } from './lib/privilegeElevation';
 
 type BaseRole = 'Admin' | 'Lecturer';
 type Role =
@@ -826,28 +827,88 @@ function App() {
       setUsers((prev) => [...prev, newUser]);
     }
   };
-  const addAdminAccount = (name: string) => handleAddUser(name, 'Admin');
+  const addAdminAccount = async (name: string, email: string, isSuperAdmin: boolean) => {
+    const trimmedName = name.trim();
+    if (!trimmedName || !email.trim()) {
+      return;
+    }
 
-  const handlePromoteToChiefExaminer = (userId: string) => {
+    // Create Admin (or Super Admin) in Supabase Auth + user_profiles
+    const { createUser } = await import('./lib/auth');
+    const username = email.split('@')[0] || trimmedName.toLowerCase().replace(/\s+/g, '.');
+    const { user, error } = await createUser({
+      username,
+      name: trimmedName,
+      email,
+      baseRole: 'Admin',
+      roles: isSuperAdmin ? ['Admin'] : ['Admin'],
+      password: DEFAULT_PASSWORD,
+      isSuperAdmin,
+    });
+
+    if (error) {
+      console.error('Error creating admin:', error);
+      alert(`Failed to create admin: ${error}`);
+      return;
+    }
+
+    if (user) {
+      setUsers((prev) => {
+        const exists = prev.find((u) => u.id === user.id);
+        if (!exists) {
+          return [...prev, user];
+        }
+        return prev.map((u) => (u.id === user.id ? user : u));
+      });
+      alert(`Admin ${trimmedName} created successfully!`);
+    }
+  };
+
+  const handlePromoteToChiefExaminer = async (userId: string) => {
     if (!chiefExaminerRoleEnabled) {
       return;
     }
-    const actor = currentUser?.name ?? 'Unknown';
-    setUsers((prev) => {
-      const updated = prev.map((user) =>
-        user.id === userId && !user.roles.includes('Chief Examiner')
-          ? { ...user, roles: [...user.roles, 'Chief Examiner'] as Role[] }
-          : user
-      );
-      // Persist immediately
-      try {
-        localStorage.setItem('ucu-moderation-users', JSON.stringify(updated));
-      } catch (error) {
-        console.error('Error saving users to localStorage:', error);
-      }
-      return updated;
-    });
+    if (!currentUser) {
+      alert('You must be signed in to promote a Chief Examiner.');
+      return;
+    }
 
+    // Persist promotion in Supabase (user_profiles + privilege_elevations)
+    const result = await elevateToChiefExaminer(userId, currentUser.id);
+    if (!result.success) {
+      console.error('Error elevating to Chief Examiner:', result.error);
+      alert(result.error || 'Failed to promote lecturer to Chief Examiner.');
+      return;
+    }
+
+    // Refresh users from backend so roles stay in sync
+    try {
+      const refreshedUsers = await getAllUsers();
+      if (refreshedUsers && refreshedUsers.length > 0) {
+        setUsers(refreshedUsers);
+      } else {
+        // Fallback: update local state if refresh failed or returned empty
+        setUsers((prev) =>
+          prev.map((user) =>
+            user.id === userId && !user.roles.includes('Chief Examiner')
+              ? { ...user, roles: [...user.roles, 'Chief Examiner'] as Role[] }
+              : user
+          )
+        );
+      }
+    } catch (error) {
+      console.error('Error refreshing users after promotion:', error);
+      // Fallback local update
+      setUsers((prev) =>
+        prev.map((user) =>
+          user.id === userId && !user.roles.includes('Chief Examiner')
+            ? { ...user, roles: [...user.roles, 'Chief Examiner'] as Role[] }
+            : user
+        )
+      );
+    }
+
+    const actor = currentUser?.name ?? 'Unknown';
     const promotedUser = users.find((user) => user.id === userId);
     if (promotedUser) {
       pushWorkflowEvent(
@@ -3581,18 +3642,30 @@ function AdminAddLecturerPanel({
 }
 
 interface AdminAddAdminPanelProps {
-  onAddAdmin: (name: string) => void;
+  onAddAdmin: (name: string, email: string, isSuperAdmin: boolean) => Promise<void>;
 }
 
-function AdminAddAdminPanel({
-  onAddAdmin,
-}: AdminAddAdminPanelProps) {
+function AdminAddAdminPanel({ onAddAdmin }: AdminAddAdminPanelProps) {
   const [adminName, setAdminName] = useState('');
+  const [adminEmail, setAdminEmail] = useState('');
+  const [isSuperAdminFlag, setIsSuperAdminFlag] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    onAddAdmin(adminName);
-    setAdminName('');
+    if (!adminName.trim() || !adminEmail.trim()) return;
+
+    setIsSubmitting(true);
+    try {
+      await onAddAdmin(adminName, adminEmail, isSuperAdminFlag);
+      setAdminName('');
+      setAdminEmail('');
+      setIsSuperAdminFlag(false);
+    } catch (error) {
+      console.error('Error creating admin:', error);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -3601,22 +3674,56 @@ function AdminAddAdminPanel({
       kicker="Admin Action"
       description={`Provision another administrator account. Default password is ${DEFAULT_PASSWORD}.`}
     >
-      <form onSubmit={handleSubmit} className="rounded-2xl border border-slate-200 bg-white p-4">
-        <label className="text-xs font-semibold uppercase tracking-wide text-slate-600">
-          Admin full name
-        </label>
-        <input
-          value={adminName}
-          onChange={(event) => setAdminName(event.target.value)}
-          placeholder="e.g. Prof. Samuel Otieno"
-          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
-        />
+      <form
+        onSubmit={handleSubmit}
+        className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4"
+      >
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide text-slate-600">
+            Admin full name *
+          </label>
+          <input
+            value={adminName}
+            onChange={(event) => setAdminName(event.target.value)}
+            placeholder="e.g. Prof. Samuel Otieno"
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+            required
+          />
+        </div>
+
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide text-slate-600">
+            Admin email *
+          </label>
+          <input
+            type="email"
+            value={adminEmail}
+            onChange={(event) => setAdminEmail(event.target.value)}
+            placeholder="e.g. admin@university.ac.ke"
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+            required
+          />
+        </div>
+
+        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+          <input
+            id="isSuperAdmin"
+            type="checkbox"
+            checked={isSuperAdminFlag}
+            onChange={(e) => setIsSuperAdminFlag(e.target.checked)}
+            className="h-4 w-4 rounded border-slate-400 text-purple-600 focus:ring-purple-500"
+          />
+          <label htmlFor="isSuperAdmin" className="text-xs font-semibold text-slate-700">
+            Grant Super Admin privileges
+          </label>
+        </div>
+
         <button
           type="submit"
-          disabled={!adminName.trim()}
-          className="mt-4 w-full rounded-xl bg-blue-500/90 px-4 py-2 text-sm font-semibold text-purple-950 shadow transition hover:bg-purple-400 disabled:cursor-not-allowed disabled:bg-blue-500/30 disabled:text-purple-900"
+          disabled={!adminName.trim() || !adminEmail.trim() || isSubmitting}
+          className="mt-2 w-full rounded-xl bg-blue-500/90 px-4 py-2 text-sm font-semibold text-purple-950 shadow transition hover:bg-purple-400 disabled:cursor-not-allowed disabled:bg-blue-500/30 disabled:text-purple-900"
         >
-          Create Admin Account
+          {isSubmitting ? 'Creating...' : 'Create Admin Account'}
         </button>
       </form>
     </SectionCard>

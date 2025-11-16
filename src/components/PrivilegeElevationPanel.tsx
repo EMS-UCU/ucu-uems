@@ -242,7 +242,8 @@ export default function PrivilegeElevationPanel({
         `)
         .eq('role_granted', 'Chief Examiner')
         .eq('is_active', true)
-        .order('created_at', { ascending: false });
+        // NOTE: table uses granted_at, not created_at
+        .order('granted_at', { ascending: false });
 
       if (error) {
         console.error('Error loading assignments with join:', error);
@@ -252,7 +253,8 @@ export default function PrivilegeElevationPanel({
           .select('*')
           .eq('role_granted', 'Chief Examiner')
           .eq('is_active', true)
-          .order('created_at', { ascending: false });
+          // Fallback query also orders by granted_at
+          .order('granted_at', { ascending: false });
 
         if (altError) {
           console.error('Error loading assignments without join:', altError);

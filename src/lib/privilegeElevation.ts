@@ -45,22 +45,28 @@ export async function elevateToChiefExaminer(
     }
 
     // Record privilege elevation with assignment details in metadata
-    await supabase
+    const { error: insertError } = await supabase
       .from('privilege_elevations')
       .insert({
         user_id: lecturerId,
         elevated_by: elevatedBy,
         role_granted: 'Chief Examiner',
         is_active: true,
-        metadata: assignmentDetails ? {
-          category: assignmentDetails.category,
-          faculty: assignmentDetails.faculty,
-          department: assignmentDetails.department,
-          course: assignmentDetails.course,
-          semester: assignmentDetails.semester,
-          year: assignmentDetails.year,
-        } : null,
+        metadata: assignmentDetails
+          ? {
+              category: assignmentDetails.category,
+              faculty: assignmentDetails.faculty,
+              department: assignmentDetails.department,
+              course: assignmentDetails.course,
+              semester: assignmentDetails.semester,
+              year: assignmentDetails.year,
+            }
+          : null,
       });
+
+    if (insertError) {
+      return { success: false, error: insertError.message };
+    }
 
     return { success: true };
   } catch (error: any) {

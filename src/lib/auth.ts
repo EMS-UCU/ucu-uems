@@ -259,6 +259,7 @@ export async function createUser(userData: {
   roles: string[];
   password: string;
   lecturerCategory?: 'Undergraduate' | 'Postgraduate';
+  isSuperAdmin?: boolean;
 }): Promise<{ user: User | null; error: string | null }> {
   try {
     if (!userData.email) {
@@ -276,6 +277,7 @@ export async function createUser(userData: {
           base_role: userData.baseRole,
           roles: userData.roles,
           lecturer_category: userData.lecturerCategory || null,
+          is_super_admin: userData.isSuperAdmin ?? false,
         },
         emailRedirectTo: undefined, // No email confirmation for admin-created users
       },
@@ -308,7 +310,7 @@ export async function createUser(userData: {
             name: userData.name,
             base_role: userData.baseRole,
             roles: userData.roles,
-            is_super_admin: false,
+            is_super_admin: userData.isSuperAdmin ?? false,
             lecturer_category: userData.lecturerCategory || null,
           },
         ]);
@@ -326,14 +328,17 @@ export async function createUser(userData: {
       .eq('id', authData.user.id)
       .single();
 
-    const appUser = authUserToAppUser(authData.user, finalProfile || {
-      id: authData.user.id,
-      username: userData.username,
-      name: userData.name,
-      base_role: userData.baseRole,
-      roles: userData.roles,
-      is_super_admin: false,
-    });
+    const appUser = authUserToAppUser(
+      authData.user,
+      finalProfile || {
+        id: authData.user.id,
+        username: userData.username,
+        name: userData.name,
+        base_role: userData.baseRole,
+        roles: userData.roles,
+        is_super_admin: userData.isSuperAdmin ?? false,
+      }
+    );
 
     return { user: appUser, error: null };
   } catch (error: any) {
