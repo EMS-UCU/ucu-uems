@@ -572,6 +572,80 @@ function App() {
     [authUserId, users]
   );
 
+  // Helper: upload exam paper file to Supabase Storage + log metadata in exam_papers table
+  const saveExamPaperToSupabase = async (
+    file: File,
+    params: {
+      courseUnit: string;
+      courseCode: string;
+      semester: string;
+      year: string;
+      campus?: string;
+      submittedById?: string;
+      submittedByName?: string;
+      submittedRole?: 'Setter' | 'Team Lead' | 'Chief Examiner' | 'Manual';
+    }
+  ): Promise<{ success: boolean; storagePath?: string; error?: string }> => {
+    try {
+      const timestamp = new Date().toISOString();
+      const safeCourseCode = params.courseCode || 'NO_CODE';
+      const safeYear = params.year || 'UNKNOWN_YEAR';
+      const filePath = `${safeCourseCode}/${safeYear}/${Date.now()}-${file.name}`;
+
+      // 1) Upload file to exam_papers bucket
+      const { data: storageData, error: storageError } = await supabase.storage
+        .from('exam_papers')
+        .upload(filePath, file, {
+          cacheControl: '3600',
+          upsert: false,
+        });
+
+      if (storageError || !storageData) {
+        console.error('Error uploading exam paper to storage:', storageError);
+        return { success: false, error: storageError?.message || 'Failed to upload exam paper file.' };
+      }
+
+      // 2) Insert metadata into exam_papers table
+      const status: ExamPaperStatus =
+        params.submittedRole === 'Setter'
+          ? 'submitted_to_repository'
+          : params.submittedRole === 'Team Lead'
+          ? 'integrated_by_team_lead'
+          : 'submitted_to_repository';
+
+      const campus = params.campus || currentUser?.campus || 'Main Campus';
+
+      const insertPayload = {
+        course_code: safeCourseCode,
+        course_name: params.courseUnit,
+        semester: params.semester,
+        academic_year: safeYear,
+        campus,
+        setter_id: params.submittedRole === 'Setter' ? params.submittedById : null,
+        team_lead_id: params.submittedRole === 'Team Lead' ? params.submittedById : null,
+        chief_examiner_id: params.submittedRole === 'Chief Examiner' ? params.submittedById : null,
+        status,
+        version_number: 1,
+        file_url: storageData.path,
+        file_name: file.name,
+        file_size: file.size,
+        submitted_at: timestamp,
+      };
+
+      const { error: insertError } = await supabase.from('exam_papers').insert(insertPayload);
+
+      if (insertError) {
+        console.error('Error inserting exam paper metadata:', insertError);
+        return { success: false, error: insertError.message || 'Failed to save exam paper metadata.' };
+      }
+
+      return { success: true, storagePath: storageData.path };
+    } catch (error: any) {
+      console.error('Unexpected error saving exam paper:', error);
+      return { success: false, error: error?.message || 'Unexpected error saving exam paper.' };
+    }
+  };
+
   // Load users from Supabase on mount
   useEffect(() => {
     const loadUsersFromSupabase = async () => {
@@ -1147,43 +1221,61 @@ function App() {
     );
   };
 
-  const handleAddPaperToRepository = (
+  const handleAddPaperToRepository = async (
     file: File,
     courseUnit: string,
     courseCode: string,
     semester: string,
     year: string
   ) => {
-    const actor = currentUser?.name ?? 'Unknown';
-    const paperId = createId();
-    
-    // Read file content (in a real app, this would parse PDF content)
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const content = e.target?.result as string;
-      const newPaper = {
-        id: paperId,
-        courseUnit,
-        courseCode,
-        semester,
-        year,
-        submittedBy: actor,
-        submittedAt: new Date().toISOString(),
-        fileName: file.name,
-        content: content || `Paper content for ${file.name}`,
-        fileSize: file.size,
-      };
+    const actorName = currentUser?.name ?? 'Unknown';
+    const actorId = authUserId || currentUser?.id;
 
-      setRepositoryPapers(prev => [...prev, newPaper]);
-      pushWorkflowEvent(
-        `Added paper "${file.name}" to repository for AI analysis (${courseCode} - ${courseUnit}).`,
-        actor
-      );
+    const result = await saveExamPaperToSupabase(file, {
+      courseUnit,
+      courseCode,
+      semester,
+      year,
+      campus: currentUser?.campus,
+      submittedById: actorId,
+      submittedByName: actorName,
+      submittedRole: 'Chief Examiner',
+    });
+
+    if (!result.success) {
+      alert(result.error || 'Failed to add paper to repository.');
+      return;
+    }
+
+    const paperId = createId();
+    const newPaper = {
+      id: paperId,
+      courseUnit,
+      courseCode,
+      semester,
+      year,
+      submittedBy: actorName,
+      submittedAt: new Date().toISOString(),
+      fileName: file.name,
+      content: `Stored in Supabase at ${result.storagePath}`,
+      fileSize: file.size,
     };
-    reader.readAsText(file);
+
+    setRepositoryPapers((prev) => [...prev, newPaper]);
+    pushWorkflowEvent(
+      `Added paper "${file.name}" to repository for AI analysis (${courseCode} - ${courseUnit}).`,
+      actorName
+    );
   };
 
-  const handleSetterSubmit = (file: File, courseUnit: string, courseCode: string, semester: string, year: string) => {
+  const handleSetterSubmit = async (
+    file: File,
+    courseCode: string,
+    courseName: string,
+    semester: string,
+    academicYear: string,
+    campus: string
+  ) => {
     if (!currentUserHasRole('Setter')) {
       return;
     }
@@ -1207,6 +1299,7 @@ function App() {
     }
 
     const actor = currentUser?.name ?? 'Unknown';
+    const actorId = authUserId || currentUser?.id;
     const submissionId = createId();
     const newSubmission = {
       id: submissionId,
@@ -1216,27 +1309,39 @@ function App() {
       fileContent: file.name, // Store file reference
     };
 
-    setSetterSubmissions(prev => [...prev, newSubmission]);
+    setSetterSubmissions((prev) => [...prev, newSubmission]);
 
-    // Auto-add to repository
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const content = e.target?.result as string;
-      const repositoryPaper = {
-        id: createId(),
-        courseUnit,
-        courseCode,
-        semester,
-        year,
-        submittedBy: actor,
-        submittedAt: new Date().toISOString(),
-        fileName: file.name,
-        content: content || `Paper content for ${file.name}`,
-        fileSize: file.size,
-      };
-      setRepositoryPapers(prev => [...prev, repositoryPaper]);
+    // Save to Supabase Storage + exam_papers table
+    const result = await saveExamPaperToSupabase(file, {
+      courseUnit: courseName,
+      courseCode,
+      semester,
+      year: academicYear,
+      campus,
+      submittedById: actorId,
+      submittedByName: actor,
+      submittedRole: 'Setter',
+    });
+
+    if (!result.success) {
+      alert(result.error || 'Failed to save exam paper to the system.');
+      return;
+    }
+
+    // Also reflect in local repository list for current session
+    const repositoryPaper = {
+      id: createId(),
+      courseUnit: courseName,
+      courseCode,
+      semester,
+      year: academicYear,
+      submittedBy: actor,
+      submittedAt: new Date().toISOString(),
+      fileName: file.name,
+      content: `Stored in Supabase at ${result.storagePath}`,
+      fileSize: file.size,
     };
-    reader.readAsText(file);
+    setRepositoryPapers((prev) => [...prev, repositoryPaper]);
 
     pushWorkflowEvent(
       'Submitted draft to Team Lead. Copy automatically shared with Chief Examiner. Paper added to repository and vetting.',
@@ -2328,6 +2433,7 @@ function App() {
           deadlineStartTime={setterDeadlineStartTime}
           deadlineDuration={setterDeadlineDuration}
           currentUserCourseUnit={currentUser?.courseUnit}
+          currentUserCampus={currentUser?.campus}
         />
       ),
     });
@@ -6570,12 +6676,20 @@ function ChiefExaminerConsole({
 }
 
 interface SetterSubmissionFormProps {
-  onSubmit: (file: File, courseUnit: string, courseCode: string, semester: string, year: string) => void;
+  onSubmit: (
+    file: File,
+    courseCode: string,
+    courseName: string,
+    semester: string,
+    academicYear: string,
+    campus: string
+  ) => void;
   canSubmit: boolean;
   workflowStage: WorkflowStage;
   timeRemaining: { days: number; hours: number; minutes: number; seconds: number; expired: boolean } | null;
   deadlineActive: boolean;
   defaultCourseUnit?: string | null;
+  defaultCampus?: string | null;
 }
 
 function SetterSubmissionForm({
@@ -6585,6 +6699,7 @@ function SetterSubmissionForm({
   timeRemaining,
   deadlineActive,
   defaultCourseUnit,
+  defaultCampus,
 }: SetterSubmissionFormProps) {
   const currentYear = new Date().getFullYear().toString();
   const currentSemester = 'Advent'; // default liturgical semester; adjust if you track this elsewhere
@@ -6594,6 +6709,7 @@ function SetterSubmissionForm({
   const [courseCode, setCourseCode] = useState('');
   const [semester, setSemester] = useState(currentSemester);
   const [year, setYear] = useState(currentYear);
+  const [campus, setCampus] = useState(defaultCampus ?? '');
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -6613,12 +6729,12 @@ function SetterSubmissionForm({
       alert('Please select a PDF file.');
       return;
     }
-    if (!courseUnit || !semester || !year) {
-      alert('Please fill in the required details.');
+    if (!courseCode || !courseUnit || !semester || !year || !campus) {
+      alert('Please fill in Course Code, Course Name, Semester, Academic Year and Campus.');
       return;
     }
 
-    onSubmit(selectedFile, courseUnit, courseCode, semester, year);
+    onSubmit(selectedFile, courseCode, courseUnit, semester, year, campus);
     
     // Reset form
     setSelectedFile(null);
@@ -6626,6 +6742,7 @@ function SetterSubmissionForm({
     setCourseCode('');
     setSemester(currentSemester);
     setYear(currentYear);
+    setCampus(defaultCampus ?? '');
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     if (fileInput) fileInput.value = '';
   };
@@ -6673,13 +6790,13 @@ function SetterSubmissionForm({
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
           <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
-            Course Code <span className="font-normal lowercase text-slate-400">(optional)</span>
+            Course Code
           </label>
           <input
             type="text"
             value={courseCode}
             onChange={(e) => setCourseCode(e.target.value)}
-            placeholder="Auto-handled if left blank"
+            placeholder="e.g., CSC2101"
             disabled={!canSubmit}
             className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
           />
@@ -6687,7 +6804,7 @@ function SetterSubmissionForm({
 
         <div>
           <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
-            Course Unit
+            Course Name
           </label>
           {defaultCourseUnit ? (
             <div className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
@@ -6724,7 +6841,7 @@ function SetterSubmissionForm({
 
         <div>
           <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
-            Year
+            Academic Year
           </label>
           <input
             type="text"
@@ -6737,11 +6854,25 @@ function SetterSubmissionForm({
         </div>
       </div>
 
+      <div>
+        <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
+          Campus
+        </label>
+        <input
+          type="text"
+          value={campus}
+          onChange={(e) => setCampus(e.target.value)}
+          placeholder="e.g., Main Campus"
+          disabled={!canSubmit}
+          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:opacity-50"
+        />
+      </div>
+
       <button
         type="submit"
-        disabled={!canSubmit || !selectedFile || !courseUnit || !semester || !year}
+        disabled={!canSubmit || !selectedFile || !courseCode || !courseUnit || !semester || !year || !campus}
         className={`w-full rounded-xl px-6 py-4 text-sm font-semibold transition-all shadow-lg ${
-          canSubmit && selectedFile && courseUnit && semester && year
+          canSubmit && selectedFile && courseCode && courseUnit && semester && year && campus
             ? 'bg-pink-500/90 text-pink-950 hover:bg-pink-400 shadow-pink-500/30'
             : 'bg-pink-500/40 text-pink-900 cursor-not-allowed'
         }`}
@@ -6778,11 +6909,19 @@ function SetterSubmissionForm({
 
 interface SetterPanelProps {
   workflowStage: WorkflowStage;
-  onSetterSubmit: (file: File, courseUnit: string, courseCode: string, semester: string, year: string) => void;
+  onSetterSubmit: (
+    file: File,
+    courseCode: string,
+    courseName: string,
+    semester: string,
+    academicYear: string,
+    campus: string
+  ) => void;
   deadlineActive: boolean;
   deadlineStartTime: number | null;
   deadlineDuration: { days: number; hours: number; minutes: number };
   currentUserCourseUnit?: string;
+  currentUserCampus?: string;
 }
 
 function SetterPanel({
@@ -6792,6 +6931,7 @@ function SetterPanel({
   deadlineStartTime,
   deadlineDuration,
   currentUserCourseUnit,
+  currentUserCampus,
 }: SetterPanelProps) {
   const [currentTime, setCurrentTime] = useState(Date.now());
 
@@ -6910,6 +7050,7 @@ function SetterPanel({
             timeRemaining={timeRemaining}
             deadlineActive={deadlineActive}
             defaultCourseUnit={currentUserCourseUnit}
+            defaultCampus={currentUserCampus}
           />
         </div>
       </SectionCard>
