@@ -27,6 +27,7 @@ import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 import { supabase } from './lib/supabase';
 import { elevateToChiefExaminer, appointRole } from './lib/privilegeElevation';
 import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead } from './lib/examServices/notificationService';
+import ucuBadge from './assets/ucu-logo.png';
 
 type BaseRole = 'Admin' | 'Lecturer';
 type Role =
@@ -722,6 +723,7 @@ function App() {
   const [repositoryPapers, setRepositoryPapers] = useState<RepositoryPaper[]>([]);
   const [currentTime, setCurrentTime] = useState(Date.now());
   const [activePanelId, setActivePanelId] = useState<string>('overview');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [moderationSchedule, setModerationSchedule] = useState<ModerationSchedule>(loadPersistedModerationSchedule());
   const [vettingSession, setVettingSession] = useState<VettingSessionState>(loadPersistedVettingSession());
   // Track which vetters have joined the session (enabled camera and started their individual session)
@@ -4324,8 +4326,32 @@ function App() {
     }
   }, [panelConfigs, activePanelId]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const handleResize = () => {
+      if (window.innerWidth >= 1024) {
+        setMobileNavOpen(false);
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+    document.body.style.overflow = mobileNavOpen ? 'hidden' : '';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [mobileNavOpen]);
+
   const handlePanelSelect = (panelId: string) => {
     setActivePanelId(panelId);
+    setMobileNavOpen(false);
     if (mainContentRef.current) {
       mainContentRef.current.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -4345,37 +4371,147 @@ function App() {
     );
   }
 
-  const headingTitle = isPureLecturer
-    ? 'Uganda Christian University'
-    : isAdmin
-    ? 'Admin Control Centre'
-    : 'Control Centre';
+  const headingTitle = isAdmin
+    ? 'Exam Operations Hub'
+    : isPureLecturer
+    ? 'Lecturer Home'
+    : 'Workflow Console';
 
-  const headingSubtitle =
-    isPureLecturer
-      ? 'Faculty of Computing & Informatics'
-      : isAdmin
-      ? 'Manage staff accounts, system settings, and administrative functions.'
-      : 'Navigate workflow checkpoints and manage elevated privileges from one command hub.';
+  const headingSubtitle = isAdmin
+    ? 'Configure roles, staff, and workflows in one space.'
+    : isPureLecturer
+    ? 'Faculty of Computing & Informatics'
+    : 'Track approvals, submissions, and role assignments in real time.';
 
   // Check if current vetter has joined - hide sidebar and go fullscreen for vetters
   const isVetterActive = currentUserHasRole('Vetter') && currentUser?.id && joinedVetters.has(currentUser.id);
+  const currentVetterMonitoring = currentUser?.id ? vetterMonitoring.get(currentUser.id) : undefined;
+  const currentVetterCameraStream = currentVetterMonitoring?.cameraStream ?? null;
+
+  useEffect(() => {
+    if (!isVetterActive || !currentUser?.id) {
+      return;
+    }
+
+    // If the vetter has joined but we somehow do not yet have a live stream, capture it now.
+    if (!currentVetterCameraStream || !currentVetterCameraStream.active) {
+      void (async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'user' },
+            audio: false,
+          });
+
+          vetterCameraStreams.current.set(currentUser.id!, stream);
+          setVetterMonitoring((prev) => {
+            const newMap = new Map(prev);
+            const existing = newMap.get(currentUser.id!);
+            newMap.set(currentUser.id!, {
+              vetterId: currentUser.id!,
+              vetterName: currentUser.name ?? 'Unknown',
+              joinedAt: existing?.joinedAt ?? Date.now(),
+              cameraStream: stream,
+              warnings: existing?.warnings ?? [],
+              violations: existing?.violations ?? 0,
+            });
+            return newMap;
+          });
+        } catch (error) {
+          console.error('Unable to start vetter camera preview:', error);
+          alert('Camera access is required to participate in vetting. Please enable camera permissions and try again.');
+        }
+      })();
+    }
+  }, [isVetterActive, currentUser?.id, currentUser?.name, currentVetterCameraStream]);
   
   return (
     <div className={`min-h-screen bg-white text-slate-900 flex ${isVetterActive ? 'fullscreen-vetter-mode' : ''}`}>
+      {isVetterActive && (
+        <div className="fixed bottom-4 right-4 z-50 w-56 max-w-[60vw] rounded-2xl border border-emerald-300 bg-slate-900/95 shadow-2xl backdrop-blur">
+          <div className="flex items-center justify-between px-3 py-2">
+            <div>
+              <p className="text-[0.6rem] uppercase tracking-[0.2em] text-emerald-200">Camera Active</p>
+              <p className="text-xs font-semibold text-white">You are being monitored</p>
+            </div>
+            <span className="inline-flex items-center gap-1 rounded-full bg-red-600 px-2 py-0.5 text-[0.6rem] font-semibold text-white">
+              <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
+              REC
+            </span>
+          </div>
+          <div className="relative aspect-video w-full overflow-hidden rounded-b-2xl border-t border-emerald-200/40 bg-black">
+            {currentVetterCameraStream ? (
+              <video
+                ref={(video) => {
+                  if (video && currentVetterCameraStream) {
+                    if (video.srcObject !== currentVetterCameraStream) {
+                      video.srcObject = currentVetterCameraStream;
+                    }
+                    video.play().catch((err) => console.error('Vetter preview playback error:', err));
+                  }
+                }}
+                autoPlay
+                muted
+                playsInline
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/80">
+                <span className="text-white text-xs font-semibold">Waiting for camera…</span>
+                <span className="text-[0.65rem] text-emerald-200 mt-1">Ensure permissions are granted</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {/* Hide sidebar when vetter has joined - fullscreen vetting mode */}
+      {!isVetterActive && mobileNavOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-slate-900/60 backdrop-blur-sm lg:hidden"
+          onClick={() => setMobileNavOpen(false)}
+          aria-hidden="true"
+        />
+      )}
       {!isVetterActive && (
-      <aside className="hidden w-72 flex-col border-r border-blue-300 bg-gradient-to-b from-blue-600 to-blue-700 lg:flex shadow-lg fixed left-0 top-0 h-screen">
-        <div className="px-6 py-8">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-100">
-            {currentUserHasRole('Lecturer') && !isAdmin
-              ? 'Lecturer Portal'
-              : isAdmin ? 'Admin Portal' : 'Digital Moderation'}
-          </p>
-          <h1 className="mt-3 text-2xl font-semibold text-white">
-            {headingTitle}
-          </h1>
-          <p className="mt-2 text-xs text-blue-100">{headingSubtitle}</p>
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col border-r border-blue-300 bg-gradient-to-b from-blue-600 to-blue-700 shadow-lg transition-transform duration-300 ${
+          mobileNavOpen ? 'translate-x-0' : '-translate-x-full'
+        } lg:translate-x-0`}
+        aria-label="Dashboard navigation"
+      >
+        <div className="flex items-start justify-between px-6 py-8">
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <img
+                src={ucuBadge}
+                alt="UCU badge"
+                className="h-10 w-10 rounded-full border border-white/30 bg-white object-contain p-1"
+              />
+              <p className="text-sm font-semibold uppercase tracking-wide text-white">
+                UCU E-Exam Manager Admin Panel
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-100">
+                {currentUserHasRole('Lecturer') && !isAdmin
+                  ? 'Lecturer Portal'
+                  : isAdmin ? 'Admin Portal' : 'Digital Moderation'}
+              </p>
+              <h1 className="mt-3 text-2xl font-semibold text-white">
+                {headingTitle}
+              </h1>
+              <p className="mt-2 text-xs text-blue-100">{headingSubtitle}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="ml-4 inline-flex items-center justify-center rounded-full border border-blue-200/60 bg-white/10 p-2 text-blue-50 shadow-sm transition hover:border-white/70 hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-white/70 lg:hidden"
+            onClick={() => setMobileNavOpen(false)}
+            aria-label="Close navigation"
+          >
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
         </div>
         <nav className="flex-1 space-y-1 overflow-y-auto px-4 pb-6">
           {(() => {
@@ -4789,9 +4925,22 @@ function App() {
       )}
 
       <div className={`flex-1 flex flex-col ${isVetterActive ? 'w-full' : 'lg:ml-72'}`}>
+        {!isVetterActive && (
         <header className="relative border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div>
+            <div className="flex w-full items-start gap-3">
+              <button
+                type="button"
+                className="inline-flex items-center justify-center rounded-xl border border-blue-200 bg-white p-2 text-blue-600 shadow-sm transition hover:border-blue-400 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-300 lg:hidden"
+                onClick={() => setMobileNavOpen(true)}
+                aria-label="Open navigation menu"
+              >
+                <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </button>
+              <div className="flex-1">
+
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-600">
                 {isAdmin
                   ? 'Admin Dashboard'
@@ -4809,7 +4958,7 @@ function App() {
               </p>
               <h2 className="mt-2 text-2xl font-semibold text-blue-900 sm:text-3xl">
                 {isAdmin
-                  ? 'System Administration'
+                  ? 'Exam Operations Hub'
                   : isChiefExaminer
                   ? 'Your currently assigned Chief Examiner role'
                   : isTeamLead
@@ -4824,7 +4973,7 @@ function App() {
               </h2>
               <p className="mt-1 text-sm text-slate-600">
                 {isAdmin
-                  ? 'Manage staff accounts and system configuration'
+                  ? 'Configure staff accounts, privileges, and workflow controls from one place.'
                   : isChiefExaminer
                   ? 'You now have privileges to assign and manage the exam process.'
                   : isTeamLead
@@ -4837,9 +4986,11 @@ function App() {
                   ? 'Use the dashboard below to manage your classes, students and reports.'
                   : outstandingAction}
               </p>
+
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="relative rounded-xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-indigo-50 px-3 py-2 text-xs shadow-sm sm:min-w-[210px]">
+            <div className="flex w-full flex-wrap items-center justify-end gap-3">
+              <div className="relative w-full rounded-xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-indigo-50 px-3 py-2 text-xs shadow-sm sm:w-auto sm:min-w-[210px]">
                 <div className="pointer-events-none absolute -right-6 -top-6 h-16 w-16 rounded-full bg-blue-200/40 blur-2xl" />
                 <p className="text-[0.6rem] font-semibold uppercase tracking-[0.25em] text-blue-600">
                   Signed In
@@ -4939,7 +5090,7 @@ function App() {
               <button
                 type="button"
                 onClick={handleLogout}
-                className="rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-2 text-sm font-semibold text-blue-800 transition hover:bg-blue-400/20 hover:text-emerald-100"
+                className="w-full rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-2 text-center text-sm font-semibold text-blue-800 transition hover:bg-blue-400/20 hover:text-emerald-100 sm:w-auto"
               >
                 Sign out
               </button>
@@ -5021,7 +5172,7 @@ function App() {
             </div>
           </div>
 
-          <div className="mt-6 flex flex-wrap gap-3 lg:hidden">
+          <div className="mt-6 flex flex-wrap gap-3 overflow-x-auto pb-1 lg:hidden">
             {panelConfigs.map((panel) => {
               const isActive = panel.id === activePanelId;
               return (
@@ -5041,6 +5192,7 @@ function App() {
             })}
           </div>
         </header>
+        )}
 
         {/* Toast notification for latest action */}
         {activeToast && (
@@ -5069,61 +5221,6 @@ function App() {
               </div>
             </div>
           </div>
-        )}
-
-        {/* Hide header when vetter is in fullscreen mode */}
-        {!isVetterActive && (
-        <header className="relative border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-600">
-                {isAdmin
-                  ? 'Admin Dashboard'
-                  : isChiefExaminer
-                  ? 'Chief Examiner Console'
-                  : isTeamLead
-                  ? 'Team Lead Console'
-                  : isVetter
-                  ? 'Vetting Console'
-                  : isSetter
-                  ? 'Setter Console'
-                  : isPureLecturer
-                  ? 'Lecturer Dashboard'
-                  : 'Current Stage'}
-              </p>
-              <h2 className="mt-2 text-2xl font-semibold text-blue-900 sm:text-3xl">
-                {isAdmin
-                  ? 'System Administration'
-                  : isChiefExaminer
-                  ? 'Your currently assigned Chief Examiner role'
-                  : isTeamLead
-                  ? 'Your currently assigned Team Lead role'
-                  : isVetter
-                  ? 'Your currently assigned Vetting role'
-                  : isSetter
-                  ? 'Your currently assigned Setter role'
-                  : isPureLecturer
-                  ? 'Teaching & Student Engagement'
-                  : workflow.stage.replace(/-/g, ' ')}
-              </h2>
-              <p className="mt-1 text-sm text-slate-600">
-                {isAdmin
-                  ? 'Manage staff accounts and system configuration'
-                  : isChiefExaminer
-                  ? 'You now have privileges to assign and manage the exam process.'
-                  : isTeamLead
-                  ? 'You now have privileges to coordinate setters, vetters and manage team submissions.'
-                  : isVetter
-                  ? 'You now have privileges to review and vet exam papers.'
-                  : isSetter
-                  ? 'You now have privileges to create and submit exam drafts.'
-                  : isPureLecturer
-                  ? 'Access your teaching tools, student records, and class schedules.'
-                  : `Current workflow stage: ${workflow.stage.replace(/-/g, ' ')}`}
-              </p>
-            </div>
-          </div>
-        </header>
         )}
 
         <main
@@ -5159,9 +5256,9 @@ function SectionCard({
   return (
     <section
       id={id}
-      className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition-colors transition-shadow duration-200 hover:border-indigo-200 hover:bg-gradient-to-b hover:from-white hover:to-indigo-50 hover:shadow-md"
+      className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition-colors transition-shadow duration-200 hover:border-indigo-200 hover:bg-gradient-to-b hover:from-white hover:to-indigo-50 hover:shadow-md sm:p-6"
     >
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           {kicker ? (
             <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
@@ -5177,7 +5274,7 @@ function SectionCard({
         </div>
         {actions ? <div className="shrink-0">{actions}</div> : null}
       </div>
-      <div className="mt-4 space-y-3">{children}</div>
+      <div className="mt-4 space-y-3 sm:space-y-4">{children}</div>
     </section>
   );
 }
@@ -13310,6 +13407,25 @@ function VettingAndAnnotations({
   
   // Check if current vetter has joined the session
   const vetterHasJoined = currentUserId ? joinedVetters.has(currentUserId) : false;
+
+  const currentVetterStream =
+    currentUserId && vetterMonitoring ? vetterMonitoring.get(currentUserId)?.cameraStream ?? null : null;
+
+  const vetterVideoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (!vetterVideoRef.current) {
+      return;
+    }
+    if (currentVetterStream) {
+      vetterVideoRef.current.srcObject = currentVetterStream;
+      void vetterVideoRef.current.play().catch(() => {
+        // Autoplay might be blocked; user interaction should start it
+      });
+    } else {
+      vetterVideoRef.current.srcObject = null;
+    }
+  }, [currentVetterStream]);
   
   // Vetters can only see paper/checklist after they've joined
   // Chief Examiner can always see everything
@@ -13355,6 +13471,23 @@ function VettingAndAnnotations({
         )
       }
     >
+      {isVetter && vetterHasJoined && currentVetterStream && (
+        <div className="fixed bottom-4 right-4 z-40 w-56 max-w-[45%] overflow-hidden rounded-2xl border border-emerald-200 bg-white/95 shadow-2xl shadow-emerald-200/60 backdrop-blur">
+          <div className="flex items-center justify-between px-3 py-2 text-[0.65rem] font-semibold uppercase tracking-wide text-emerald-700">
+            <span>Camera On</span>
+            <span className="text-emerald-500">Recording</span>
+          </div>
+          <div className="aspect-video bg-slate-900">
+            <video
+              ref={vetterVideoRef}
+              autoPlay
+              muted
+              playsInline
+              className="h-full w-full object-cover"
+            />
+          </div>
+        </div>
+      )}
       <div className="grid gap-5 lg:grid-cols-[2fr_1fr]">
         <div className="space-y-5">
           {/* Paper Viewer - Only visible to Chief Examiner or vetters who have joined */}
