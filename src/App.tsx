@@ -4226,32 +4226,7 @@ function App() {
             }
             setChecklistComments(newComments);
           }}
-          onEndSession={() => {
-            // End the global session
-            setVettingSession({
-              active: false,
-              safeBrowserEnabled: false,
-              cameraOn: false,
-              screenshotBlocked: false,
-              switchingLocked: false,
-              lastClosedReason: 'cancelled',
-            });
-            // Clear all joined vetters
-            setJoinedVetters(new Set());
-            // Clean up all camera streams
-            vetterCameraStreams.current.forEach(stream => {
-              stream.getTracks().forEach(track => track.stop());
-            });
-            vetterCameraStreams.current.clear();
-            // Clear monitoring data
-            setVetterMonitoring(new Map());
-            
-            const actor = currentUser?.name ?? 'Unknown';
-            pushWorkflowEvent(
-              'Chief Examiner ended the vetting session. All vetter sessions have been terminated.',
-              actor
-            );
-          }}
+          onEndSession={() => endVettingSession('cancelled')}
           onApprove={handleApprove}
           onReject={handleReject}
           vettingSessionRecords={vettingSessionRecords}
@@ -4355,6 +4330,86 @@ function App() {
     if (mainContentRef.current) {
       mainContentRef.current.scrollTo({ top: 0, behavior: 'smooth' });
     }
+  };
+
+  const terminateVetterSession = (
+    vetterId: string,
+    options?: { vetterName?: string; reason?: string; silent?: boolean }
+  ) => {
+    if (!vetterId) {
+      return;
+    }
+
+    const monitoringEntry = vetterMonitoring.get(vetterId);
+    const vetterName =
+      options?.vetterName ||
+      monitoringEntry?.vetterName ||
+      users.find((u) => u.id === vetterId)?.name ||
+      'Unknown Vetter';
+    const reason = options?.reason ?? 'Session terminated by Chief Examiner';
+
+    setJoinedVetters((prev) => {
+      const next = new Set(prev);
+      next.delete(vetterId);
+      return next;
+    });
+
+    setVetterMonitoring((prev) => {
+      const next = new Map(prev);
+      next.delete(vetterId);
+      return next;
+    });
+
+    const stream = vetterCameraStreams.current.get(vetterId);
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+      vetterCameraStreams.current.delete(vetterId);
+    }
+
+    logVetterWarning(
+      vetterId,
+      'session_terminated',
+      reason,
+      'critical'
+    );
+
+    if (!options?.silent) {
+      const actor = currentUser?.name ?? 'Chief Examiner';
+      pushWorkflowEvent(
+        `${actor} terminated ${vetterName}'s vetting session.`,
+        actor
+      );
+    }
+  };
+
+  const endVettingSession = (
+    reason: VettingSessionState['lastClosedReason'] = 'cancelled'
+  ) => {
+    vetterCameraStreams.current.forEach((stream) => {
+      stream.getTracks().forEach((track) => track.stop());
+    });
+    vetterCameraStreams.current.clear();
+    setJoinedVetters(new Set());
+    setVetterMonitoring(new Map());
+
+    setVettingSession({
+      active: false,
+      safeBrowserEnabled: false,
+      cameraOn: false,
+      screenshotBlocked: false,
+      switchingLocked: false,
+      lastClosedReason: reason,
+    });
+
+    const actor = currentUser?.name ?? 'Chief Examiner';
+    const message =
+      reason === 'completed'
+        ? 'Chief Examiner closed the vetting session after completion.'
+        : reason === 'expired'
+        ? 'Vetting session expired and was closed by the Chief Examiner.'
+        : 'Chief Examiner ended the vetting session.';
+
+    pushWorkflowEvent(message, actor);
   };
 
   const activePanel =
@@ -14098,7 +14153,7 @@ function VettingAndAnnotations({
         {isChiefExaminer && (vettingSession.active || (vettingSessionRecords && vettingSessionRecords.length > 0)) && (
           <div className="mt-5 space-y-4">
             <div className="rounded-xl border-2 border-red-300/50 bg-gradient-to-br from-red-50 via-pink-50 to-orange-50 p-4 shadow-lg">
-              <div className="flex items-center justify-between mb-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                 <div className="flex items-center gap-2">
                   <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-red-500 to-pink-600 shadow-md">
                     <span className="text-white text-lg">👁️</span>
@@ -14112,21 +14167,54 @@ function VettingAndAnnotations({
                     </p>
                   </div>
                 </div>
-                {/* Clear Records Button - Only show when session is not active and records exist */}
-                {!vettingSession.active && vettingSessionRecords && vettingSessionRecords.length > 0 && (
-                  <button
-                    onClick={() => {
-                      if (confirm('⚠️ Are you sure you want to clear ALL vetting session records? This action cannot be undone.')) {
-                        clearVettingRecords();
-                        alert('✅ All vetting session records have been cleared. You can now start a fresh session.');
-                      }
-                    }}
-                    className="px-3 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm transition-colors"
-                    title="Clear all vetting session records"
-                  >
-                    🗑️ Clear All Records
-                  </button>
-                )}
+                <div className="flex items-center gap-2">
+                  {vettingSession.active ? (
+                    <>
+                      <div className="text-right">
+                        <p className="text-[0.65rem] font-semibold text-red-600">Session Active</p>
+                        <p className="text-[0.6rem] text-slate-600">
+                          {vettingCountdown
+                            ? `Time remaining: ${vettingCountdown}`
+                            : 'Timer expired — session still running'}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          if (
+                            confirm(
+                              '⚠️ Terminate the entire vetting session? All vetters will be logged out immediately.'
+                            )
+                          ) {
+                            endVettingSession('cancelled');
+                          }
+                        }}
+                        className="px-3 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm transition-colors"
+                      >
+                        ✋ End Session
+                      </button>
+                    </>
+                  ) : (
+                    vettingSessionRecords &&
+                    vettingSessionRecords.length > 0 && (
+                      <button
+                        onClick={() => {
+                          if (
+                            confirm(
+                              '⚠️ Are you sure you want to clear ALL vetting session records? This action cannot be undone.'
+                            )
+                          ) {
+                            clearVettingRecords();
+                            alert('✅ All vetting session records have been cleared. You can now start a fresh session.');
+                          }
+                        }}
+                        className="px-3 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm transition-colors"
+                        title="Clear all vetting session records"
+                      >
+                        🗑️ Clear All Records
+                      </button>
+                    )
+                  )}
+                </div>
               </div>
 
               {/* Show message if no vetters have joined yet AND no completed sessions */}
@@ -14174,6 +14262,25 @@ function VettingAndAnnotations({
                             <div className="text-[0.65rem] text-slate-600">
                               {warnings.length} {warnings.length === 1 ? 'Warning' : 'Warnings'}
                             </div>
+                        <button
+                          type="button"
+                          className="ml-3 inline-flex items-center rounded-full bg-red-100 px-3 py-1 text-[0.6rem] font-semibold text-red-700 hover:bg-red-200"
+                          onClick={() => {
+                            if (
+                              confirm(
+                                `Terminate ${monitoring.vetterName}'s session? This will immediately remove them from the vetting room.`
+                              )
+                            ) {
+                              terminateVetterSession(vetterId, {
+                                vetterName: monitoring.vetterName,
+                                reason: 'Terminated by Chief Examiner',
+                              });
+                              alert(`${monitoring.vetterName}'s session has been terminated.`);
+                            }
+                          }}
+                        >
+                          ✂ Terminate
+                        </button>
                           </div>
                         </div>
 
