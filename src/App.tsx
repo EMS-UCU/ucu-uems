@@ -4360,36 +4360,14 @@ function App() {
   const activePanel =
     panelConfigs.find((panel) => panel.id === activePanelId) ?? panelConfigs[0];
 
-  if (!isAuthenticated) {
-    return (
-      <HomePage
-        users={users}
-        onLogin={handleLogin}
-        authError={authError}
-        onClearError={() => setAuthError(null)}
-      />
-    );
-  }
-
-  const headingTitle = isAdmin
-    ? 'Exam Operations Hub'
-    : isPureLecturer
-    ? 'Lecturer Home'
-    : 'Workflow Console';
-
-  const headingSubtitle = isAdmin
-    ? 'Configure roles, staff, and workflows in one space.'
-    : isPureLecturer
-    ? 'Faculty of Computing & Informatics'
-    : 'Track approvals, submissions, and role assignments in real time.';
-
   // Check if current vetter has joined - hide sidebar and go fullscreen for vetters
-  const isVetterActive = currentUserHasRole('Vetter') && currentUser?.id && joinedVetters.has(currentUser.id);
+  const isVetterActive =
+    currentUserHasRole('Vetter') && !!currentUser?.id && joinedVetters.has(currentUser.id);
   const currentVetterMonitoring = currentUser?.id ? vetterMonitoring.get(currentUser.id) : undefined;
   const currentVetterCameraStream = currentVetterMonitoring?.cameraStream ?? null;
 
   useEffect(() => {
-    if (!isVetterActive || !currentUser?.id) {
+    if (!isAuthenticated || !isVetterActive || !currentUser?.id) {
       return;
     }
 
@@ -4422,7 +4400,30 @@ function App() {
         }
       })();
     }
-  }, [isVetterActive, currentUser?.id, currentUser?.name, currentVetterCameraStream]);
+  }, [isAuthenticated, isVetterActive, currentUser?.id, currentUser?.name, currentVetterCameraStream]);
+
+  if (!isAuthenticated) {
+    return (
+      <HomePage
+        users={users}
+        onLogin={handleLogin}
+        authError={authError}
+        onClearError={() => setAuthError(null)}
+      />
+    );
+  }
+
+  const headingTitle = isAdmin
+    ? 'Exam Operations Hub'
+    : isPureLecturer
+    ? 'Lecturer Home'
+    : 'Workflow Console';
+
+  const headingSubtitle = isAdmin
+    ? 'Configure roles, staff, and workflows in one space.'
+    : isPureLecturer
+    ? 'Faculty of Computing & Informatics'
+    : 'Track approvals, submissions, and role assignments in real time.';
   
   return (
     <div className={`min-h-screen bg-white text-slate-900 flex ${isVetterActive ? 'fullscreen-vetter-mode' : ''}`}>
