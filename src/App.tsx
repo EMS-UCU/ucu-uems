@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -24,7 +25,7 @@ import { authenticateUser, getAllUsers } from './lib/auth';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
 import LecturerDashboard from './components/LecturerDashboard';
 import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
-import { supabase } from './lib/supabase';
+import { supabase, type VettingSession } from './lib/supabase';
 import { elevateToChiefExaminer, appointRole } from './lib/privilegeElevation';
 import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead } from './lib/examServices/notificationService';
 import ucuBadge from './assets/ucu-logo.png';
@@ -759,6 +760,61 @@ function App() {
   };
   
   const [vettingSessionRecords, setVettingSessionRecords] = useState<VettingSessionRecord[]>(loadVettingRecords());
+  const [activeSupabaseSessionId, setActiveSupabaseSessionId] = useState<string | null>(null);
+
+  const applySupabaseSessionState = useCallback((session: VettingSession | null) => {
+    if (!session) {
+      setActiveSupabaseSessionId(null);
+      setVettingSession(emptyVettingSession);
+      return;
+    }
+
+    const startedAt = session.started_at ? new Date(session.started_at).getTime() : undefined;
+    const expiresAt = session.expires_at ? new Date(session.expires_at).getTime() : undefined;
+    const durationMinutes =
+      startedAt && expiresAt ? Math.max(1, Math.round((expiresAt - startedAt) / (60 * 1000))) : undefined;
+
+    setActiveSupabaseSessionId(session.id);
+    setVettingSession({
+      active: session.status === 'in_progress',
+      startedAt,
+      durationMinutes,
+      expiresAt,
+      safeBrowserEnabled: session.status === 'in_progress',
+      cameraOn: session.status === 'in_progress',
+      screenshotBlocked: session.status === 'in_progress',
+      switchingLocked: session.status === 'in_progress',
+      lastClosedReason:
+        session.status === 'completed'
+          ? 'completed'
+          : session.status === 'expired'
+          ? 'expired'
+          : session.status === 'cancelled'
+          ? 'cancelled'
+          : undefined,
+    });
+  }, []);
+
+  const refreshVettingSessionFromSupabase = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('vetting_sessions')
+        .select('*')
+        .in('status', ['pending', 'in_progress'])
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (error) {
+        console.error('Error loading vetting session from Supabase:', error);
+        return;
+      }
+
+      const session = data && data.length > 0 ? data[0] : null;
+      applySupabaseSessionState(session);
+    } catch (err) {
+      console.error('Unexpected error loading vetting session from Supabase:', err);
+    }
+  }, [applySupabaseSessionState]);
   // Archive papers - for AI similarity checking
   const loadArchivedPapers = (): SubmittedPaper[] => {
     try {
@@ -2616,17 +2672,43 @@ function App() {
         expiresAt,
       });
       
-      // Start global vetting session - this enables the "Start Session" button for vetters
-      setVettingSession({
-        active: true,
-        startedAt,
-        durationMinutes: duration,
-        expiresAt,
-        safeBrowserEnabled: true, // Will be enforced only for vetters
-        cameraOn: true,
-        screenshotBlocked: true,
-        switchingLocked: true,
-      });
+      try {
+        await supabase
+          .from('vetting_sessions')
+          .update({
+            status: 'expired',
+            completed_at: new Date().toISOString(),
+          })
+          .in('status', ['pending', 'in_progress']);
+      } catch (error) {
+        console.warn('Unable to expire previous vetting sessions:', error);
+      }
+
+      const sessionPayload: Record<string, any> = {
+        chief_examiner_id: currentUser?.id ?? null,
+        status: 'in_progress',
+        started_at: new Date(startedAt).toISOString(),
+        expires_at: new Date(expiresAt).toISOString(),
+      };
+      const activePaper =
+        submittedPapers.find((paper) => paper.status === 'in-vetting') ?? submittedPapers[0];
+      if (activePaper?.id) {
+        sessionPayload.exam_paper_id = activePaper.id;
+      }
+
+      const { data: persistedSession, error: persistError } = await supabase
+        .from('vetting_sessions')
+        .insert(sessionPayload)
+        .select()
+        .single();
+
+      if (persistError || !persistedSession) {
+        console.error('Failed to save vetting session to Supabase:', persistError);
+        alert('Failed to persist the vetting session. Please try again.');
+        return;
+      }
+
+      applySupabaseSessionState(persistedSession);
 
       // Update workflow stage to 'Vetting in Progress'
       const actor = currentUser?.name ?? 'Unknown';
@@ -4226,7 +4308,7 @@ function App() {
             }
             setChecklistComments(newComments);
           }}
-          onEndSession={() => endVettingSession('cancelled')}
+          onEndSession={() => void endVettingSession('cancelled')}
           onApprove={handleApprove}
           onReject={handleReject}
           vettingSessionRecords={vettingSessionRecords}
@@ -4324,6 +4406,31 @@ function App() {
     };
   }, [mobileNavOpen]);
 
+  useEffect(() => {
+    if (!currentUser) {
+      setActiveSupabaseSessionId(null);
+      setVettingSession(emptyVettingSession);
+      return;
+    }
+
+    void refreshVettingSessionFromSupabase();
+
+    const channel = supabase
+      .channel('vetting-session-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'vetting_sessions' },
+        () => {
+          void refreshVettingSessionFromSupabase();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [currentUser, refreshVettingSessionFromSupabase]);
+
   const handlePanelSelect = (panelId: string) => {
     setActivePanelId(panelId);
     setMobileNavOpen(false);
@@ -4382,7 +4489,7 @@ function App() {
     }
   };
 
-  const endVettingSession = (
+  const endVettingSession = async (
     reason: VettingSessionState['lastClosedReason'] = 'cancelled'
   ) => {
     vetterCameraStreams.current.forEach((stream) => {
@@ -4391,6 +4498,24 @@ function App() {
     vetterCameraStreams.current.clear();
     setJoinedVetters(new Set());
     setVetterMonitoring(new Map());
+
+    if (activeSupabaseSessionId) {
+      const supabaseStatus =
+        reason === 'completed' ? 'completed' : reason === 'expired' ? 'expired' : 'cancelled';
+      const { error } = await supabase
+        .from('vetting_sessions')
+        .update({
+          status: supabaseStatus,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', activeSupabaseSessionId);
+
+      if (error) {
+        console.error('Failed to update vetting session in Supabase:', error);
+      } else {
+        setActiveSupabaseSessionId(null);
+      }
+    }
 
     setVettingSession({
       active: false,
@@ -14185,7 +14310,7 @@ function VettingAndAnnotations({
                               '⚠️ Terminate the entire vetting session? All vetters will be logged out immediately.'
                             )
                           ) {
-                            endVettingSession('cancelled');
+                            void endVettingSession('cancelled');
                           }
                         }}
                         className="px-3 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm transition-colors"
