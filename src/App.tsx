@@ -2633,7 +2633,7 @@ function App() {
     );
   };
 
-  const handleStartVetting = async (minutes: number) => {
+  const handleStartVetting = async (minutes: number, paper?: SubmittedPaper | null) => {
     console.log('handleStartVetting called with minutes:', minutes);
     console.log('Current state:', {
       hasVetterRole: currentUserHasRole('Vetter'),
@@ -2691,10 +2691,12 @@ function App() {
         expires_at: new Date(expiresAt).toISOString(),
       };
       const activePaper =
-        submittedPapers.find((paper) => paper.status === 'in-vetting') ?? submittedPapers[0];
-      if (activePaper?.id) {
-        sessionPayload.exam_paper_id = activePaper.id;
+        paper ?? submittedPapers.find((p) => p.status === 'in-vetting') ?? submittedPapers[0];
+      if (!activePaper?.id) {
+        alert('Please select a paper to tie this vetting session to.');
+        return;
       }
+      sessionPayload.exam_paper_id = activePaper.id;
 
       const { data: persistedSession, error: persistError } = await supabase
         .from('vetting_sessions')
@@ -2704,7 +2706,9 @@ function App() {
 
       if (persistError || !persistedSession) {
         console.error('Failed to save vetting session to Supabase:', persistError);
-        alert('Failed to persist the vetting session. Please try again.');
+        alert(
+          `Failed to persist the vetting session. ${persistError?.message ?? 'Please try again.'}`
+        );
         return;
       }
 
@@ -13333,7 +13337,6 @@ interface VettingAndAnnotationsProps {
   digitalChecklist: typeof digitalChecklist;
   vettingCountdown: string | null;
   userHasRole: (role: Role) => boolean;
-  onStartVetting: (minutes: number) => void;
   onCompleteVetting: () => void;
   onAddAnnotation: (comment: string) => void;
   submittedPapers?: SubmittedPaper[];
@@ -13352,6 +13355,7 @@ interface VettingAndAnnotationsProps {
   onApprove?: (notes: string) => void;
   onReject?: (notes: string, newDeadline?: { days: number; hours: number; minutes: number }) => void;
   vettingSessionRecords?: VettingSessionRecord[];
+  onStartVetting: (minutes: number, paper?: SubmittedPaper | null) => void;
 }
 
 function VettingAndAnnotations({
@@ -14026,7 +14030,7 @@ function VettingAndAnnotations({
                     ) : (
                       <button
                         type="button"
-                        onClick={() => onStartVetting(customDuration)}
+                        onClick={() => onStartVetting(customDuration, selectedPaper)}
                         className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
                       >
                         <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
@@ -14038,7 +14042,7 @@ function VettingAndAnnotations({
                     canVetterStartSession && (
                       <button
                         type="button"
-                        onClick={() => onStartVetting(customDuration)}
+                        onClick={() => onStartVetting(customDuration, selectedPaper)}
                         className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
                       >
                         <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
