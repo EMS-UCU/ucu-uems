@@ -26,7 +26,7 @@ import LecturerDashboard from './components/LecturerDashboard';
 import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 import { supabase } from './lib/supabase';
 import { elevateToChiefExaminer, appointRole } from './lib/privilegeElevation';
-import { createNotification, getUserNotifications } from './lib/examServices/notificationService';
+import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead } from './lib/examServices/notificationService';
 
 type BaseRole = 'Admin' | 'Lecturer';
 type Role =
@@ -49,6 +49,37 @@ type WorkflowStage =
   | 'Awaiting Approval'
   | 'Approved'
   | 'Rejected';
+
+// Derive an effective workflow stage from persisted paper statuses so that
+// dashboards still reflect real progress even after a full page refresh.
+const getEffectiveWorkflowStage = (
+  submittedPapers: SubmittedPaper[],
+  currentStage: WorkflowStage
+): WorkflowStage => {
+  const hasApproved = submittedPapers.some((p) => p.status === 'approved');
+  if (hasApproved) return 'Approved';
+
+  const hasVetted = submittedPapers.some((p) => p.status === 'vetted');
+  if (hasVetted) return 'Vetted & Returned to Chief Examiner';
+
+  const hasInVetting = submittedPapers.some((p) => p.status === 'in-vetting');
+  if (hasInVetting) return 'Vetting in Progress';
+
+  // Check if Team Lead has submitted papers to Chief Examiner
+  const hasTeamLeadSubmission = submittedPapers.some(
+    (p) => p.submittedRole === 'Team Lead' && p.status === 'submitted'
+  );
+  if (hasTeamLeadSubmission) {
+    return 'Compiled for Vetting'; // Team Lead submission means ready for Chief Examiner AI check, then vetting
+  }
+
+  const hasSubmitted = submittedPapers.some((p) => p.status === 'submitted');
+  if (hasSubmitted && currentStage === 'Awaiting Setter') {
+    return 'Submitted to Team Lead';
+  }
+
+  return currentStage;
+};
 
 interface PanelConfig {
   id: string;
@@ -124,12 +155,68 @@ interface VettingSessionState {
   lastClosedReason?: 'completed' | 'expired' | 'cancelled';
 }
 
+interface VetterWarning {
+  id: string;
+  vetterId: string;
+  vetterName: string;
+  type: 'tab_switch' | 'tab_navigation_attempt' | 'window_leave' | 'camera_disconnect' | 'screenshot_attempt' | 'window_open_attempt' | 'app_switch_attempt' | 'session_terminated';
+  message: string;
+  timestamp: number;
+  severity: 'warning' | 'critical';
+}
+
+interface VetterMonitoring {
+  vetterId: string;
+  vetterName: string;
+  joinedAt: number;
+  cameraStream: MediaStream | null;
+  warnings: VetterWarning[];
+  violations: number;
+}
+
+interface VettingSessionRecord {
+  id: string;
+  paperId: string;
+  paperName: string;
+  courseCode: string;
+  courseUnit: string;
+  startedAt: number;
+  completedAt: number;
+  durationMinutes: number;
+  vetters: Array<{
+    vetterId: string;
+    vetterName: string;
+    joinedAt: number;
+    warnings: VetterWarning[];
+    violations: number;
+  }>;
+  annotations: Annotation[];
+  checklistComments: Map<string, { comment: string; vetterName: string; timestamp: number; color: string }>;
+  status: 'completed' | 'expired' | 'terminated';
+}
+
 interface DestructionLogEntry {
   id: string;
   versionLabel: string;
   timestamp: string;
   details: string;
 }
+
+interface ModerationSchedule {
+  scheduled: boolean;
+  startDateTime?: string; // ISO string for when moderation begins
+  endDateTime?: string; // ISO string for when moderation ends
+  scheduledStartTime?: number; // Timestamp when moderation will start
+  scheduledEndTime?: number; // Timestamp when moderation will end
+}
+
+type ExamPaperStatus =
+  | 'submitted_to_repository'
+  | 'integrated_by_team_lead'
+  | 'appointed_for_vetting'
+  | 'vetting_in_progress'
+  | 'vetted_with_comments'
+  | 'approved_for_printing';
 
 interface SubmittedPaper {
   id: string;
@@ -143,14 +230,40 @@ interface SubmittedPaper {
   semester?: string;
   year?: string;
   fileUrl?: string;
+  submittedRole?: 'Setter' | 'Team Lead' | 'Chief Examiner' | 'Manual' | 'Unknown';
 }
 
+interface RepositoryPaper {
+  id: string;
+  courseUnit: string;
+  courseCode: string;
+  semester: string;
+  year: string;
+  submittedBy: string;
+  submittedAt: string;
+  fileName: string;
+  content: string;
+  fileSize?: number;
+}
 interface SetterSubmission {
   id: string;
   fileName: string;
   submittedBy: string;
   submittedAt: string;
   fileContent?: string;
+}
+
+interface RepositoryPaper {
+  id: string;
+  courseUnit: string;
+  courseCode: string;
+  semester: string;
+  year: string;
+  submittedBy: string;
+  submittedAt: string;
+  fileName: string;
+  content: string;
+  fileSize?: number;
 }
 
 interface Annotation {
@@ -545,8 +658,6 @@ function App() {
   const [workflow, setWorkflow] = useState<WorkflowState>(initialWorkflow);
   const [versionHistory, setVersionHistory] =
     useState<VersionHistoryEntry[]>(initialVersionHistory);
-  const [vettingSession, setVettingSession] =
-    useState<VettingSessionState>(emptyVettingSession);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [destructionLog, setDestructionLog] = useState<DestructionLogEntry[]>(
     []
@@ -554,28 +665,205 @@ function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
-  const [submittedPapers, setSubmittedPapers] = useState<SubmittedPaper[]>([]);
+  // Load persisted papers from localStorage
+  const loadPersistedPapers = (): SubmittedPaper[] => {
+    try {
+      const saved = localStorage.getItem('ucu-moderation-papers');
+      if (!saved) return [];
+      return JSON.parse(saved) as SubmittedPaper[];
+    } catch (error) {
+      console.error('Error loading persisted papers:', error);
+      return [];
+    }
+  };
+
+  // Load persisted moderation schedule from localStorage
+  const loadPersistedModerationSchedule = (): ModerationSchedule => {
+    try {
+      const saved = localStorage.getItem('ucu-moderation-schedule');
+      if (!saved) return { scheduled: false };
+      const parsed = JSON.parse(saved) as ModerationSchedule;
+      // Convert ISO strings back to timestamps if needed
+      if (parsed.scheduledStartTime && typeof parsed.scheduledStartTime === 'string') {
+        parsed.scheduledStartTime = new Date(parsed.scheduledStartTime).getTime();
+      }
+      if (parsed.scheduledEndTime && typeof parsed.scheduledEndTime === 'string') {
+        parsed.scheduledEndTime = new Date(parsed.scheduledEndTime).getTime();
+      }
+      return parsed;
+    } catch (error) {
+      console.error('Error loading persisted moderation schedule:', error);
+      return { scheduled: false };
+    }
+  };
+
+  // Load persisted vetting session from localStorage
+  const loadPersistedVettingSession = (): VettingSessionState => {
+    try {
+      const saved = localStorage.getItem('ucu-moderation-vetting-session');
+      if (!saved) return emptyVettingSession;
+      const parsed = JSON.parse(saved) as VettingSessionState;
+      // Convert timestamps if they're strings
+      if (parsed.startedAt && typeof parsed.startedAt === 'string') {
+        parsed.startedAt = new Date(parsed.startedAt).getTime();
+      }
+      if (parsed.expiresAt && typeof parsed.expiresAt === 'string') {
+        parsed.expiresAt = new Date(parsed.expiresAt).getTime();
+      }
+      return parsed;
+    } catch (error) {
+      console.error('Error loading persisted vetting session:', error);
+      return emptyVettingSession;
+    }
+  };
+
+  const [submittedPapers, setSubmittedPapers] = useState<SubmittedPaper[]>(loadPersistedPapers());
   const [setterSubmissions, setSetterSubmissions] = useState<SetterSubmission[]>([]);
-  const [repositoryPapers, setRepositoryPapers] = useState<Array<{
-    id: string;
-    courseUnit: string;
-    courseCode: string;
-    semester: string;
-    year: string;
-    submittedBy: string;
-    submittedAt: string;
-    fileName: string;
-    content: string;
-    fileSize?: number;
-  }>>([]);
+  const [repositoryPapers, setRepositoryPapers] = useState<RepositoryPaper[]>([]);
   const [currentTime, setCurrentTime] = useState(Date.now());
   const [activePanelId, setActivePanelId] = useState<string>('overview');
+  const [moderationSchedule, setModerationSchedule] = useState<ModerationSchedule>(loadPersistedModerationSchedule());
+  const [vettingSession, setVettingSession] = useState<VettingSessionState>(loadPersistedVettingSession());
+  // Track which vetters have joined the session (enabled camera and started their individual session)
+  const [joinedVetters, setJoinedVetters] = useState<Set<string>>(new Set());
+  // Track monitoring data for each vetter (camera feeds, warnings, violations)
+  const [vetterMonitoring, setVetterMonitoring] = useState<Map<string, VetterMonitoring>>(new Map());
+  // Store camera stream references for Chief Examiner monitoring
+  const vetterCameraStreams = useRef<Map<string, MediaStream>>(new Map());
+  // Checklist comments - keyed by checklist category and item text
+  const [checklistComments, setChecklistComments] = useState<Map<string, { comment: string; vetterName: string; timestamp: number; color: string }>>(new Map());
+  // Vetting session records - stores completed sessions
+  const loadVettingRecords = (): VettingSessionRecord[] => {
+    try {
+      const saved = localStorage.getItem('ucu-vetting-records');
+      if (!saved) return [];
+      const parsed = JSON.parse(saved);
+      // Convert checklistComments back to Map
+      return parsed.map((record: any) => ({
+        ...record,
+        checklistComments: new Map(Object.entries(record.checklistComments || {})),
+      }));
+    } catch (error) {
+      console.error('Error loading vetting records:', error);
+      return [];
+    }
+  };
+  
+  // Function to clear all vetting records
+  const clearVettingRecords = () => {
+    localStorage.removeItem('ucu-vetting-records');
+    setVettingSessionRecords([]);
+    console.log('✅ All vetting session records cleared');
+  };
+  
+  const [vettingSessionRecords, setVettingSessionRecords] = useState<VettingSessionRecord[]>(loadVettingRecords());
+  // Archive papers - for AI similarity checking
+  const loadArchivedPapers = (): SubmittedPaper[] => {
+    try {
+      const saved = localStorage.getItem('ucu-archived-papers');
+      if (!saved) return [];
+      return JSON.parse(saved);
+    } catch (error) {
+      console.error('Error loading archived papers:', error);
+      return [];
+    }
+  };
+  const [archivedPapers, setArchivedPapers] = useState<SubmittedPaper[]>(loadArchivedPapers());
   const mainContentRef = useRef<HTMLDivElement | null>(null);
 
   const currentUser = useMemo(
     () => users.find((user) => user.id === authUserId) ?? null,
     [authUserId, users]
   );
+
+  // Load persisted deadline state so countdowns continue across refresh / logout
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('ucu-moderation-deadlines');
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        setterDeadlineActive?: boolean;
+        setterDeadlineStartTime?: number | null;
+        setterDeadlineDuration?: { days: number; hours: number; minutes: number };
+        teamLeadDeadlineActive?: boolean;
+        teamLeadDeadlineStartTime?: number | null;
+        teamLeadDeadlineDuration?: { days: number; hours: number; minutes: number };
+      };
+
+      if (typeof parsed.setterDeadlineActive === 'boolean') {
+        setSetterDeadlineActive(parsed.setterDeadlineActive);
+      }
+      if (typeof parsed.setterDeadlineStartTime === 'number') {
+        setSetterDeadlineStartTime(parsed.setterDeadlineStartTime);
+      }
+      if (parsed.setterDeadlineDuration) {
+        setSetterDeadlineDuration(parsed.setterDeadlineDuration);
+      }
+
+      if (typeof parsed.teamLeadDeadlineActive === 'boolean') {
+        setTeamLeadDeadlineActive(parsed.teamLeadDeadlineActive);
+      }
+      if (typeof parsed.teamLeadDeadlineStartTime === 'number') {
+        setTeamLeadDeadlineStartTime(parsed.teamLeadDeadlineStartTime);
+      }
+      if (parsed.teamLeadDeadlineDuration) {
+        setTeamLeadDeadlineDuration(parsed.teamLeadDeadlineDuration);
+      }
+    } catch (error) {
+      console.error('Error loading deadline state from localStorage:', error);
+    }
+  }, []);
+
+  // Persist deadline state whenever it changes
+  useEffect(() => {
+    try {
+      const payload = {
+        setterDeadlineActive,
+        setterDeadlineStartTime,
+        setterDeadlineDuration,
+        teamLeadDeadlineActive,
+        teamLeadDeadlineStartTime,
+        teamLeadDeadlineDuration,
+      };
+      localStorage.setItem('ucu-moderation-deadlines', JSON.stringify(payload));
+    } catch (error) {
+      console.error('Error saving deadline state to localStorage:', error);
+    }
+  }, [
+    setterDeadlineActive,
+    setterDeadlineStartTime,
+    setterDeadlineDuration,
+    teamLeadDeadlineActive,
+    teamLeadDeadlineStartTime,
+    teamLeadDeadlineDuration,
+  ]);
+
+  // Persist submittedPapers whenever they change
+  useEffect(() => {
+    try {
+      localStorage.setItem('ucu-moderation-papers', JSON.stringify(submittedPapers));
+    } catch (error) {
+      console.error('Error saving papers to localStorage:', error);
+    }
+  }, [submittedPapers]);
+
+  // Persist moderationSchedule whenever it changes
+  useEffect(() => {
+    try {
+      localStorage.setItem('ucu-moderation-schedule', JSON.stringify(moderationSchedule));
+    } catch (error) {
+      console.error('Error saving moderation schedule to localStorage:', error);
+    }
+  }, [moderationSchedule]);
+
+  // Persist vettingSession whenever it changes
+  useEffect(() => {
+    try {
+      localStorage.setItem('ucu-moderation-vetting-session', JSON.stringify(vettingSession));
+    } catch (error) {
+      console.error('Error saving vetting session to localStorage:', error);
+    }
+  }, [vettingSession]);
 
   // Load persisted exam papers from Supabase so they survive refresh/login
   useEffect(() => {
@@ -592,28 +880,49 @@ function App() {
         }
 
         // Map exam_papers rows into SubmittedPaper + repositoryPapers structures
-        const submitted: SubmittedPaper[] = data.map((paper: any) => ({
-          id: paper.id,
-          fileName: paper.file_name || paper.course_name || 'Exam Paper',
-          submittedBy: paper.setter_id || paper.team_lead_id || 'Unknown',
-          submittedAt: paper.submitted_at || paper.created_at,
-          fileSize: paper.file_size || undefined,
-          status:
-            paper.status === 'approved_for_printing'
-              ? 'approved'
-              : paper.status === 'appointed_for_vetting' ||
-                paper.status === 'vetting_in_progress' ||
-                paper.status === 'vetted_with_comments'
-              ? 'in-vetting'
-              : paper.status === 'integrated_by_team_lead'
-              ? 'vetted'
-              : 'submitted',
-          courseCode: paper.course_code,
-          courseUnit: paper.course_name,
-          semester: paper.semester,
-          year: paper.academic_year,
-          fileUrl: paper.file_url || undefined,
-        }));
+        const submitted: SubmittedPaper[] = data.map((paper: any) => {
+          let submittedRole: SubmittedPaper['submittedRole'] = 'Unknown';
+          if (paper.team_lead_id) {
+            submittedRole = 'Team Lead';
+          } else if (paper.setter_id) {
+            submittedRole = 'Setter';
+          } else if (paper.chief_examiner_id) {
+            submittedRole = 'Chief Examiner';
+          }
+
+          return {
+            id: paper.id,
+            fileName: paper.file_name || paper.course_name || 'Exam Paper',
+            submittedBy:
+              paper.submitted_by_name ||
+              paper.submitted_by ||
+              paper.team_lead_id ||
+              paper.setter_id ||
+              'Unknown',
+            submittedAt: paper.submitted_at || paper.created_at,
+            fileSize: paper.file_size || undefined,
+            // Map backend workflow states into the simplified UI statuses.
+            // NOTE: A paper that has only been integrated by the Team Lead
+            // has NOT yet been vetted, so we must not surface it as "vetted"
+            // in the Chief Examiner dashboard.
+            status:
+              paper.status === 'approved_for_printing'
+                ? 'approved'
+                : paper.status === 'appointed_for_vetting' ||
+                  paper.status === 'vetting_in_progress' ||
+                  paper.status === 'vetted_with_comments'
+                ? 'in-vetting'
+                : paper.status === 'integrated_by_team_lead'
+                ? 'submitted'
+                : 'submitted',
+            courseCode: paper.course_code,
+            courseUnit: paper.course_name,
+            semester: paper.semester,
+            year: paper.academic_year,
+            fileUrl: paper.file_url || undefined,
+            submittedRole,
+          };
+        });
 
         const repo = data.map((paper: any) => ({
           id: paper.id,
@@ -628,8 +937,27 @@ function App() {
           fileSize: paper.file_size || undefined,
         }));
 
-        setSubmittedPapers(submitted);
+        // Merge Supabase papers with persisted papers, prioritizing Supabase data but keeping persisted statuses
+        const persistedPapers = loadPersistedPapers();
+        const mergedPapers: SubmittedPaper[] = submitted.map(supabasePaper => {
+          const persisted = persistedPapers.find(p => p.id === supabasePaper.id);
+          // If paper exists in persisted and has "in-vetting" status, keep that status
+          if (persisted && persisted.status === 'in-vetting') {
+            return { ...supabasePaper, status: 'in-vetting' as const };
+          }
+          return supabasePaper;
+        });
+        // Add any persisted papers that aren't in Supabase yet
+        const newPersisted = persistedPapers.filter(p => !submitted.find(s => s.id === p.id));
+        setSubmittedPapers([...mergedPapers, ...newPersisted]);
         setRepositoryPapers(repo);
+        
+        // Persist the merged papers
+        try {
+          localStorage.setItem('ucu-moderation-papers', JSON.stringify([...mergedPapers, ...newPersisted]));
+        } catch (error) {
+          console.error('Error saving merged papers to localStorage:', error);
+        }
       } catch (err) {
         console.error('Unexpected error loading exam papers:', err);
       }
@@ -690,6 +1018,8 @@ function App() {
         setter_id: params.submittedRole === 'Setter' ? params.submittedById : null,
         team_lead_id: params.submittedRole === 'Team Lead' ? params.submittedById : null,
         chief_examiner_id: params.submittedRole === 'Chief Examiner' ? params.submittedById : null,
+        submitted_by: params.submittedByName || params.submittedById || 'Unknown',
+        submitted_by_name: params.submittedByName || 'Unknown',
         status,
         version_number: 1,
         file_url: storageData.path,
@@ -792,6 +1122,15 @@ function App() {
     };
 
     void loadNotifications();
+    
+    // Refresh notifications every 30 seconds when user is logged in
+    if (currentUser) {
+      const interval = setInterval(() => {
+        loadNotifications();
+      }, 30000); // 30 seconds
+      
+      return () => clearInterval(interval);
+    }
   }, [currentUser]);
 
   // Persist users to localStorage whenever they change (as backup)
@@ -820,6 +1159,543 @@ function App() {
 
     return () => window.clearInterval(timer);
   }, []);
+
+  // Safe Browser Enforcement Effects - ONLY for Vetters, NOT for Chief Examiner
+  useEffect(() => {
+    // Only apply safe browser restrictions to vetters who have joined
+    const isVetter = currentUserHasRole('Vetter');
+    const vetterHasJoined = currentUser?.id ? joinedVetters.has(currentUser.id) : false;
+    
+    if (!vettingSession.active || !vettingSession.safeBrowserEnabled || !isVetter || !vetterHasJoined) {
+      // Clean up any existing restrictions when session is not active or user is not a joined vetter
+      const bodyStyle = document.body.style as CSSStyleDeclaration & { MozUserSelect?: string };
+      bodyStyle.userSelect = '';
+      bodyStyle.webkitUserSelect = '';
+      bodyStyle.MozUserSelect = '';
+      return;
+    }
+
+    console.log('Safe browser enforcement activated', {
+      active: vettingSession.active,
+      safeBrowserEnabled: vettingSession.safeBrowserEnabled,
+      cameraOn: vettingSession.cameraOn,
+      screenshotBlocked: vettingSession.screenshotBlocked,
+      switchingLocked: vettingSession.switchingLocked,
+    });
+
+    // 1. Prevent Screenshots - Only if screenshotBlocked is true
+    const preventScreenshots = () => {
+      if (!vettingSession.screenshotBlocked) {
+        return () => {}; // No-op cleanup
+      }
+
+      // Disable right-click context menu
+      const handleContextMenu = (e: MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        return false;
+      };
+
+      // Disable common screenshot keyboard shortcuts
+      const handleKeyDown = (e: KeyboardEvent) => {
+        // Windows: Win+Shift+S, Print Screen, Alt+Print Screen
+        // Mac: Cmd+Shift+3, Cmd+Shift+4, Cmd+Shift+5
+        if (
+          (e.key === 'PrintScreen') ||
+          (e.ctrlKey && e.shiftKey && e.key === 'S') ||
+          (e.metaKey && e.shiftKey && ['3', '4', '5'].includes(e.key)) ||
+          (e.altKey && e.key === 'PrintScreen') ||
+          (e.key === 'F12') ||
+          (e.ctrlKey && e.shiftKey && ['I', 'J', 'C'].includes(e.key)) ||
+          (e.ctrlKey && e.key === 'U')
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.key === 'PrintScreen' || (e.metaKey && e.shiftKey && ['3', '4', '5'].includes(e.key))) {
+            alert('Screenshots are disabled during the vetting session.');
+          }
+          return false;
+        }
+      };
+
+      // Disable text selection (makes screenshots harder)
+      const handleSelectStart = (e: Event) => {
+        e.preventDefault();
+        return false;
+      };
+
+      // Disable drag
+      const handleDragStart = (e: DragEvent) => {
+        e.preventDefault();
+        return false;
+      };
+
+      document.addEventListener('contextmenu', handleContextMenu, { capture: true });
+      document.addEventListener('keydown', handleKeyDown, { capture: true });
+      document.addEventListener('selectstart', handleSelectStart, { capture: true });
+      document.addEventListener('dragstart', handleDragStart, { capture: true });
+
+      // Add CSS to prevent selection
+      const bodyStyle = document.body.style as CSSStyleDeclaration & { MozUserSelect?: string };
+      bodyStyle.userSelect = 'none';
+      bodyStyle.webkitUserSelect = 'none';
+      bodyStyle.MozUserSelect = 'none';
+
+      return () => {
+        document.removeEventListener('contextmenu', handleContextMenu, { capture: true });
+        document.removeEventListener('keydown', handleKeyDown, { capture: true });
+        document.removeEventListener('selectstart', handleSelectStart, { capture: true });
+        document.removeEventListener('dragstart', handleDragStart, { capture: true });
+        bodyStyle.userSelect = '';
+        bodyStyle.webkitUserSelect = '';
+        bodyStyle.MozUserSelect = '';
+      };
+    };
+
+    // 2. Close other windows/tabs - Always active when safe browser is on
+    const closeOtherWindows = () => {
+      // Try to close other windows (only works for windows opened by this script)
+      if (window.opener) {
+        try {
+          window.opener.close();
+        } catch (e) {
+          // Cross-origin or already closed
+        }
+      }
+
+      // STRICT: Warn user about other tabs and terminate session if they switch away
+      const handleVisibilityChange = () => {
+        if (document.hidden && currentUser?.id) {
+          // Log warning for Chief Examiner monitoring
+          logVetterWarning(
+            currentUser.id,
+            'tab_switch',
+            'Vetter switched away from the vetting session tab.',
+            'critical'
+          );
+          
+          alert('WARNING: You have switched away from the vetting session. If you continue, your session will be terminated. Please return immediately.');
+          // Try to bring focus back
+          window.focus();
+          
+          // If still not focused after warning, terminate the session
+          setTimeout(() => {
+            if (document.hidden || !document.hasFocus()) {
+              logVetterWarning(
+                currentUser.id!,
+                'tab_switch',
+                'Session terminated: Vetter did not return after tab switch warning.',
+                'critical'
+              );
+              
+              alert('Session terminated due to tab switching. You must rejoin the session.');
+              // Terminate this vetter's session
+              if (currentUser.id && joinedVetters.has(currentUser.id)) {
+                setJoinedVetters(prev => {
+                  const newSet = new Set(prev);
+                  newSet.delete(currentUser.id!);
+                  return newSet;
+                });
+                // Clean up camera stream
+                const stream = vetterCameraStreams.current.get(currentUser.id!);
+                if (stream) {
+                  stream.getTracks().forEach(track => track.stop());
+                  vetterCameraStreams.current.delete(currentUser.id!);
+                }
+              }
+            }
+          }, 3000);
+        }
+      };
+
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+
+      return () => {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      };
+    };
+
+    // 3. Prevent tab/window switching - STRICT enforcement for vetters
+    const preventTabSwitching = () => {
+      if (!vettingSession.switchingLocked) {
+        return () => {}; // No-op cleanup
+      }
+
+      // STRICT: Warn about session termination when trying to leave
+      const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+        e.preventDefault();
+        e.returnValue = 'WARNING: Leaving this page will TERMINATE your vetting session. Your work will be saved, but you must rejoin to continue.';
+        return e.returnValue;
+      };
+
+      const handleBlur = () => {
+        // STRICT: Warn when window loses focus
+        if (document.hasFocus() === false && currentUser?.id) {
+          setTimeout(() => {
+            if (!document.hasFocus()) {
+              // Log warning for Chief Examiner monitoring
+              logVetterWarning(
+                currentUser.id,
+                'window_leave',
+                'Vetter left the vetting session window.',
+                'critical'
+              );
+              
+              const confirmLeave = confirm('WARNING: You are leaving the vetting session window. If you continue, your session will be TERMINATED. Do you want to return to the session?');
+              if (confirmLeave) {
+                window.focus();
+              } else {
+                // User confirmed they want to leave - terminate their session
+                logVetterWarning(
+                  currentUser.id,
+                  'window_leave',
+                  'Session terminated: Vetter confirmed leaving the window.',
+                  'critical'
+                );
+                
+                alert('Your vetting session has been terminated due to leaving the window.');
+                if (currentUser.id && joinedVetters.has(currentUser.id)) {
+                  setJoinedVetters(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(currentUser.id!);
+                    return newSet;
+                  });
+                  // Clean up camera stream
+                  const stream = vetterCameraStreams.current.get(currentUser.id!);
+                  if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                    vetterCameraStreams.current.delete(currentUser.id!);
+                  }
+                }
+              }
+            }
+          }, 500);
+        }
+      };
+
+      // Prevent keyboard shortcuts for tab navigation
+      const handleKeyDown = (e: KeyboardEvent) => {
+        // Block Ctrl+T (new tab), Ctrl+W (close tab), Ctrl+Shift+T (reopen tab)
+        // Ctrl+N (new window), Ctrl+Shift+N (new incognito)
+        if (
+          (e.ctrlKey || e.metaKey) && (
+            e.key === 't' || 
+            e.key === 'T' || 
+            e.key === 'w' || 
+            e.key === 'W' ||
+            (e.shiftKey && (e.key === 't' || e.key === 'T' || e.key === 'n' || e.key === 'N')) ||
+            (!e.shiftKey && e.key === 'n')
+          )
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          
+          // Log warning for Chief Examiner monitoring - CRITICAL
+          if (currentUser?.id) {
+            const alertMessage = 'Tab navigation is disabled during the vetting session. Your session will be terminated if you attempt to open new tabs.';
+            logVetterWarning(
+              currentUser.id,
+              'tab_navigation_attempt',
+              `Attempted to use ${e.key.toUpperCase()} shortcut for tab navigation. Alert shown: "${alertMessage}"`,
+              'critical'
+            );
+            
+            // Increment violations count
+            setVetterMonitoring(prev => {
+              const newMap = new Map(prev);
+              const existing = newMap.get(currentUser.id!);
+              if (existing) {
+                newMap.set(currentUser.id!, {
+                  ...existing,
+                  violations: (existing.violations || 0) + 1,
+                });
+              }
+              return newMap;
+            });
+          }
+          
+          alert('Tab navigation is disabled during the vetting session. Your session will be terminated if you attempt to open new tabs.');
+          return false;
+        }
+        
+        // Block Alt+Tab (Windows/Linux) and Cmd+Tab (Mac) attempts
+        if ((e.altKey && e.key === 'Tab') || (e.metaKey && e.key === 'Tab')) {
+          e.preventDefault();
+          e.stopPropagation();
+          
+          // Log warning for Chief Examiner monitoring - CRITICAL
+          if (currentUser?.id) {
+            logVetterWarning(
+              currentUser.id,
+              'app_switch_attempt',
+              'Attempted to switch between applications using Alt+Tab/Cmd+Tab. This is a critical violation.',
+              'critical'
+            );
+            
+            // Increment violations count
+            setVetterMonitoring(prev => {
+              const newMap = new Map(prev);
+              const existing = newMap.get(currentUser.id!);
+              if (existing) {
+                newMap.set(currentUser.id!, {
+                  ...existing,
+                  violations: (existing.violations || 0) + 1,
+                });
+              }
+              return newMap;
+            });
+          }
+          
+          alert('Switching between applications is not allowed. Your session will be terminated.');
+          return false;
+        }
+      };
+
+      // Block attempts to open new windows/tabs programmatically
+      const originalWindowOpen = window.open;
+      window.open = function(...args: any[]) {
+        // Log warning for Chief Examiner monitoring - CRITICAL VIOLATION
+        if (currentUser?.id) {
+          const alertMessage = 'Opening new windows/tabs is disabled during the vetting session. Your session will be terminated if you continue.';
+          logVetterWarning(
+            currentUser.id,
+            'window_open_attempt',
+            `Attempted to open new window/tab: ${args[0] || 'unknown URL'}. This is a critical violation. Alert shown: "${alertMessage}"`,
+            'critical'
+          );
+          
+          // Increment violations count
+          setVetterMonitoring(prev => {
+            const newMap = new Map(prev);
+            const existing = newMap.get(currentUser.id!);
+            if (existing) {
+              newMap.set(currentUser.id!, {
+                ...existing,
+                violations: (existing.violations || 0) + 1,
+              });
+            }
+            return newMap;
+          });
+        }
+        
+        alert('Opening new windows/tabs is disabled during the vetting session. Your session will be terminated if you continue.');
+        return null;
+      };
+
+      window.addEventListener('beforeunload', handleBeforeUnload);
+      window.addEventListener('blur', handleBlur);
+      document.addEventListener('keydown', handleKeyDown, true);
+
+      // Prevent navigation
+      const handlePopState = () => {
+        window.history.pushState(null, '', window.location.href);
+      };
+
+      window.history.pushState(null, '', window.location.href);
+      window.addEventListener('popstate', handlePopState);
+
+      return () => {
+        window.removeEventListener('beforeunload', handleBeforeUnload);
+        window.removeEventListener('blur', handleBlur);
+        document.removeEventListener('keydown', handleKeyDown, true);
+        window.removeEventListener('popstate', handlePopState);
+        window.open = originalWindowOpen; // Restore original
+      };
+    };
+
+    // 4. Camera monitoring - Only if cameraOn is true
+    const monitorCamera = async () => {
+      if (!vettingSession.cameraOn) {
+        return () => {}; // No-op cleanup
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        // Camera is active - we can monitor it
+        // Store stream reference for cleanup
+        (window as any).__vettingCameraStream = stream;
+        
+        // Monitor camera status
+        const checkCamera = setInterval(() => {
+          if (stream.active) {
+            // Camera is active
+          } else {
+            alert('Camera disconnected. Please ensure your camera remains active during the session.');
+          }
+        }, 5000);
+
+        return () => {
+          clearInterval(checkCamera);
+          stream.getTracks().forEach(track => track.stop());
+          delete (window as any).__vettingCameraStream;
+        };
+      } catch (error) {
+        console.error('Camera access error:', error);
+        alert('Camera access is required for the vetting session. Please enable camera permissions.');
+        return () => {}; // No-op cleanup on error
+      }
+    };
+
+    // 5. Fullscreen enforcement (optional - makes it harder to switch)
+    const enforceFullscreen = () => {
+      const requestFullscreen = async () => {
+        try {
+          if (document.documentElement.requestFullscreen) {
+            await document.documentElement.requestFullscreen();
+          } else if ((document.documentElement as any).webkitRequestFullscreen) {
+            await (document.documentElement as any).webkitRequestFullscreen();
+          } else if ((document.documentElement as any).mozRequestFullScreen) {
+            await (document.documentElement as any).mozRequestFullScreen();
+          }
+        } catch (error) {
+          console.error('Fullscreen error:', error);
+        }
+      };
+
+      // Try to enter fullscreen
+      requestFullscreen();
+
+      // Monitor fullscreen changes
+      const handleFullscreenChange = () => {
+        if (!document.fullscreenElement && !(document as any).webkitFullscreenElement && !(document as any).mozFullScreenElement) {
+          // User exited fullscreen - warn them
+          alert('Fullscreen mode is required. Returning to fullscreen...');
+          requestFullscreen();
+        }
+      };
+
+      document.addEventListener('fullscreenchange', handleFullscreenChange);
+      document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+      document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+
+      return () => {
+        document.removeEventListener('fullscreenchange', handleFullscreenChange);
+        document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+        document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
+      };
+    };
+
+    // Apply restrictions based on individual flags
+    const cleanupScreenshots = preventScreenshots();
+    const cleanupWindows = closeOtherWindows();
+    const cleanupTabSwitching = preventTabSwitching();
+    let cleanupCamera: (() => void) | undefined;
+    const cleanupFullscreen = enforceFullscreen();
+
+    // Start camera monitoring (async) - only if cameraOn is true AND user is a Vetter
+    // Chief Examiners can start the session but don't need camera access
+    // Vetters will be prompted for camera when they join the active session
+    if (vettingSession.cameraOn && currentUserHasRole('Vetter')) {
+      monitorCamera().then(cleanup => {
+        cleanupCamera = cleanup;
+      }).catch(err => {
+        console.error('Camera monitoring setup error:', err);
+      });
+    }
+
+    // Cleanup when session ends
+    return () => {
+      cleanupScreenshots?.();
+      cleanupWindows?.();
+      cleanupTabSwitching?.();
+      cleanupCamera?.();
+      cleanupFullscreen?.();
+    };
+  }, [vettingSession.active, vettingSession.safeBrowserEnabled, vettingSession.cameraOn, vettingSession.screenshotBlocked, vettingSession.switchingLocked, joinedVetters, currentUser?.id]);
+
+  // Auto-start vetting session when scheduled moderation begins
+  useEffect(() => {
+    if (
+      moderationSchedule.scheduled &&
+      moderationSchedule.scheduledStartTime &&
+      currentTime >= moderationSchedule.scheduledStartTime &&
+      !vettingSession.active &&
+      currentUserHasRole('Vetter') &&
+      (workflow.stage === 'Compiled for Vetting' || workflow.stage === 'Vetting Session Expired')
+    ) {
+      const calculatedDuration = moderationSchedule.scheduledEndTime && moderationSchedule.scheduledStartTime
+        ? Math.max(5, Math.floor((moderationSchedule.scheduledEndTime - moderationSchedule.scheduledStartTime) / (60 * 1000)))
+        : 45;
+      
+      const startedAt = Date.now();
+      const expiresAt = moderationSchedule.scheduledEndTime || (startedAt + calculatedDuration * 60 * 1000);
+      
+      setVettingSession({
+        active: true,
+        startedAt,
+        durationMinutes: calculatedDuration,
+        expiresAt,
+        safeBrowserEnabled: true,
+        cameraOn: true,
+        screenshotBlocked: true,
+        switchingLocked: true,
+      });
+
+      const actor = currentUser?.name ?? 'Unknown';
+      pushWorkflowEvent(
+        `Moderation session automatically started. Safe browser enabled for ${calculatedDuration} minutes.`,
+        actor,
+        { stage: 'Vetting in Progress' }
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moderationSchedule.scheduled, moderationSchedule.scheduledStartTime, moderationSchedule.scheduledEndTime, currentTime, vettingSession.active, workflow.stage]);
+
+  // Auto-complete session when scheduled moderation ends
+  useEffect(() => {
+    if (
+      moderationSchedule.scheduled &&
+      moderationSchedule.scheduledEndTime &&
+      currentTime >= moderationSchedule.scheduledEndTime &&
+      vettingSession.active &&
+      currentUser &&
+      currentUser.roles.includes('Vetter')
+    ) {
+      // Auto-submit all pending annotations (they're already saved, just log it)
+      if (annotations.length > 0) {
+        const actor = currentUser?.name ?? 'Unknown';
+        pushWorkflowEvent(
+          `Session ended. ${annotations.length} annotation(s) automatically submitted.`,
+          actor
+        );
+      }
+
+      // Complete the vetting session
+      handleCompleteVetting();
+
+      // Close safe browser
+      setVettingSession({
+        active: false,
+        safeBrowserEnabled: false,
+        cameraOn: false,
+        screenshotBlocked: false,
+        switchingLocked: false,
+      });
+
+      // Show notification
+      const notification: AppNotification = {
+        id: createId(),
+        message: 'Moderation Session Ended: Session time expired. All comments have been submitted and safe browser closed.',
+        timestamp: new Date().toISOString(),
+        read: false,
+      };
+      setNotifications((prev) => [notification, ...prev]);
+      setActiveToast(notification);
+
+      // Auto-close window after a short delay (if in browser)
+      setTimeout(() => {
+        if (typeof window !== 'undefined') {
+          // Try to close the window/tab
+          window.close();
+          // If window.close() doesn't work (some browsers block it), at least try to navigate away
+          if (window.location) {
+            window.location.href = 'about:blank';
+          }
+        }
+      }, 2000);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moderationSchedule.scheduled, moderationSchedule.scheduledEndTime, currentTime, vettingSession.active, annotations.length]);
 
   useEffect(() => {
     if (
@@ -1428,7 +2304,7 @@ function App() {
     );
     appendVersionHistory(
       actor,
-      `Setter lodged the initial draft paper (${courseCode} - ${courseUnit}) and notified Chief Examiner. Paper added to repository for AI analysis.`
+      `Setter lodged the initial draft paper (${courseCode} - ${courseName}) and notified Chief Examiner. Paper added to repository for AI analysis.`
     );
 
     // Notify Team Lead(s) that a new draft has arrived
@@ -1464,7 +2340,13 @@ function App() {
       });
   };
 
-  const handleTeamLeadSubmitPDF = (file: File, courseUnit: string, courseCode: string, semester: string, year: string) => {
+  const handleTeamLeadSubmitPDF = async (
+    file: File,
+    courseUnit: string,
+    courseCode: string,
+    semester: string,
+    year: string
+  ) => {
     if (!currentUserHasRole('Team Lead')) {
       return;
     }
@@ -1485,6 +2367,7 @@ function App() {
     }
 
     const actor = currentUser?.name ?? 'Unknown';
+    const actorId = authUserId || currentUser?.id;
     const paperId = createId();
     const newPaper: SubmittedPaper = {
       id: paperId,
@@ -1497,9 +2380,10 @@ function App() {
       courseCode,
       semester,
       year,
+      submittedRole: 'Team Lead',
     };
 
-    setSubmittedPapers(prev => [...prev, newPaper]);
+    setSubmittedPapers((prev) => [...prev, newPaper]);
 
     // Auto-add to repository
     const reader = new FileReader();
@@ -1517,18 +2401,147 @@ function App() {
         content: content || `Paper content for ${file.name}`,
         fileSize: file.size,
       };
-      setRepositoryPapers(prev => [...prev, repositoryPaper]);
+      setRepositoryPapers((prev) => [...prev, repositoryPaper]);
     };
     reader.readAsText(file);
 
+    // Persist Team Lead submission to Supabase so Chief Examiner and vetters can see it
+    const result = await saveExamPaperToSupabase(file, {
+      courseUnit,
+      courseCode,
+      semester,
+      year,
+      submittedById: actorId,
+      submittedByName: actor,
+      submittedRole: 'Team Lead',
+    });
+
+    if (!result.success) {
+      alert(result.error || 'Failed to save Team Lead submission to the system.');
+      return;
+    }
+
+    // Show success confirmation to Team Lead
+    alert(`Successfully submitted "${file.name}" to Chief Examiner. The Chief Examiner has been notified and will review the paper for AI similarity analysis before forwarding to vetting.\n\nThe paper will appear in the "Submissions from Team Lead" section in the Chief Examiner Dashboard.`);
+
+    // Reload papers from Supabase to ensure Chief Examiner sees the new submission
+    // This helps when Chief Examiner is logged in on another session
+    try {
+      const { data, error } = await supabase
+        .from('exam_papers')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (!error && data) {
+        const submitted: SubmittedPaper[] = data.map((paper: any) => {
+          let submittedRole: SubmittedPaper['submittedRole'] = 'Unknown';
+          if (paper.team_lead_id) {
+            submittedRole = 'Team Lead';
+          } else if (paper.setter_id) {
+            submittedRole = 'Setter';
+          } else if (paper.chief_examiner_id) {
+            submittedRole = 'Chief Examiner';
+          }
+
+          return {
+            id: paper.id,
+            fileName: paper.file_name || paper.course_name || 'Exam Paper',
+            submittedBy:
+              paper.submitted_by_name ||
+              paper.submitted_by ||
+              paper.team_lead_id ||
+              paper.setter_id ||
+              'Unknown',
+            submittedAt: paper.submitted_at || paper.created_at,
+            fileSize: paper.file_size || undefined,
+            status:
+              paper.status === 'approved_for_printing'
+                ? 'approved'
+                : paper.status === 'appointed_for_vetting' ||
+                  paper.status === 'vetting_in_progress' ||
+                  paper.status === 'vetted_with_comments'
+                ? 'in-vetting'
+                : paper.status === 'integrated_by_team_lead'
+                ? 'submitted'
+                : 'submitted',
+            courseCode: paper.course_code,
+            courseUnit: paper.course_name,
+            semester: paper.semester,
+            year: paper.academic_year,
+            fileUrl: paper.file_url || undefined,
+            submittedRole,
+          };
+        });
+        setSubmittedPapers(submitted);
+      }
+    } catch (err) {
+      console.error('Error reloading papers after Team Lead submission:', err);
+    }
+
+    // Update workflow stage to indicate papers are with Chief Examiner
     pushWorkflowEvent(
-      `Team Lead submitted PDF "${file.name}" to Chief Examiner. Paper added to repository and vetting.`,
-      actor
+      `Team Lead submitted PDF "${file.name}" to Chief Examiner. Paper ready for AI similarity analysis before vetting.`,
+      actor,
+      {
+        stage: 'Compiled for Vetting',
+        mutate: (prev) => ({
+          ...prev,
+        }),
+      }
     );
     appendVersionHistory(
       actor,
-      `Team Lead submitted paper: ${file.name} (${courseCode} - ${courseUnit}, ${(file.size / 1024).toFixed(2)} KB). Paper added to repository for AI analysis.`
+      `Team Lead submitted paper: ${file.name} (${courseCode} - ${courseUnit}, ${(file.size / 1024).toFixed(
+        2
+      )} KB). Paper received by Chief Examiner for AI similarity checks before vetting.`
     );
+
+    // Notify Chief Examiner that Team Lead has submitted the compiled paper
+    const notificationMessage = `Team Lead ${actor} submitted "${file.name}" for ${courseCode} - ${courseUnit}. Paper is ready for your AI similarity analysis before forwarding to vetting.`;
+    const toast: AppNotification = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      message: notificationMessage,
+      timestamp: new Date().toISOString(),
+      read: false,
+    };
+
+    // If the current user also has Chief Examiner role (multi‑role account),
+    // show the toast immediately in the UI.
+    if (currentUserHasRole('Chief Examiner')) {
+      setNotifications((prev) => [toast, ...prev].slice(0, 20));
+      setActiveToast(toast);
+      setTimeout(() => {
+        setActiveToast((current) =>
+          current && current.id === toast.id ? null : current
+        );
+      }, 8000); // Show longer for important Chief Examiner notifications
+    }
+
+    // Persist notification in the DB for ALL Chief Examiners (priority notification)
+    users
+      .filter((u) => u.roles.includes('Chief Examiner'))
+      .forEach((target) => {
+        if (!target.id) return;
+        void createNotification({
+          user_id: target.id,
+          title: 'Team Lead Submission Received - Action Required',
+          message: notificationMessage,
+          type: 'info',
+        });
+      });
+
+    // Also notify Vetters (but with lower priority)
+    users
+      .filter((u) => u.roles.includes('Vetter') && !u.roles.includes('Chief Examiner'))
+      .forEach((target) => {
+        if (!target.id) return;
+        void createNotification({
+          user_id: target.id,
+          title: 'Team Lead Submission Received',
+          message: `Team Lead ${actor} submitted "${file.name}" for ${courseCode} - ${courseUnit}. Awaiting Chief Examiner AI analysis before vetting.`,
+          type: 'info',
+        });
+      });
   };
 
   const handleTeamLeadCompile = () => {
@@ -1562,36 +2575,243 @@ function App() {
     );
   };
 
-  const handleStartVetting = (minutes: number) => {
-    if (!currentUserHasRole('Vetter')) {
-      return;
-    }
-    if (
-      workflow.stage !== 'Compiled for Vetting' &&
-      workflow.stage !== 'Vetting Session Expired'
-    ) {
-      return;
-    }
-
-    const duration = Math.max(5, minutes);
-    const startedAt = Date.now();
-    const expiresAt = startedAt + duration * 60 * 1000;
-    setVettingSession({
-      active: true,
-      startedAt,
-      durationMinutes: duration,
-      expiresAt,
-      safeBrowserEnabled: true,
-      cameraOn: true,
-      screenshotBlocked: true,
-      switchingLocked: true,
+  const handleStartVetting = async (minutes: number) => {
+    console.log('handleStartVetting called with minutes:', minutes);
+    console.log('Current state:', {
+      hasVetterRole: currentUserHasRole('Vetter'),
+      hasChiefExaminerRole: currentUserHasRole('Chief Examiner'),
+      workflowStage: workflow.stage,
+      sessionActive: vettingSession.active,
+      currentUser: currentUser?.name,
+      currentUserId: currentUser?.id,
     });
 
+    const isChiefExaminer = currentUserHasRole('Chief Examiner');
+    const isVetter = currentUserHasRole('Vetter');
+
+    // Allow Chief Examiner or Vetter to start/join the session
+    if (!isChiefExaminer && !isVetter) {
+      alert('You must have the Chief Examiner or Vetter role to start a vetting session.');
+      console.error('Start session blocked: User does not have required role');
+      return;
+    }
+
+    // If Chief Examiner is starting the global session
+    if (isChiefExaminer && !isVetter) {
+      if (vettingSession.active) {
+        alert('A vetting session is already active.');
+        console.error('Start session blocked: Session already active');
+        return;
+      }
+
+      const duration = Math.max(5, minutes);
+      const startedAt = Date.now();
+      const expiresAt = startedAt + duration * 60 * 1000;
+      
+      console.log('Chief Examiner starting global vetting session:', {
+        duration,
+        startedAt,
+        expiresAt,
+      });
+      
+      // Start global vetting session - this enables the "Start Session" button for vetters
+      setVettingSession({
+        active: true,
+        startedAt,
+        durationMinutes: duration,
+        expiresAt,
+        safeBrowserEnabled: true, // Will be enforced only for vetters
+        cameraOn: true,
+        screenshotBlocked: true,
+        switchingLocked: true,
+      });
+
+      // Update workflow stage to 'Vetting in Progress'
+      const actor = currentUser?.name ?? 'Unknown';
+      pushWorkflowEvent(
+        `Chief Examiner started vetting session with a ${duration}-minute secure window. Vetters can now join by clicking "Start Session" and enabling their camera.`,
+        actor,
+        { stage: 'Vetting in Progress' }
+      );
+      
+      setWorkflow((prev) => ({
+        ...prev,
+        stage: 'Vetting in Progress',
+      }));
+
+      // Notify all vetters that vetting session has started
+      const vettingMessage = `Chief Examiner ${actor} started a vetting session. You can now join by clicking "Start Session" and enabling your camera.`;
+      users
+        .filter((u) => u.roles.includes('Vetter'))
+        .forEach((vetter) => {
+          if (vetter.id) {
+            void createNotification({
+              user_id: vetter.id,
+              title: 'Vetting Session Started',
+              message: vettingMessage,
+              type: 'info',
+            });
+          }
+        });
+
+      console.log('Global vetting session started by Chief Examiner!');
+      return;
+    }
+
+    // If Vetter is joining the session (global session must already be active)
+    if (isVetter && !vettingSession.active) {
+      alert('The Chief Examiner must start the session first. Please wait for the session to begin.');
+      console.error('Vetter join blocked: Global session not active');
+      return;
+    }
+
+    // Vetter must enable camera BEFORE starting their session
+    if (isVetter && currentUser?.id) {
+      // Check if vetter has already joined
+      if (joinedVetters.has(currentUser.id)) {
+        alert('You have already joined this vetting session.');
+        return;
+      }
+
+      // STRICT: Require camera access before vetter can start
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        // Camera access granted - stop the stream for now, will be reactivated by safe browser effect
+        stream.getTracks().forEach(track => track.stop());
+      } catch (error) {
+        alert('Camera access is REQUIRED to join the vetting session. Please enable camera permissions and try again.');
+        console.error('Vetter join blocked: Camera access denied', error);
+        return;
+      }
+
+      // Mark this vetter as joined
+      setJoinedVetters(prev => new Set(prev).add(currentUser.id!));
+      
+      // Store camera stream for Chief Examiner monitoring
+      try {
+        const cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        vetterCameraStreams.current.set(currentUser.id!, cameraStream);
+        
+        // Initialize monitoring data for this vetter
+        setVetterMonitoring(prev => {
+          const newMap = new Map(prev);
+          newMap.set(currentUser.id!, {
+            vetterId: currentUser.id!,
+            vetterName: currentUser.name ?? 'Unknown',
+            joinedAt: Date.now(),
+            cameraStream,
+            warnings: [],
+            violations: 0,
+          });
+          return newMap;
+        });
+      } catch (error) {
+        console.error('Failed to capture camera stream for monitoring:', error);
+      }
+      
+      const actor = currentUser.name ?? 'Unknown';
+      pushWorkflowEvent(
+        `Vetter ${actor} joined the vetting session. Safe browser restrictions are now active.`,
+        actor
+      );
+
+      console.log('Vetter joined session successfully!', {
+        vetterId: currentUser.id,
+        vetterName: actor,
+      });
+    }
+  };
+
+  // Helper function to log warnings/violations for vetter monitoring
+  // THIS RECORDS EVERY ACTION AND ALERT MESSAGE SHOWN TO THE VETTER - CHIEF EXAMINER SEES ALL IN REAL-TIME
+  const logVetterWarning = (vetterId: string, type: VetterWarning['type'], message: string, severity: 'warning' | 'critical' = 'warning') => {
+    const vetter = users.find((u: User) => u.id === vetterId);
+    if (!vetter) {
+      console.warn('logVetterWarning: Vetter not found', vetterId);
+      return;
+    }
+
+    const warning: VetterWarning = {
+      id: createId(),
+      vetterId,
+      vetterName: vetter.name,
+      type,
+      message,
+      timestamp: Date.now(),
+      severity,
+    };
+
+    // Log to console for debugging - Chief Examiner can see this in console too
+    console.log('🚨 Vetter Warning Logged:', {
+      vetterId,
+      vetterName: vetter.name,
+      type,
+      message,
+      severity,
+      timestamp: new Date(warning.timestamp).toLocaleString(),
+    });
+
+    // Update monitoring state - Chief Examiner sees this immediately
+    setVetterMonitoring(prev => {
+      const newMap = new Map(prev);
+      const existing = newMap.get(vetterId);
+      if (existing) {
+        // Add warning to existing monitoring data - Keep last 100 warnings for complete history
+        newMap.set(vetterId, {
+          ...existing,
+          warnings: [...(existing.warnings || []), warning].slice(-100), // Keep last 100 warnings
+          violations: existing.violations + (severity === 'critical' ? 1 : 0),
+        });
+      } else {
+        // Initialize monitoring data if it doesn't exist (shouldn't happen but safety check)
+        newMap.set(vetterId, {
+          vetterId,
+          vetterName: vetter.name,
+          joinedAt: Date.now(),
+          cameraStream: null,
+          warnings: [warning],
+          violations: severity === 'critical' ? 1 : 0,
+        });
+      }
+      return newMap;
+    });
+
+    // Also notify Chief Examiner via browser notification if they have that permission
+    if (currentUserHasRole('Chief Examiner') && 'Notification' in window && Notification.permission === 'granted') {
+      new Notification(`Vetter Warning: ${vetter.name}`, {
+        body: `${severity.toUpperCase()}: ${message}`,
+        icon: '/favicon.ico',
+        tag: warning.id,
+      });
+    }
+  };
+
+  const handleScheduleModeration = (startDateTime: string) => {
+    if (!currentUserHasRole('Chief Examiner')) {
+      return;
+    }
+    
+    const scheduledStartTime = new Date(startDateTime).getTime();
+    
+    if (scheduledStartTime < Date.now()) {
+      alert('Start time must be in the future');
+      return;
+    }
+    
+    // Set end time to null since it will be determined when session starts manually
+    setModerationSchedule({
+      scheduled: true,
+      startDateTime,
+      endDateTime: undefined,
+      scheduledStartTime,
+      scheduledEndTime: undefined,
+    });
+    
     const actor = currentUser?.name ?? 'Unknown';
+    const startDate = new Date(startDateTime).toLocaleString();
     pushWorkflowEvent(
-      `Vetting session started with a ${duration}-minute secure window.`,
-      actor,
-      { stage: 'Vetting in Progress' }
+      `Moderation scheduled: starts ${startDate}. Session will be started manually.`,
+      actor
     );
   };
 
@@ -1603,6 +2823,71 @@ function App() {
       return;
     }
     const actor = currentUser?.name ?? 'Unknown';
+    const completedAt = Date.now();
+    const startedAt = vettingSession.startedAt || completedAt;
+    const durationMinutes = vettingSession.durationMinutes || 45;
+    
+    // Find the paper being vetted
+    const vettedPaper = submittedPapers.find(p => p.status === 'in-vetting');
+    
+    // Create vetting session record
+    if (vettedPaper) {
+      const sessionRecord: VettingSessionRecord = {
+        id: createId(),
+        paperId: vettedPaper.id,
+        paperName: vettedPaper.fileName,
+        courseCode: vettedPaper.courseCode || 'Unknown',
+        courseUnit: vettedPaper.courseUnit || 'Unknown',
+        startedAt,
+        completedAt,
+        durationMinutes,
+        vetters: Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
+          // CRITICAL: Ensure ALL warnings are captured - deep copy to prevent any loss
+          const allWarnings = monitoring.warnings ? [...monitoring.warnings] : [];
+          const violations = monitoring.violations || 0;
+          
+          console.log(`📋 Recording vetter ${monitoring.vetterName}:`, {
+            vetterId,
+            warningsCount: allWarnings.length,
+            violations,
+            warnings: allWarnings.map(w => ({
+              type: w.type,
+              message: w.message,
+              severity: w.severity,
+              timestamp: new Date(w.timestamp).toLocaleString(),
+            })),
+          });
+          
+          return {
+            vetterId,
+            vetterName: monitoring.vetterName,
+            joinedAt: monitoring.joinedAt,
+            warnings: allWarnings, // ALL warnings recorded
+            violations: violations, // ALL violations recorded
+          };
+        }),
+        annotations: [...annotations],
+        checklistComments: new Map(checklistComments),
+        status: 'completed',
+      };
+      
+      // Store the session record
+      setVettingSessionRecords(prev => [sessionRecord, ...prev]);
+      
+      // Persist to localStorage (convert Map to object for JSON)
+      try {
+        const existing = JSON.parse(localStorage.getItem('ucu-vetting-records') || '[]');
+        const recordToSave = {
+          ...sessionRecord,
+          checklistComments: Object.fromEntries(sessionRecord.checklistComments),
+        };
+        existing.unshift(recordToSave);
+        localStorage.setItem('ucu-vetting-records', JSON.stringify(existing.slice(0, 50))); // Keep last 50
+      } catch (error) {
+        console.error('Error saving vetting record:', error);
+      }
+    }
+    
     setVettingSession((prev) => ({
       ...prev,
       active: false,
@@ -1627,6 +2912,21 @@ function App() {
       actor,
       `Vetting complete with ${annotations.length} inline annotations.`
     );
+
+    // Notify Chief Examiner that vetting is complete
+    const completionMessage = `Vetter ${actor} completed vetting with ${annotations.length} annotation(s). Paper is ready for review.`;
+    users
+      .filter((u) => u.roles.includes('Chief Examiner'))
+      .forEach((chief) => {
+        if (chief.id) {
+          void createNotification({
+            user_id: chief.id,
+            title: 'Vetting Completed',
+            message: completionMessage,
+            type: 'success',
+          });
+        }
+      });
   };
 
   const handleVettingExpired = () => {
@@ -1706,13 +3006,17 @@ function App() {
     if (!currentUserHasRole('Chief Examiner')) {
       return;
     }
-    if (workflow.stage !== 'Awaiting Approval') {
+    // Allow approval from both "Vetted & Returned to Chief Examiner" and "Awaiting Approval" stages
+    if (workflow.stage !== 'Awaiting Approval' && workflow.stage !== 'Vetted & Returned to Chief Examiner') {
       return;
     }
     const actor = currentUser?.name ?? 'Unknown';
     const timestamp = new Date().toISOString();
     
-    // Update submitted papers status to 'approved'
+    // Find vetted papers
+    const vettedPapers = submittedPapers.filter(p => p.status === 'vetted');
+    
+    // Update submitted papers status to 'approved' and add to archive
     setSubmittedPapers(prev => 
       prev.map(paper => 
         paper.status === 'vetted'
@@ -1720,6 +3024,26 @@ function App() {
           : paper
       )
     );
+    
+    // Add approved papers to archive for AI similarity checking
+    vettedPapers.forEach(paper => {
+      const archivedPaper = {
+        ...paper,
+        status: 'approved' as const,
+        archivedAt: new Date().toISOString(),
+        archivedBy: actor,
+      };
+      setArchivedPapers(prev => {
+        const updated = [archivedPaper, ...prev];
+        // Persist to localStorage
+        try {
+          localStorage.setItem('ucu-archived-papers', JSON.stringify(updated.slice(0, 1000))); // Keep last 1000
+        } catch (error) {
+          console.error('Error saving archived papers:', error);
+        }
+        return updated;
+      });
+    });
     
     pushWorkflowEvent('Approved for printing.', actor, {
       stage: 'Approved',
@@ -1740,13 +3064,28 @@ function App() {
         ? `Approved for printing with note: ${notes}`
         : 'Approved for printing.'
     );
+    
+    // Notify Team Lead
+    users
+      .filter((u) => u.roles.includes('Team Lead'))
+      .forEach((teamLead) => {
+        if (teamLead.id) {
+          void createNotification({
+            user_id: teamLead.id,
+            title: 'Paper Approved',
+            message: `Paper has been approved for printing by ${actor}.${notes ? ` Notes: ${notes}` : ''}`,
+            type: 'success',
+          });
+        }
+      });
   };
 
-  const handleReject = (notes: string) => {
+  const handleReject = (notes: string, newDeadline?: { days: number; hours: number; minutes: number }) => {
     if (!currentUserHasRole('Chief Examiner')) {
       return;
     }
-    if (workflow.stage !== 'Awaiting Approval') {
+    // Allow rejection from both "Vetted & Returned to Chief Examiner" and "Awaiting Approval" stages
+    if (workflow.stage !== 'Awaiting Approval' && workflow.stage !== 'Vetted & Returned to Chief Examiner') {
       return;
     }
     const actor = currentUser?.name ?? 'Unknown';
@@ -1773,22 +3112,140 @@ function App() {
         }),
       }
     );
-    appendVersionHistory(
-      actor,
-      notes
-        ? `Rejected and flagged for recycling. Notes: ${notes}`
-        : 'Rejected and flagged for recycling.'
-    );
-    setDestructionLog((prev) => [
-      {
-        id: createId(),
-        versionLabel: latestVersion,
-        timestamp,
-        details:
-          'Draft secured for digital destruction and archival pending new setter assignment.',
-      },
-      ...prev,
-    ]);
+    // If rejection is from "Vetted & Returned" stage, send feedback to Team Lead with new deadline
+    if (workflow.stage === 'Vetted & Returned to Chief Examiner') {
+      // Set new deadline for Team Lead if provided
+      if (newDeadline) {
+        setTeamLeadDeadlineActive(true);
+        setTeamLeadDeadlineStartTime(Date.now());
+        setTeamLeadDeadlineDuration(newDeadline);
+      }
+      
+      // Update papers status back to 'submitted' so Team Lead can revise
+      setSubmittedPapers(prev => 
+        prev.map(paper => 
+          paper.status === 'vetted'
+            ? { ...paper, status: 'submitted' }
+            : paper
+        )
+      );
+      
+      // Update workflow stage back to Team Lead
+      pushWorkflowEvent(
+        `Rejected and returned to Team Lead for revision. Feedback: ${notes || 'See annotations for details.'}`,
+        actor,
+        {
+          stage: 'Submitted to Team Lead',
+          mutate: () => ({
+            portalOpen: false,
+            awaitingRecycle: false,
+            lastDecision: {
+              type: 'Rejected',
+              actor,
+              timestamp,
+              notes,
+            },
+          }),
+        }
+      );
+      
+      appendVersionHistory(
+        actor,
+        notes
+          ? `Rejected and returned to Team Lead. Feedback: ${notes}`
+          : 'Rejected and returned to Team Lead for revision.'
+      );
+      
+      // Get all vetter comments from the session record
+      const vettedPaper = submittedPapers.find(p => p.status === 'vetted');
+      const sessionRecord = vettedPaper 
+        ? vettingSessionRecords.find(r => r.paperId === vettedPaper.id)
+        : null;
+      
+      // Collect all comments from vetters
+      let vetterCommentsText = '\n\n=== REJECTED ===\n\nVetter Comments:\n';
+      if (sessionRecord) {
+        // Add annotations
+        if (sessionRecord.annotations.length > 0) {
+          vetterCommentsText += '\nAnnotations:\n';
+          sessionRecord.annotations.forEach(ann => {
+            vetterCommentsText += `- ${ann.author}: "${ann.comment}"\n`;
+          });
+        }
+        
+        // Add checklist comments
+        if (sessionRecord.checklistComments.size > 0) {
+          vetterCommentsText += '\nChecklist Comments:\n';
+          sessionRecord.checklistComments.forEach((comment, key) => {
+            const [category, item] = key.split('-');
+            vetterCommentsText += `- ${category} - ${item}: ${comment.vetterName} - "${comment.comment}"\n`;
+          });
+        }
+        
+        // Add warnings/violations
+        sessionRecord.vetters.forEach(vetter => {
+          if (vetter.warnings.length > 0) {
+            vetterCommentsText += `\n${vetter.vetterName} - Warnings:\n`;
+            vetter.warnings.forEach(w => {
+              vetterCommentsText += `  - ${w.type}: ${w.message}\n`;
+            });
+          }
+        });
+      }
+      
+      // Notify Team Lead with all comments
+      const deadlineText = newDeadline 
+        ? `\n\nNew deadline: ${newDeadline.days} day(s), ${newDeadline.hours} hour(s), ${newDeadline.minutes} minute(s).`
+        : '';
+      const rejectionMessage = `=== REJECTED ===\n\nPaper rejected by Chief Examiner ${actor}.\n\nFeedback: ${notes || 'See annotations for details.'}${deadlineText}${vetterCommentsText}`;
+      users
+        .filter((u) => u.roles.includes('Team Lead'))
+        .forEach((teamLead) => {
+          if (teamLead.id) {
+            void createNotification({
+              user_id: teamLead.id,
+              title: 'Paper Rejected - Revision Required',
+              message: rejectionMessage,
+              type: 'warning',
+            });
+          }
+        });
+    } else {
+      // Original rejection logic for "Awaiting Approval" stage
+      pushWorkflowEvent(
+        'Rejected — new setter required and recycling process initiated.',
+        actor,
+        {
+          stage: 'Rejected',
+          mutate: () => ({
+            portalOpen: false,
+            awaitingRecycle: true,
+            lastDecision: {
+              type: 'Rejected',
+              actor,
+              timestamp,
+              notes,
+            },
+          }),
+        }
+      );
+      appendVersionHistory(
+        actor,
+        notes
+          ? `Rejected and flagged for recycling. Notes: ${notes}`
+          : 'Rejected and flagged for recycling.'
+      );
+      setDestructionLog((prev) => [
+        {
+          id: createId(),
+          versionLabel: latestVersion,
+          timestamp,
+          details:
+            'Draft secured for digital destruction and archival pending new setter assignment.',
+        },
+        ...prev,
+      ]);
+    }
   };
 
   const handleRestartWorkflow = () => {
@@ -1833,16 +3290,73 @@ function App() {
     if (!trimmed || !currentUser) {
       return;
     }
-    setAnnotations((prev) => [
-      {
-        id: createId(),
-        author: currentUser.name,
-        comment: trimmed,
-        timestamp: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
+    const newAnnotation = {
+      id: createId(),
+      author: currentUser.name,
+      comment: trimmed,
+      timestamp: new Date().toISOString(),
+    };
+    setAnnotations((prev) => [newAnnotation, ...prev]);
+
+    // Notify Chief Examiner and other vetters about new annotation
+    const annotationMessage = `${currentUser.name} added a comment: "${trimmed.substring(0, 100)}${trimmed.length > 100 ? '...' : ''}"`;
+    users
+      .filter((u) => (u.roles.includes('Chief Examiner') || u.roles.includes('Vetter')) && u.id !== currentUser.id)
+      .forEach((user) => {
+        if (user.id) {
+          void createNotification({
+            user_id: user.id,
+            title: 'New Annotation Added',
+            message: annotationMessage,
+            type: 'info',
+          });
+        }
+      });
   };
+
+  // Calculate moderation countdowns
+  const moderationStartCountdown = useMemo(() => {
+    if (!moderationSchedule.scheduled || !moderationSchedule.scheduledStartTime) {
+      return null;
+    }
+    const now = currentTime;
+    const startTime = moderationSchedule.scheduledStartTime;
+    
+    if (now >= startTime) {
+      return null; // Moderation has started
+    }
+    
+    const remaining = startTime - now;
+    const hours = Math.floor(remaining / (60 * 60 * 1000));
+    const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+    const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
+    
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  }, [moderationSchedule, currentTime]);
+
+  const moderationEndCountdown = useMemo(() => {
+    if (!moderationSchedule.scheduled || !moderationSchedule.scheduledEndTime || !moderationSchedule.scheduledStartTime) {
+      return null;
+    }
+    const now = currentTime;
+    const startTime = moderationSchedule.scheduledStartTime;
+    const endTime = moderationSchedule.scheduledEndTime;
+    
+    if (now < startTime) {
+      return null; // Moderation hasn't started yet
+    }
+    
+    if (now >= endTime) {
+      return '00:00:00'; // Moderation has ended
+    }
+    
+    const remaining = endTime - now;
+    const hours = Math.floor(remaining / (60 * 60 * 1000));
+    const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+    const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
+    
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  }, [moderationSchedule, currentTime]);
 
   const vettingCountdown = useMemo(() => {
     if (!vettingSession.active || !vettingSession.expiresAt) {
@@ -2563,7 +4077,18 @@ function App() {
           }}
           onAddPaperToRepository={handleAddPaperToRepository}
           repositoryPapers={repositoryPapers}
+          submittedPapers={submittedPapers}
+          setSubmittedPapers={setSubmittedPapers}
         />
+      ),
+    });
+
+    roleSpecificPanels.push({
+      id: 'repository-papers',
+      label: 'Repository Papers',
+      visible: true,
+      render: () => (
+        <RepositoryPapersPanel repositoryPapers={repositoryPapers} />
       ),
     });
   }
@@ -2675,6 +4200,59 @@ function App() {
           onStartVetting={handleStartVetting}
           onCompleteVetting={handleCompleteVetting}
           onAddAnnotation={handleAddAnnotation}
+          submittedPapers={submittedPapers.filter(p => p.status === 'in-vetting')}
+          moderationSchedule={moderationSchedule}
+          onScheduleModeration={handleScheduleModeration}
+          moderationStartCountdown={moderationStartCountdown}
+          moderationEndCountdown={moderationEndCountdown}
+          currentUserId={currentUser?.id}
+          joinedVetters={joinedVetters}
+          vetterMonitoring={vetterMonitoring}
+          logVetterWarning={logVetterWarning}
+          checklistComments={checklistComments}
+          onChecklistCommentChange={(key, comment) => {
+            const newComments = new Map(checklistComments);
+            if (comment) {
+              newComments.set(key, {
+                comment,
+                vetterName: currentUser?.name || 'Unknown',
+                timestamp: Date.now(),
+                color: '#3B82F6', // Blue color for vetter comments
+              });
+            } else {
+              newComments.delete(key);
+            }
+            setChecklistComments(newComments);
+          }}
+          onEndSession={() => {
+            // End the global session
+            setVettingSession({
+              active: false,
+              safeBrowserEnabled: false,
+              cameraOn: false,
+              screenshotBlocked: false,
+              switchingLocked: false,
+              lastClosedReason: 'cancelled',
+            });
+            // Clear all joined vetters
+            setJoinedVetters(new Set());
+            // Clean up all camera streams
+            vetterCameraStreams.current.forEach(stream => {
+              stream.getTracks().forEach(track => track.stop());
+            });
+            vetterCameraStreams.current.clear();
+            // Clear monitoring data
+            setVetterMonitoring(new Map());
+            
+            const actor = currentUser?.name ?? 'Unknown';
+            pushWorkflowEvent(
+              'Chief Examiner ended the vetting session. All vetter sessions have been terminated.',
+              actor
+            );
+          }}
+          onApprove={handleApprove}
+          onReject={handleReject}
+          vettingSessionRecords={vettingSessionRecords}
         />
       ),
     });
@@ -2780,8 +4358,13 @@ function App() {
       ? 'Manage staff accounts, system settings, and administrative functions.'
       : 'Navigate workflow checkpoints and manage elevated privileges from one command hub.';
 
+  // Check if current vetter has joined - hide sidebar and go fullscreen for vetters
+  const isVetterActive = currentUserHasRole('Vetter') && currentUser?.id && joinedVetters.has(currentUser.id);
+  
   return (
-    <div className="min-h-screen bg-white text-slate-900 flex">
+    <div className={`min-h-screen bg-white text-slate-900 flex ${isVetterActive ? 'fullscreen-vetter-mode' : ''}`}>
+      {/* Hide sidebar when vetter has joined - fullscreen vetting mode */}
+      {!isVetterActive && (
       <aside className="hidden w-72 flex-col border-r border-blue-300 bg-gradient-to-b from-blue-600 to-blue-700 lg:flex shadow-lg fixed left-0 top-0 h-screen">
         <div className="px-6 py-8">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-100">
@@ -2814,7 +4397,8 @@ function App() {
               p.id === 'vetting-suite' || 
               p.id === 'destruction-log' ||
               p.id === 'chief-examiner-dashboard' ||
-              p.id === 'chief-examiner-track-paper'
+              p.id === 'chief-examiner-track-paper' ||
+              p.id === 'repository-papers'
             );
             const teamLeadPanels = panelConfigs.filter(p => p.id === 'team-lead-panel' || p.id === 'team-lead-dashboard');
             const setterPanels = panelConfigs.filter(p => p.id === 'setter-panel');
@@ -3202,8 +4786,9 @@ function App() {
           })()}
         </nav>
       </aside>
+      )}
 
-      <div className="flex-1 flex flex-col lg:ml-72">
+      <div className={`flex-1 flex flex-col ${isVetterActive ? 'w-full' : 'lg:ml-72'}`}>
         <header className="relative border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
@@ -3292,11 +4877,40 @@ function App() {
               <div className="relative">
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={async () => {
+                    const wasOpen = showNotificationPanel;
                     setShowNotificationPanel((open) => !open);
-                    setNotifications((prev) =>
-                      prev.map((n) => ({ ...n, read: true }))
-                    );
+                    
+                    // If opening panel, refresh notifications and mark all as read in database
+                    if (!wasOpen && currentUser) {
+                      // Refresh notifications from database
+                      try {
+                        const dbNotifications = await getUserNotifications(currentUser.id);
+                        const mapped: AppNotification[] = dbNotifications.map((n) => ({
+                          id: n.id,
+                          message: `${n.title}: ${n.message}`,
+                          timestamp: n.created_at,
+                          read: n.is_read,
+                        }));
+                        setNotifications(mapped);
+                        
+                        // Mark all as read in database if there are unread ones
+                        const unreadCount = mapped.filter(n => !n.read).length;
+                        if (unreadCount > 0) {
+                          await markAllNotificationsAsRead(currentUser.id);
+                          setNotifications((prev) =>
+                            prev.map((n) => ({ ...n, read: true }))
+                          );
+                        }
+                      } catch (error) {
+                        console.error('Error refreshing notifications:', error);
+                      }
+                    } else if (!wasOpen) {
+                      // Just mark local notifications as read if no user
+                      setNotifications((prev) =>
+                        prev.map((n) => ({ ...n, read: true }))
+                      );
+                    }
                   }}
                   className="relative flex h-10 w-10 items-center justify-center rounded-full border border-blue-200 bg-blue-50 text-blue-700 shadow-sm hover:bg-blue-100 hover:border-blue-300 transition"
                   aria-label="Notifications"
@@ -3371,13 +4985,31 @@ function App() {
                   notifications.map((note) => (
                     <div
                       key={note.id}
-                      className={`group relative overflow-hidden rounded-xl border px-3 py-2 text-xs text-slate-800 shadow-sm transition-all duration-300 ${
+                      onClick={async () => {
+                        // Mark notification as read when clicked
+                        if (!note.read && currentUser) {
+                          try {
+                            await markNotificationAsRead(note.id);
+                            setNotifications((prev) =>
+                              prev.map((n) => 
+                                n.id === note.id ? { ...n, read: true } : n
+                              )
+                            );
+                          } catch (error) {
+                            console.error('Error marking notification as read:', error);
+                          }
+                        }
+                      }}
+                      className={`group relative overflow-hidden rounded-xl border px-3 py-2 text-xs text-slate-800 shadow-sm transition-all duration-300 cursor-pointer ${
                         note.read
                           ? 'border-slate-100 bg-slate-50/80'
                           : 'border-blue-200 bg-gradient-to-r from-blue-50 via-indigo-50 to-cyan-50 shadow-[0_0_0_1px_rgba(129,140,248,0.35)]'
                       } hover:translate-y-[-1px] hover:shadow-md hover:shadow-blue-200/80`}
                     >
                       <div className="pointer-events-none absolute inset-y-0 right-0 w-16 bg-gradient-to-l from-indigo-200/70 via-transparent to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
+                      {!note.read && (
+                        <div className="absolute top-2 right-2 h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
+                      )}
                       <p className="relative pr-4">{note.message}</p>
                       <p className="relative mt-1 text-[0.7rem] text-slate-400">
                         {new Date(note.timestamp).toLocaleString()}
@@ -3439,9 +5071,64 @@ function App() {
           </div>
         )}
 
+        {/* Hide header when vetter is in fullscreen mode */}
+        {!isVetterActive && (
+        <header className="relative border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-600">
+                {isAdmin
+                  ? 'Admin Dashboard'
+                  : isChiefExaminer
+                  ? 'Chief Examiner Console'
+                  : isTeamLead
+                  ? 'Team Lead Console'
+                  : isVetter
+                  ? 'Vetting Console'
+                  : isSetter
+                  ? 'Setter Console'
+                  : isPureLecturer
+                  ? 'Lecturer Dashboard'
+                  : 'Current Stage'}
+              </p>
+              <h2 className="mt-2 text-2xl font-semibold text-blue-900 sm:text-3xl">
+                {isAdmin
+                  ? 'System Administration'
+                  : isChiefExaminer
+                  ? 'Your currently assigned Chief Examiner role'
+                  : isTeamLead
+                  ? 'Your currently assigned Team Lead role'
+                  : isVetter
+                  ? 'Your currently assigned Vetting role'
+                  : isSetter
+                  ? 'Your currently assigned Setter role'
+                  : isPureLecturer
+                  ? 'Teaching & Student Engagement'
+                  : workflow.stage.replace(/-/g, ' ')}
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">
+                {isAdmin
+                  ? 'Manage staff accounts and system configuration'
+                  : isChiefExaminer
+                  ? 'You now have privileges to assign and manage the exam process.'
+                  : isTeamLead
+                  ? 'You now have privileges to coordinate setters, vetters and manage team submissions.'
+                  : isVetter
+                  ? 'You now have privileges to review and vet exam papers.'
+                  : isSetter
+                  ? 'You now have privileges to create and submit exam drafts.'
+                  : isPureLecturer
+                  ? 'Access your teaching tools, student records, and class schedules.'
+                  : `Current workflow stage: ${workflow.stage.replace(/-/g, ' ')}`}
+              </p>
+            </div>
+          </div>
+        </header>
+        )}
+
         <main
           ref={mainContentRef}
-          className="flex-1 overflow-y-auto px-4 py-8 sm:px-6 lg:px-10"
+          className={`flex-1 overflow-y-auto ${isVetterActive ? 'w-full px-0 py-0' : 'px-4 py-8 sm:px-6 lg:px-10'}`}
         >
           {activePanel ? (
             <div className="space-y-6">{activePanel.render()}</div>
@@ -5931,6 +7618,8 @@ interface ChiefExaminerConsoleProps {
     content: string;
     fileSize?: number;
   }>;
+  submittedPapers: SubmittedPaper[];
+  setSubmittedPapers: React.Dispatch<React.SetStateAction<SubmittedPaper[]>>;
   sectionId?: string;
 }
 
@@ -6000,6 +7689,8 @@ function ChiefExaminerConsole({
   onSetTeamLeadDeadline,
   onAddPaperToRepository,
   repositoryPapers,
+  submittedPapers,
+  setSubmittedPapers,
   sectionId,
 }: ChiefExaminerConsoleProps) {
   const [awardUserId, setAwardUserId] = useState('');
@@ -6827,61 +8518,6 @@ function ChiefExaminerConsole({
               <AddPaperToRepositoryForm onAddPaper={onAddPaperToRepository} />
             </div>
 
-            {/* Repository Papers List */}
-            {repositoryPapers.length > 0 && (
-              <div className="rounded-xl border border-slate-200 bg-white p-6">
-                <div className="mb-4">
-                  <h3 className="text-base font-semibold text-slate-800">
-                    Repository Papers
-                  </h3>
-                  <p className="text-sm text-slate-600 mt-1">
-                    View and manage papers in the repository
-                  </p>
-                </div>
-
-                <div className="space-y-3 max-h-96 overflow-y-auto">
-                  {repositoryPapers.map((paper) => (
-                    <div
-                      key={paper.id}
-                      className="rounded-lg border border-slate-200 bg-white p-4"
-                    >
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-2">
-                            <h4 className="text-sm font-semibold text-slate-800">{paper.fileName}</h4>
-                            <span className="px-2 py-0.5 rounded-lg text-xs font-medium border bg-cyan-500/20 text-cyan-300 border-cyan-500/30">
-                              {paper.courseCode}
-                            </span>
-                          </div>
-                          <div className="space-y-1 text-xs text-slate-600">
-                            <p>Course: <span className="text-slate-700">{paper.courseUnit}</span></p>
-                            <p>Submitted by: <span className="text-slate-700">{paper.submittedBy}</span></p>
-                            <p>Semester: <span className="text-slate-700">{paper.semester} {paper.year}</span></p>
-                            <p>Added: {new Date(paper.submittedAt).toLocaleString()}</p>
-                          </div>
-                        </div>
-                        <div className="flex flex-col gap-2 ml-4">
-                          <button
-                            type="button"
-                            className="px-3 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-xs font-medium text-cyan-300 border border-cyan-500/30 transition"
-                            onClick={() => {
-                              // Create a view window/modal for the paper
-                              const blob = new Blob([paper.content], { type: 'application/pdf' });
-                              const url = URL.createObjectURL(blob);
-                              window.open(url, '_blank');
-                              // Clean up after a delay
-                              setTimeout(() => URL.revokeObjectURL(url), 100);
-                            }}
-                          >
-                            View
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         </div>
       </SectionCard>
@@ -6927,7 +8563,11 @@ function ChiefExaminerConsole({
       </SectionCard>
 
       {/* AI Similarity Detection */}
-      <AISimilarityDetectionPanel repositoryPapers={repositoryPapers} />
+      <AISimilarityDetectionPanel 
+        repositoryPapers={repositoryPapers} 
+        submittedPapers={submittedPapers}
+        setSubmittedPapers={setSubmittedPapers}
+      />
     </div>
   );
 }
@@ -7406,14 +9046,7 @@ interface TeamLeadPanelProps {
   deadlineDuration: { days: number; hours: number; minutes: number };
   repositoriesActive: boolean;
   onTeamLeadCompile: () => void;
-  submittedPapers: Array<{
-    id: string;
-    fileName: string;
-    submittedBy: string;
-    submittedAt: string;
-    fileSize?: number;
-    status: 'submitted' | 'in-vetting' | 'vetted' | 'approved';
-  }>;
+  submittedPapers: SubmittedPaper[];
   setterSubmissions: Array<{
     id: string;
     fileName: string;
@@ -7451,6 +9084,18 @@ function TeamLeadPanel({
       return () => clearInterval(timer);
     }
   }, [deadlinesActive, deadlineStartTime]);
+
+  // Auto-populate metadata from the most recent submitted paper
+  // so the Team Lead does not have to type course details again.
+  useEffect(() => {
+    if (!submittedPapers.length) return;
+    const latest = submittedPapers[0];
+
+    setCourseUnit((prev) => prev || latest.courseUnit || '');
+    setCourseCode((prev) => prev || latest.courseCode || '');
+    setSemester((prev) => prev || latest.semester || '');
+    setYear((prev) => prev || latest.year || '');
+  }, [submittedPapers]);
 
   const calculateTimeRemaining = () => {
     if (!deadlinesActive || !deadlineStartTime) {
@@ -7543,6 +9188,25 @@ function TeamLeadPanel({
         return 'Approved';
       default:
         return status;
+    }
+  };
+
+  // Map a stored paper status (from Supabase) to a more precise workflow stage
+  // so that the submission history reflects the real position of each paper,
+  // even after a page refresh (when the in-memory workflow state resets).
+  const getWorkflowStageForPaper = (status: SubmittedPaper['status']): string => {
+    switch (status) {
+      case 'submitted':
+        // Setter has lodged the draft and it has been forwarded to the Team Lead / CE.
+        return 'Submitted to Team Lead';
+      case 'in-vetting':
+        return 'Vetting in Progress';
+      case 'vetted':
+        return 'Vetted & Returned to Chief Examiner';
+      case 'approved':
+        return 'Approved';
+      default:
+        return 'Unknown';
     }
   };
 
@@ -7850,39 +9514,114 @@ function TeamLeadPanel({
         </SectionCard>
       )}
 
-      {/* Submitted Papers Section */}
-      {submittedPapers.length > 0 && (
+      {/* Setter Submissions Section */}
+      {submittedPapers.filter((p) => p.submittedRole === 'Setter' || !p.submittedRole || p.submittedRole === 'Unknown').length > 0 && (
         <SectionCard
-          title="My Submitted Papers"
+          title="Submissions from Setters"
           kicker="Submission History"
-          description="View all papers you have submitted and track their status through the vetting process."
+          description="View all drafts lodged by setters and follow their journey through the vetting workflow."
         >
           <div className="space-y-3">
-            {submittedPapers.map((paper) => (
+            {submittedPapers.filter((p) => p.submittedRole === 'Setter' || !p.submittedRole || p.submittedRole === 'Unknown').map((paper: SubmittedPaper) => (
               <div
                 key={paper.id}
-                className={`rounded-xl border p-4 transition ${getStatusColor(paper.status)}`}
+                className={`relative overflow-hidden rounded-2xl border-2 p-5 transition shadow-md bg-gradient-to-r from-sky-100 via-indigo-100 to-slate-100 ring-2 ring-slate-200 ${getStatusColor(paper.status)}`}
               >
+                <div className="pointer-events-none absolute inset-0 opacity-45 mix-blend-normal bg-[radial-gradient(circle_at_top,_#38bdf8_0,_transparent_50%),radial-gradient(circle_at_bottom,_#a855f7_0,_transparent_60%)]" />
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-2">
-                      <h4 className="text-sm font-semibold text-slate-800">{paper.fileName}</h4>
-                      <span className={`px-2 py-0.5 rounded-lg text-xs font-medium border ${getStatusColor(paper.status)}`}>
+                      <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-1">
+                        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-sky-100 text-sky-600 ring-1 ring-sky-300">
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-3.5 w-3.5"
+                            fill="currentColor"
+                          >
+                            <path d="M12 2a7 7 0 0 0-7 7v3.586l-.707.707A1 1 0 0 0 5 15h14a1 1 0 0 0 .707-1.707L19 12.586V9a7 7 0 0 0-7-7Zm0 20a3 3 0 0 0 2.995-2.824L15 19h-6a3 3 0 0 0 2.824 2.995L12 22Z" />
+                          </svg>
+                        </span>
+                        {paper.fileName}
+                      </h4>
+                      <span className={`px-2 py-0.5 rounded-lg text-xs font-medium border bg-white/80 text-slate-800 ${getStatusColor(paper.status)}`}>
                         {getStatusLabel(paper.status)}
                       </span>
                     </div>
-                    <div className="space-y-1 text-xs text-slate-600">
-                      <p>Submitted: {new Date(paper.submittedAt).toLocaleString()}</p>
+                    <div className="space-y-1 text-xs text-slate-700">
+                      <p>
+                        <span className="inline-flex items-center gap-1 text-sky-700">
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-3.5 w-3.5 text-sky-500"
+                            fill="currentColor"
+                          >
+                            <path d="M6.75 3A.75.75 0 0 0 6 3.75v.75H5.25a2.25 2.25 0 0 0-2.235 2.026L3 6.75v11.25A2.25 2.25 0 0 0 5.25 20.25h13.5A2.25 2.25 0 0 0 21 18V6.75a2.25 2.25 0 0 0-2.026-2.235L18.75 4.5H18v-.75a.75.75 0 0 0-.75-.75h-10.5ZM12 8.25a.75.75 0 0 1 .743.648l.007.102v4.19l2.22 2.22a.75.75 0 0 1-.976 1.133l-.084-.073-2.5-2.5A.75.75 0 0 1 11.25 13.5v-4.5a.75.75 0 0 1 .75-.75Z" />
+                          </svg>
+                          Submitted:
+                        </span>{' '}
+                        {new Date(paper.submittedAt).toLocaleString()}
+                      </p>
+                      <p>
+                        <span className="inline-flex items-center gap-1 text-emerald-700">
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-3.5 w-3.5 text-emerald-500"
+                            fill="currentColor"
+                          >
+                            <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-4 0-7 2-7 4v1.25A1.75 1.75 0 0 0 6.75 21h10.5A1.75 1.75 0 0 0 19 19.25V18c0-2-3-4-7-4Z" />
+                          </svg>
+                          Submitted By:
+                        </span>{' '}
+                        <span className="text-slate-900">
+                          {paper.submittedBy}
+                          {paper.submittedRole && paper.submittedRole !== 'Unknown' && (
+                            <span className="ml-1 text-[0.7rem] rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-700">
+                              {paper.submittedRole}
+                            </span>
+                          )}
+                        </span>
+                      </p>
                       {paper.fileSize && (
-                        <p>Size: {(paper.fileSize / 1024).toFixed(2)} KB</p>
+                        <p>
+                          <span className="inline-flex items-center gap-1 text-emerald-700">
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 24 24"
+                              className="h-3.5 w-3.5 text-emerald-500"
+                              fill="currentColor"
+                            >
+                              <path d="M6.75 2.25A2.25 2.25 0 0 0 4.5 4.5v15a2.25 2.25 0 0 0 2.25 2.25h10.5A2.25 2.25 0 0 0 19.5 19.5v-15A2.25 2.25 0 0 0 17.25 2.25H6.75ZM12 18a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z" />
+                            </svg>
+                            Size:
+                          </span>{' '}
+                          {(paper.fileSize / 1024).toFixed(2)} KB
+                        </p>
                       )}
-                      <p>Current Workflow Stage: <span className="text-slate-700">{workflowStage}</span></p>
+                      <p>
+                        <span className="inline-flex items-center gap-1 text-violet-700">
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-3.5 w-3.5 text-violet-500"
+                            fill="currentColor"
+                          >
+                            <path d="M12 2a10 10 0 0 0-7.071 17.071A10 10 0 1 0 12 2Zm0 3a7 7 0 1 1-4.95 11.95A7 7 0 0 1 12 5Zm-.75 2.75a.75.75 0 0 0-.743.648L10.5 8.5v4.25c0 .28.156.538.402.667l3 1.5a.75.75 0 0 0 .67-1.342L12 11.987V8.5a.75.75 0 0 0-.75-.75Z" />
+                          </svg>
+                          Current Workflow Stage:
+                        </span>{' '}
+                        <span className="text-slate-900">
+                          {getWorkflowStageForPaper(paper.status)}
+                        </span>
+                      </p>
                     </div>
                   </div>
                   <div className="flex flex-col gap-2 ml-4">
                     <button
                       type="button"
-                      className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-xs font-medium text-slate-700 transition"
+                      className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-sky-100 border border-sky-300 hover:bg-sky-200 text-xs font-medium text-sky-800 transition"
                       onClick={async () => {
                         if (!paper.fileUrl) {
                           alert('No file is available to view for this paper yet.');
@@ -7898,11 +9637,19 @@ function TeamLeadPanel({
                         window.open(data.publicUrl, '_blank');
                       }}
                     >
-                      View
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-3.5 w-3.5"
+                        fill="currentColor"
+                      >
+                        <path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7Zm0 4a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z" />
+                      </svg>
+                      <span>View</span>
                     </button>
                     <button
                       type="button"
-                      className="px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/40 hover:bg-emerald-500/20 text-xs font-medium text-emerald-700 transition"
+                      className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-100 border border-emerald-300 hover:bg-emerald-200 text-xs font-medium text-emerald-800 transition"
                       onClick={async () => {
                         if (!paper.fileUrl) {
                           alert('No file is available to download for this paper yet.');
@@ -7923,15 +9670,236 @@ function TeamLeadPanel({
                         document.body.removeChild(link);
                       }}
                     >
-                      Download
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-3.5 w-3.5"
+                        fill="currentColor"
+                      >
+                        <path d="M12 3a1 1 0 0 1 1 1v9.586l2.293-2.293a1 1 0 0 1 1.497 1.32l-.083.094-4 4a1 1 0 0 1-1.32.083l-.094-.083-4-4a1 1 0 0 1 1.32-1.497l.094.083L11 13.586V4a1 1 0 0 1 1-1Zm-7 14a1 1 0 0 1 .117 1.993L5 19H4a1 1 0 0 0-.993.883L3 20a1 1 0 0 0 .883.993L4 21h16a1 1 0 0 0 .993-.883L21 20a1 1 0 0 0-.883-.993L20 19h-1a1 1 0 0 1-.117-1.993L19 17h1a3 3 0 0 1 2.995 2.824L23 20a3 3 0 0 1-2.824 2.995L20 23H4a3 3 0 0 1-2.995-2.824L1 20a3 3 0 0 1 2.824-2.995L4 17h1Z" />
+                      </svg>
+                      <span>Download</span>
                     </button>
                     {paper.status === 'vetted' && (
                       <button
                         type="button"
-                        className="px-3 py-1.5 rounded-lg bg-blue-500/20 hover:bg-blue-500/30 text-xs font-medium text-blue-700 transition"
+                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-100 hover:bg-indigo-200 text-xs font-medium text-indigo-800 transition"
                         onClick={handleDownloadModerationChecklist}
                       >
-                        Download Report
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          className="h-3.5 w-3.5"
+                          fill="currentColor"
+                        >
+                          <path d="M7 2a2 2 0 0 0-2 2v16l7-3 7 3V4a2 2 0 0 0-2-2H7Zm2.5 5h5a1 1 0 0 1 .117 1.993L14.5 9h-5a1 1 0 0 1-.117-1.993L9.5 7h5-5Zm0 4h3a1 1 0 0 1 .117 1.993L12.5 13h-3a1 1 0 0 1-.117-1.993L9.5 11h3-3Z" />
+                        </svg>
+                        <span>Download Report</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+      )}
+
+      {/* Team Lead Submissions Section */}
+      {submittedPapers.filter((p) => p.submittedRole === 'Team Lead').length > 0 && (
+        <SectionCard
+          title="Submissions from Team Lead"
+          kicker="Compiled Papers for Chief Examiner"
+          description="View all papers compiled and submitted by Team Lead. These papers are ready for Chief Examiner AI similarity analysis before vetting."
+        >
+          <div className="space-y-3">
+            {submittedPapers.filter((p) => p.submittedRole === 'Team Lead').map((paper: SubmittedPaper) => (
+              <div
+                key={paper.id}
+                className={`relative overflow-hidden rounded-2xl border-2 p-5 transition shadow-md bg-gradient-to-r from-indigo-100 via-purple-100 to-pink-100 ring-2 ring-indigo-200 ${getStatusColor(paper.status)}`}
+              >
+                <div className="pointer-events-none absolute inset-0 opacity-45 mix-blend-normal bg-[radial-gradient(circle_at_top,_#6366f1_0,_transparent_50%),radial-gradient(circle_at_bottom,_#a855f7_0,_transparent_60%)]" />
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-2">
+                      <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-1">
+                        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-indigo-100 text-indigo-600 ring-1 ring-indigo-300">
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-3.5 w-3.5"
+                            fill="currentColor"
+                          >
+                            <path d="M12 2a7 7 0 0 0-7 7v3.586l-.707.707A1 1 0 0 0 5 15h14a1 1 0 0 0 .707-1.707L19 12.586V9a7 7 0 0 0-7-7Zm0 20a3 3 0 0 0 2.995-2.824L15 19h-6a3 3 0 0 0 2.824 2.995L12 22Z" />
+                          </svg>
+                        </span>
+                        {paper.fileName}
+                      </h4>
+                      <span className={`px-2 py-0.5 rounded-lg text-xs font-medium border bg-white/80 text-slate-800 ${getStatusColor(paper.status)}`}>
+                        {getStatusLabel(paper.status)}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-lg text-xs font-semibold border bg-indigo-100 text-indigo-700 border-indigo-300">
+                        Team Lead Submission
+                      </span>
+                    </div>
+                    <div className="space-y-1 text-xs text-slate-700">
+                      <p>
+                        <span className="inline-flex items-center gap-1 text-indigo-700">
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-3.5 w-3.5 text-indigo-500"
+                            fill="currentColor"
+                          >
+                            <path d="M6.75 3A.75.75 0 0 0 6 3.75v.75H5.25a2.25 2.25 0 0 0-2.235 2.026L3 6.75v11.25A2.25 2.25 0 0 0 5.25 20.25h13.5A2.25 2.25 0 0 0 21 18V6.75a2.25 2.25 0 0 0-2.026-2.235L18.75 4.5H18v-.75a.75.75 0 0 0-.75-.75h-10.5ZM12 8.25a.75.75 0 0 1 .743.648l.007.102v4.19l2.22 2.22a.75.75 0 0 1-.976 1.133l-.084-.073-2.5-2.5A.75.75 0 0 1 11.25 13.5v-4.5a.75.75 0 0 1 .75-.75Z" />
+                          </svg>
+                          Submitted:
+                        </span>{' '}
+                        {new Date(paper.submittedAt).toLocaleString()}
+                      </p>
+                      <p>
+                        <span className="inline-flex items-center gap-1 text-emerald-700">
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-3.5 w-3.5 text-emerald-500"
+                            fill="currentColor"
+                          >
+                            <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-4 0-7 2-7 4v1.25A1.75 1.75 0 0 0 6.75 21h10.5A1.75 1.75 0 0 0 19 19.25V18c0-2-3-4-7-4Z" />
+                          </svg>
+                          Submitted By:
+                        </span>{' '}
+                        <span className="text-slate-900">
+                          {paper.submittedBy}
+                          <span className="ml-1 text-[0.7rem] rounded-full bg-indigo-100 px-2 py-0.5 font-semibold text-indigo-700">
+                            Team Lead
+                          </span>
+                        </span>
+                      </p>
+                      {paper.fileSize && (
+                        <p>
+                          <span className="inline-flex items-center gap-1 text-emerald-700">
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 24 24"
+                              className="h-3.5 w-3.5 text-emerald-500"
+                              fill="currentColor"
+                            >
+                              <path d="M6.75 2.25A2.25 2.25 0 0 0 4.5 4.5v15a2.25 2.25 0 0 0 2.25 2.25h10.5A2.25 2.25 0 0 0 19.5 19.5v-15A2.25 2.25 0 0 0 17.25 2.25H6.75ZM12 18a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z" />
+                            </svg>
+                            Size:
+                          </span>{' '}
+                          {(paper.fileSize / 1024).toFixed(2)} KB
+                        </p>
+                      )}
+                      <p>
+                        <span className="inline-flex items-center gap-1 text-violet-700">
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-3.5 w-3.5 text-violet-500"
+                            fill="currentColor"
+                          >
+                            <path d="M12 2a10 10 0 0 0-7.071 17.071A10 10 0 1 0 12 2Zm0 3a7 7 0 1 1-4.95 11.95A7 7 0 0 1 12 5Zm-.75 2.75a.75.75 0 0 0-.743.648L10.5 8.5v4.25c0 .28.156.538.402.667l3 1.5a.75.75 0 0 0 .67-1.342L12 11.987V8.5a.75.75 0 0 0-.75-.75Z" />
+                          </svg>
+                          Current Workflow Stage:
+                        </span>{' '}
+                        <span className="text-slate-900">
+                          {getWorkflowStageForPaper(paper.status)}
+                        </span>
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-2 ml-4">
+                    <button
+                      type="button"
+                      className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-100 border border-indigo-300 hover:bg-indigo-200 text-xs font-medium text-indigo-800 transition"
+                      onClick={async () => {
+                        if (!paper.fileUrl) {
+                          alert('No file is available to view for this paper yet.');
+                          return;
+                        }
+                        const { data } = supabase.storage
+                          .from('exam_papers')
+                          .getPublicUrl(paper.fileUrl);
+                        if (!data?.publicUrl) {
+                          alert('Unable to generate a view link for this paper.');
+                          return;
+                        }
+                        window.open(data.publicUrl, '_blank');
+                      }}
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-3.5 w-3.5"
+                        fill="currentColor"
+                      >
+                        <path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7Zm0 4a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z" />
+                      </svg>
+                      <span>View</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-100 border border-emerald-300 hover:bg-emerald-200 text-xs font-medium text-emerald-800 transition"
+                      onClick={async () => {
+                        if (!paper.fileUrl) {
+                          alert('No file is available to download for this paper yet.');
+                          return;
+                        }
+                        const { data } = supabase.storage
+                          .from('exam_papers')
+                          .getPublicUrl(paper.fileUrl);
+                        if (!data?.publicUrl) {
+                          alert('Unable to generate a download link for this paper.');
+                          return;
+                        }
+                        const link = document.createElement('a');
+                        link.href = data.publicUrl;
+                        link.download = paper.fileName || 'exam-paper.pdf';
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                      }}
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-3.5 w-3.5"
+                        fill="currentColor"
+                      >
+                        <path d="M12 3a1 1 0 0 1 1 1v9.586l2.293-2.293a1 1 0 0 1 1.497 1.32l-.083.094-4 4a1 1 0 0 1-1.32.083l-.094-.083-4-4a1 1 0 0 1 1.32-1.497l.094.083L11 13.586V4a1 1 0 0 1 1-1Zm-7 14a1 1 0 0 1 .117 1.993L5 19H4a1 1 0 0 0-.993.883L3 20a1 1 0 0 0 .883.993L4 21h16a1 1 0 0 0 .993-.883L21 20a1 1 0 0 0-.883-.993L20 19h-1a1 1 0 0 1-.117-1.993L19 17h1a3 3 0 0 1 2.995 2.824L23 20a3 3 0 0 1-2.824 2.995L20 23H4a3 3 0 0 1-2.995-2.824L1 20a3 3 0 0 1 2.824-2.995L4 17h1Z" />
+                      </svg>
+                      <span>Download</span>
+                    </button>
+                    {paper.status === 'vetted' && (
+                      <button
+                        type="button"
+                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-100 hover:bg-indigo-200 text-xs font-medium text-indigo-800 transition"
+                        onClick={async () => {
+                          if (!paper.fileUrl) {
+                            alert('No file is available for report generation.');
+                            return;
+                          }
+                          const { data } = supabase.storage
+                            .from('exam_papers')
+                            .getPublicUrl(paper.fileUrl);
+                          if (!data?.publicUrl) {
+                            alert('Unable to generate report link.');
+                            return;
+                          }
+                          window.open(data.publicUrl, '_blank');
+                        }}
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          className="h-3.5 w-3.5"
+                          fill="currentColor"
+                        >
+                          <path d="M7 2a2 2 0 0 0-2 2v16l7-3 7 3V4a2 2 0 0 0-2-2H7Zm2.5 5h5a1 1 0 0 1 .117 1.993L14.5 9h-5a1 1 0 0 1-.117-1.993L9.5 7h5-5Zm0 4h3a1 1 0 0 1 .117 1.993L12.5 13h-3a1 1 0 0 1-.117-1.993L9.5 11h3-3Z" />
+                        </svg>
+                        <span>Download Report</span>
                       </button>
                     )}
                   </div>
@@ -7956,18 +9924,48 @@ function TeamLeadDashboardPanel({
   submittedPapers,
   setterSubmissions,
 }: TeamLeadDashboardPanelProps) {
-  const timelineData = useMemo(
-    () =>
-      workflow.timeline.map((event, index) => ({
-        step: index + 1,
-        label: event.stage,
-        stageIndex: index + 1,
-      })),
-    [workflow.timeline]
+  // Derive effective metrics from both in-memory submissions and persisted papers
+  const dbSetterDrafts = useMemo(
+    () => submittedPapers.filter((p) => p.status === 'submitted').length,
+    [submittedPapers]
   );
 
-  const compiledCount = submittedPapers.length;
-  const setterDrafts = setterSubmissions.length;
+  const compiledCount = useMemo(
+    () => submittedPapers.filter((p) => p.status !== 'submitted').length,
+    [submittedPapers]
+  );
+
+  // Prefer live in-memory drafts if present (same session as setter),
+  // otherwise fall back to drafts inferred from persisted papers.
+  const setterDrafts = setterSubmissions.length > 0 ? setterSubmissions.length : dbSetterDrafts;
+
+  // If workflow hasn't been advanced (e.g. fresh Team Lead session) but there
+  // are drafts already lodged by setters, reflect that in the snapshot using
+  // the same effective-stage logic the rest of the dashboards use.
+  const effectiveStage = getEffectiveWorkflowStage(submittedPapers, workflow.stage);
+
+  // Build a synthetic journey line from known stages so the chart always shows
+  // a meaningful path up to the current/effective stage, even after refresh.
+  const timelineData = useMemo(() => {
+    const orderedStages: WorkflowStage[] = [
+      'Awaiting Setter',
+      'Submitted to Team Lead',
+      'Compiled for Vetting',
+      'Vetting in Progress',
+      'Vetted & Returned to Chief Examiner',
+      'Revision Complete',
+      'Approved',
+    ];
+
+    const currentIndex = orderedStages.indexOf(effectiveStage as WorkflowStage);
+    const lastIndex = currentIndex === -1 ? 0 : currentIndex;
+
+    return orderedStages.slice(0, lastIndex + 1).map((stage, index) => ({
+      step: index + 1,
+      label: stage,
+      stageIndex: index + 1,
+    }));
+  }, [effectiveStage]);
 
   return (
     <SectionCard
@@ -7983,7 +9981,7 @@ function TeamLeadDashboardPanel({
           <p className="text-sm text-slate-700">
             Current workflow stage:{' '}
             <span className="font-semibold text-indigo-700">
-              {workflow.stage}
+              {effectiveStage}
             </span>
           </p>
           <div className="grid grid-cols-2 gap-3 pt-2 text-xs text-slate-700">
@@ -8006,14 +10004,15 @@ function TeamLeadDashboardPanel({
           </div>
         </div>
 
-        <div className="col-span-1 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm">
-          <p className="text-[0.65rem] font-semibold uppercase tracking-[0.25em] text-indigo-500">
+        <div className="col-span-1 relative overflow-hidden rounded-2xl border-2 border-indigo-100 bg-gradient-to-br from-indigo-50 via-sky-50 to-emerald-50 p-4 shadow-md ring-1 ring-indigo-100">
+          <div className="pointer-events-none absolute inset-0 opacity-50 bg-[radial-gradient(circle_at_top,_#38bdf8_0,_transparent_45%),radial-gradient(circle_at_bottom,_#a855f7_0,_transparent_55%)]" />
+          <p className="relative text-[0.65rem] font-semibold uppercase tracking-[0.25em] text-indigo-600">
             Journey Line
           </p>
-          <p className="text-xs text-slate-500">
+          <p className="relative text-xs text-slate-700">
             Light line view of how this paper has moved through the stages.
           </p>
-          <div className="mt-3 h-44">
+          <div className="relative mt-3 h-44">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={timelineData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
@@ -8024,8 +10023,8 @@ function TeamLeadDashboardPanel({
                   type="monotone"
                   dataKey="stageIndex"
                   stroke="#22c55e"
-                  strokeWidth={2}
-                  dot={{ r: 3, strokeWidth: 1, stroke: '#166534', fill: '#4ade80' }}
+                  strokeWidth={2.5}
+                  dot={{ r: 4, strokeWidth: 1.5, stroke: '#166534', fill: '#4ade80' }}
                   isAnimationActive
                 />
               </LineChart>
@@ -8033,11 +10032,12 @@ function TeamLeadDashboardPanel({
           </div>
         </div>
 
-        <div className="space-y-3 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm">
-          <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
+        <div className="relative space-y-3 rounded-2xl border-2 border-slate-200 bg-gradient-to-br from-slate-50 via-sky-50 to-violet-50 p-4 shadow-md ring-1 ring-slate-100">
+          <div className="pointer-events-none absolute inset-0 opacity-40 bg-[radial-gradient(circle_at_top,_#38bdf8_0,_transparent_50%),radial-gradient(circle_at_bottom,_#22c55e_0,_transparent_55%)]" />
+          <p className="relative text-[0.7rem] font-semibold uppercase tracking-wide text-slate-600">
             Next Coordination Step
           </p>
-          <p className="text-sm text-slate-700">
+          <p className="relative text-sm text-slate-800">
             {setterDrafts === 0
               ? 'Remind setters to upload their drafts into the workflow.'
               : compiledCount === 0
@@ -8083,15 +10083,18 @@ interface AISimilarityDetectionPanelProps {
     content: string;
     fileSize?: number;
   }>;
+  submittedPapers: SubmittedPaper[];
+  setSubmittedPapers: React.Dispatch<React.SetStateAction<SubmittedPaper[]>>;
 }
 
-function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionPanelProps) {
+function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubmittedPapers }: AISimilarityDetectionPanelProps) {
   const [selectedCourse, setSelectedCourse] = useState<string>('');
   const [isScanning, setIsScanning] = useState(false);
   const [similarityResults, setSimilarityResults] = useState<SimilarityResult[]>([]);
   const [showDetails, setShowDetails] = useState<string | null>(null);
+  const [scanCompleted, setScanCompleted] = useState(false);
 
-  // Use repository papers - convert to Paper format
+  // Convert repository papers to Paper format for comparison
   const allRepositoryPapers: Paper[] = repositoryPapers.map(paper => ({
     id: paper.id,
     courseUnit: paper.courseUnit,
@@ -8104,45 +10107,104 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
     content: paper.content,
   }));
 
-  // Separate current semester papers from historical papers
-  const currentYear = new Date().getFullYear().toString();
-  const currentSemester = 'Advent'; // Match liturgical semesters (Advent, Easter, Trinity)
-  const submittedPapers = allRepositoryPapers.filter(p => p.year === currentYear && p.semester === currentSemester);
-  const historicalPapers = allRepositoryPapers.filter(p => !(p.year === currentYear && p.semester === currentSemester));
+  // Get course units from submitted papers (including Team Lead submissions)
+  const courseUnits = Array.from(
+    new Set(
+      submittedPapers
+        .filter(p => p.courseCode && p.courseUnit)
+        .map(p => `${p.courseCode} - ${p.courseUnit}`)
+    )
+  );
 
-  const courseUnits = Array.from(new Set(allRepositoryPapers.map(p => `${p.courseCode} - ${p.courseUnit}`)));
+  // Enhanced AI Similarity Detection Algorithm
+  const detectSimilarity = (
+    submittedPaper: SubmittedPaper, 
+    repositoryPaper: Paper
+  ): SimilarityResult | null => {
+    // Skip if comparing paper with itself
+    if (submittedPaper.id === repositoryPaper.id) return null;
 
-  // AI Similarity Detection Algorithm (simulated)
-  const detectSimilarity = (currentPaper: Paper, historicalPaper: Paper): SimilarityResult | null => {
-    // Simple text similarity simulation
-    const currentWords = currentPaper.content.toLowerCase().split(/\s+/);
-    const historicalWords = historicalPaper.content.toLowerCase().split(/\s+/);
+    // Get content from submitted paper (try to get from repository or use placeholder)
+    const submittedContent = repositoryPapers.find(rp => rp.id === submittedPaper.id)?.content || 
+                             `Paper: ${submittedPaper.fileName}`;
+    const repoContent = repositoryPaper.content;
+
+    // Normalize and tokenize content
+    const normalizeText = (text: string): string[] => {
+      return text
+        .toLowerCase()
+        .replace(/[^\w\s]/g, ' ')
+        .split(/\s+/)
+        .filter(word => word.length > 2); // Filter out very short words
+    };
+
+    const submittedWords = normalizeText(submittedContent);
+    const repoWords = normalizeText(repoContent);
+
+    // Calculate word overlap
+    const submittedSet = new Set(submittedWords);
+    const repoSet = new Set(repoWords);
     
-    const commonWords = currentWords.filter(word => historicalWords.includes(word));
-    const similarityScore = (commonWords.length / Math.max(currentWords.length, historicalWords.length)) * 100;
+    let commonWords = 0;
+    submittedSet.forEach(word => {
+      if (repoSet.has(word)) commonWords++;
+    });
 
-    if (similarityScore < 30) return null; // Only return if similarity is significant
+    // Calculate similarity using Jaccard similarity and word frequency
+    const unionSize = new Set([...submittedWords, ...repoWords]).size;
+    const jaccardSimilarity = unionSize > 0 ? (commonWords / unionSize) * 100 : 0;
+    
+    // Also calculate word frequency similarity
+    const submittedWordFreq = new Map<string, number>();
+    submittedWords.forEach(word => {
+      submittedWordFreq.set(word, (submittedWordFreq.get(word) || 0) + 1);
+    });
 
+    const repoWordFreq = new Map<string, number>();
+    repoWords.forEach(word => {
+      repoWordFreq.set(word, (repoWordFreq.get(word) || 0) + 1);
+    });
+
+    let freqSimilarity = 0;
+    let totalFreq = 0;
+    submittedWordFreq.forEach((freq, word) => {
+      if (repoWordFreq.has(word)) {
+        const repoFreq = repoWordFreq.get(word) || 0;
+        freqSimilarity += Math.min(freq, repoFreq);
+        totalFreq += Math.max(freq, repoFreq);
+      }
+    });
+    const freqScore = totalFreq > 0 ? (freqSimilarity / totalFreq) * 100 : 0;
+
+    // Combine both metrics (weighted average)
+    const similarityScore = (jaccardSimilarity * 0.4 + freqScore * 0.6);
+
+    // Only return if similarity is significant (>= 20%)
+    if (similarityScore < 20) return null;
+
+    // Determine matched sections based on similarity
     const matchedSections: string[] = [];
     if (similarityScore > 70) matchedSections.push('Question Structure');
     if (similarityScore > 60) matchedSections.push('Key Concepts');
     if (similarityScore > 50) matchedSections.push('Terminology');
+    if (similarityScore > 40) matchedSections.push('General Content');
 
+    // Determine risk level
     let riskLevel: 'low' | 'medium' | 'high' | 'critical' = 'low';
     if (similarityScore >= 85) riskLevel = 'critical';
     else if (similarityScore >= 70) riskLevel = 'high';
     else if (similarityScore >= 50) riskLevel = 'medium';
 
     return {
-      paperId: currentPaper.id,
-      historicalPaperId: historicalPaper.id,
-      similarityScore: Math.round(similarityScore),
+      paperId: submittedPaper.id,
+      historicalPaperId: repositoryPaper.id,
+      similarityScore: Math.round(similarityScore * 10) / 10, // Round to 1 decimal
       matchedSections,
       riskLevel,
     };
   };
 
-  const handleScan = () => {
+  const handleScan = async () => {
     if (!selectedCourse) {
       alert('Please select a course unit first');
       return;
@@ -8150,27 +10212,55 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
 
     setIsScanning(true);
     setSimilarityResults([]);
+    setScanCompleted(false);
 
-    // Simulate AI processing delay
+    // Simulate AI processing with actual comparison
     setTimeout(() => {
-      const [courseCode, courseUnit] = selectedCourse.split(' - ');
-      const currentPapers = submittedPapers.filter(p => p.courseCode === courseCode);
-      const historicalPapersForCourse = historicalPapers.filter(p => p.courseCode === courseCode);
+      const [courseCode] = selectedCourse.split(' - ');
+      
+      // Get submitted papers for this course (including Team Lead submissions)
+      const papersToScan = submittedPapers.filter(p => p.courseCode && p.courseCode === courseCode);
+      
+      // Get ALL repository papers for this course (both current and historical)
+      const repositoryPapersForCourse = allRepositoryPapers.filter(p => p.courseCode === courseCode);
+
+      if (papersToScan.length === 0) {
+        alert('No submitted papers found for this course unit.');
+        setIsScanning(false);
+        return;
+      }
+
+      if (repositoryPapersForCourse.length === 0) {
+        alert('No repository papers found for comparison.');
+        setIsScanning(false);
+        return;
+      }
 
       const results: SimilarityResult[] = [];
 
-      currentPapers.forEach(currentPaper => {
-        historicalPapersForCourse.forEach(historicalPaper => {
-          const result = detectSimilarity(currentPaper, historicalPaper);
+      // Compare each submitted paper with all repository papers
+      papersToScan.forEach(submittedPaper => {
+        repositoryPapersForCourse.forEach(repoPaper => {
+          const result = detectSimilarity(submittedPaper, repoPaper);
           if (result) {
             results.push(result);
           }
         });
       });
 
+      // Sort by similarity score (highest first)
+      results.sort((a, b) => b.similarityScore - a.similarityScore);
+
       setSimilarityResults(results);
+      setScanCompleted(true);
       setIsScanning(false);
-    }, 2000);
+
+      if (results.length === 0) {
+        alert('No significant similarities found. All papers appear to be original.');
+      } else {
+        alert(`Scan complete! Found ${results.length} similarity match${results.length !== 1 ? 'es' : ''} with similarity scores ranging from ${Math.min(...results.map(r => r.similarityScore)).toFixed(1)}% to ${Math.max(...results.map(r => r.similarityScore)).toFixed(1)}%.`);
+      }
+    }, 2500); // Slightly longer delay to simulate AI processing
   };
 
   const getRiskColor = (risk: string) => {
@@ -8190,6 +10280,35 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
     return 'text-blue-600';
   };
 
+  const handleSendToVetting = (paperId: string) => {
+    setSubmittedPapers((prev) => {
+      const updated = prev.map((paper) => {
+        if (paper.id === paperId) {
+          return { ...paper, status: 'in-vetting' as const };
+        }
+        return paper;
+      });
+      
+      // Persist to localStorage
+      try {
+        const papersData = localStorage.getItem('ucu-moderation-papers');
+        if (papersData) {
+          const allPapers = JSON.parse(papersData);
+          const updatedAllPapers = allPapers.map((p: SubmittedPaper) => 
+            p.id === paperId ? { ...p, status: 'in-vetting' as const } : p
+          );
+          localStorage.setItem('ucu-moderation-papers', JSON.stringify(updatedAllPapers));
+        }
+      } catch (error) {
+        console.error('Error saving paper status to localStorage:', error);
+      }
+      
+      return updated;
+    });
+    
+    alert('Paper has been sent to vetting successfully!');
+  };
+
   return (
     <SectionCard
       title="AI Similarity Detection"
@@ -8207,6 +10326,7 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
                 onChange={(e) => {
                   setSelectedCourse(e.target.value);
                   setSimilarityResults([]);
+                  setScanCompleted(false);
                 }}
                 className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
               >
@@ -8236,96 +10356,279 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
             <h3 className="text-sm font-semibold text-slate-800 mb-4">Submitted Papers (Current Semester)</h3>
             <div className="space-y-3">
               {submittedPapers
-                .filter(p => selectedCourse.includes(p.courseCode))
-                .map((paper) => (
-                  <div key={paper.id} className="rounded-lg border border-slate-200 bg-white p-3">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <p className="text-sm font-semibold text-slate-800">{paper.courseCode}</p>
-                        <p className="text-xs text-slate-600 mt-1">{paper.fileName}</p>
-                        <p className="text-xs text-slate-500 mt-1">Submitted by: {paper.submittedBy}</p>
-                        <p className="text-xs text-slate-500">
-                          {new Date(paper.submittedAt).toLocaleDateString()}
-                        </p>
+                .filter(p => {
+                  if (!p.courseCode) return false;
+                  return selectedCourse.includes(p.courseCode);
+                })
+                .map((paper) => {
+                  // Check if this paper has similarity results
+                  const paperResults = similarityResults.filter(r => r.paperId === paper.id);
+                  const maxSimilarity = paperResults.length > 0 
+                    ? Math.max(...paperResults.map(r => r.similarityScore))
+                    : null;
+
+                  return (
+                    <div key={paper.id} className="group relative rounded-xl border-2 border-slate-200 bg-gradient-to-br from-white via-slate-50 to-blue-50 p-4 shadow-sm hover:shadow-xl hover:border-blue-300 transition-all duration-300 overflow-hidden">
+                      <div className="absolute inset-0 bg-gradient-to-br from-blue-500/0 via-indigo-500/0 to-purple-500/0 group-hover:from-blue-500/5 group-hover:via-indigo-500/5 group-hover:to-purple-500/5 transition-all duration-500"></div>
+                      <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-blue-400/0 to-purple-400/0 group-hover:from-blue-400/10 group-hover:to-purple-400/10 rounded-full blur-2xl transition-all duration-500 -translate-y-1/2 translate-x-1/2"></div>
+                      <div className="relative flex items-start justify-between">
+                        <div className="flex-1">
+                          <p className="text-sm font-semibold text-slate-800">{paper.courseCode}</p>
+                          <p className="text-xs text-slate-600 mt-1">{paper.fileName}</p>
+                          <p className="text-xs text-slate-500 mt-1">
+                            Submitted by: {paper.submittedBy}
+                            {paper.submittedRole && (
+                              <span className="ml-1 px-1.5 py-0.5 rounded text-[0.65rem] bg-indigo-100 text-indigo-700">
+                                {paper.submittedRole}
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {new Date(paper.submittedAt).toLocaleDateString()}
+                          </p>
+                          {maxSimilarity !== null && (
+                            <p className="text-xs font-semibold mt-1">
+                              Max Similarity: <span className={maxSimilarity >= 70 ? 'text-amber-600' : maxSimilarity >= 50 ? 'text-yellow-600' : 'text-blue-600'}>
+                                {maxSimilarity.toFixed(1)}%
+                              </span>
+                            </p>
+                          )}
+                          {/* Send to Vetting Button - appears when similarity <= 30% OR scan completed with no results */}
+                          {((maxSimilarity !== null && maxSimilarity <= 30) || (scanCompleted && maxSimilarity === null && similarityResults.length === 0)) && paper.status !== 'in-vetting' && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleSendToVetting(paper.id);
+                              }}
+                              className="mt-3 w-full rounded-xl bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 px-4 py-3 text-sm font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 flex items-center justify-center gap-2 relative overflow-hidden group"
+                            >
+                              <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                              <span className="text-lg relative z-10">✓</span>
+                              <span className="relative z-10">Send to Vetting</span>
+                            </button>
+                          )}
+                          {paper.status === 'in-vetting' && (
+                            <div className="mt-3 px-3 py-2 rounded-lg bg-green-100 border-2 border-green-400">
+                              <p className="text-xs font-bold text-green-800 flex items-center gap-1.5">
+                                <span className="text-base">✓</span>
+                                <span>Sent to Vetting</span>
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                        <span className={`text-xs ${maxSimilarity !== null ? (maxSimilarity >= 70 ? 'text-amber-600' : maxSimilarity >= 50 ? 'text-yellow-600' : 'text-blue-600') : 'text-blue-600'}`}>
+                          {maxSimilarity !== null ? `Scanned (${maxSimilarity.toFixed(1)}%)` : 'Ready for Scan'}
+                        </span>
                       </div>
-                      <span className="text-xs text-blue-600">Ready for Scan</span>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
             </div>
           </div>
         )}
 
-        {similarityResults.length > 0 && (
+        {(similarityResults.length > 0 || scanCompleted) && (
           <div className="rounded-xl border border-slate-200 bg-white p-5">
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-800">Similarity Detection Results</h3>
-              <span className="text-xs text-slate-600">
-                {similarityResults.length} match{similarityResults.length !== 1 ? 'es' : ''} found
-              </span>
+              {similarityResults.length > 0 && (
+                <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-gradient-to-r from-blue-50 to-indigo-50 text-indigo-700 border border-indigo-200">
+                  {similarityResults.length} match{similarityResults.length !== 1 ? 'es' : ''} found
+                </span>
+              )}
             </div>
-            <div className="space-y-3 max-h-96 overflow-y-auto">
+            {similarityResults.length === 0 && scanCompleted ? (
+              <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-green-50 via-emerald-50 to-teal-50 border-2 border-green-200 p-8 text-center">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,_rgba(16,185,129,0.1),transparent_50%)]"></div>
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_bottom_left,_rgba(5,150,105,0.1),transparent_50%)]"></div>
+                <div className="relative z-10">
+                  <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-br from-green-400 to-emerald-500 mb-4 shadow-lg">
+                    <span className="text-3xl">✓</span>
+                  </div>
+                  <p className="text-lg font-bold text-green-700 mb-2">Scan Complete</p>
+                  <p className="text-sm text-slate-700 mb-6">
+                    No significant similarities found. All papers appear to be original and ready for vetting.
+                  </p>
+                  {/* Show Send to Vetting buttons for all scanned papers */}
+                  <div className="space-y-3">
+                    {submittedPapers
+                      .filter(p => {
+                        if (!p.courseCode) return false;
+                        const [courseCode] = selectedCourse.split(' - ');
+                        return p.courseCode === courseCode && p.status !== 'in-vetting';
+                      })
+                      .map((paper) => (
+                        <button
+                          key={paper.id}
+                          type="button"
+                          onClick={() => handleSendToVetting(paper.id)}
+                          className="w-full rounded-xl bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 px-6 py-3 text-sm font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 flex items-center justify-center gap-2 relative overflow-hidden group"
+                        >
+                          <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                          <span className="text-lg relative z-10">✓</span>
+                          <span className="relative z-10">Send {paper.fileName} to Vetting</span>
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-2">
               {similarityResults.map((result, idx) => {
                 const currentPaper = submittedPapers.find(p => p.id === result.paperId);
-                const historicalPaper = historicalPapers.find(p => p.id === result.historicalPaperId);
+                const historicalPaper = allRepositoryPapers.find(p => p.id === result.historicalPaperId);
+                
+                const getRiskIcon = (risk: string) => {
+                  switch (risk) {
+                    case 'critical': return '🔴';
+                    case 'high': return '🟠';
+                    case 'medium': return '🟡';
+                    case 'low': return '🔵';
+                    default: return '⚪';
+                  }
+                };
+
+                const getRiskGradient = (risk: string) => {
+                  switch (risk) {
+                    case 'critical': return 'from-rose-50 via-red-50 to-pink-50 border-rose-300';
+                    case 'high': return 'from-amber-50 via-orange-50 to-yellow-50 border-amber-300';
+                    case 'medium': return 'from-yellow-50 via-amber-50 to-orange-50 border-yellow-300';
+                    case 'low': return 'from-blue-50 via-indigo-50 to-cyan-50 border-blue-300';
+                    default: return 'from-slate-50 to-gray-50 border-slate-300';
+                  }
+                };
+
+                const getRiskIconBg = (risk: string) => {
+                  switch (risk) {
+                    case 'critical': return 'bg-gradient-to-br from-rose-500 to-red-600';
+                    case 'high': return 'bg-gradient-to-br from-amber-500 to-orange-600';
+                    case 'medium': return 'bg-gradient-to-br from-yellow-500 to-amber-600';
+                    case 'low': return 'bg-gradient-to-br from-blue-500 to-indigo-600';
+                    default: return 'bg-gradient-to-br from-slate-400 to-gray-500';
+                  }
+                };
                 
                 return (
                   <div
                     key={idx}
-                    className={`rounded-lg border p-4 ${getRiskColor(result.riskLevel)}`}
+                    className={`group relative rounded-2xl border-2 bg-gradient-to-br ${getRiskGradient(result.riskLevel)} p-4 shadow-lg hover:shadow-2xl transition-all duration-300 cursor-pointer overflow-hidden transform hover:scale-[1.02]`}
+                    onClick={() => setShowDetails(showDetails === `${idx}` ? null : `${idx}`)}
                   >
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className={`text-2xl font-bold ${getScoreColor(result.similarityScore)}`}>
-                            {result.similarityScore}%
-                          </span>
-                          <span className={`px-2 py-1 rounded text-xs font-semibold uppercase ${getRiskColor(result.riskLevel)}`}>
-                            {result.riskLevel} Risk
-                          </span>
-                        </div>
-                        <p className="text-xs text-slate-700 mb-1">
-                          <span className="font-semibold">Current:</span> {currentPaper?.fileName}
-                        </p>
-                        <p className="text-xs text-slate-700">
-                          <span className="font-semibold">Historical:</span> {historicalPaper?.fileName} ({historicalPaper?.semester} {historicalPaper?.year})
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowDetails(showDetails === `${idx}` ? null : `${idx}`)}
-                        className="text-xs text-slate-600 hover:text-slate-800"
-                      >
-                        {showDetails === `${idx}` ? 'Hide' : 'Show'} Details
-                      </button>
+                    {/* Animated background effects */}
+                    <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+                      <div className="absolute inset-0 bg-gradient-to-br from-white/20 via-transparent to-transparent"></div>
+                      <div className="absolute top-0 right-0 w-40 h-40 bg-gradient-to-br from-white/10 to-transparent rounded-full blur-3xl transform translate-x-1/2 -translate-y-1/2"></div>
                     </div>
                     
+                    {/* Icon Badge */}
+                    <div className={`absolute -top-3 -right-3 w-12 h-12 ${getRiskIconBg(result.riskLevel)} rounded-full flex items-center justify-center text-white text-xl shadow-2xl transform group-hover:scale-125 group-hover:rotate-12 transition-all duration-300 z-10`}>
+                      {getRiskIcon(result.riskLevel)}
+                    </div>
+
+                    {/* Main Content */}
+                    <div className="pr-10 relative z-10">
+                      {/* Score Display */}
+                      <div className="flex items-baseline gap-2 mb-3">
+                        <span className={`text-4xl font-black ${getScoreColor(result.similarityScore)} drop-shadow-lg group-hover:scale-110 transition-transform duration-300`}>
+                          {result.similarityScore}%
+                        </span>
+                        <span className={`px-3 py-1 rounded-full text-[0.65rem] font-bold uppercase tracking-wide ${getRiskColor(result.riskLevel)} border-2 shadow-md`}>
+                          {result.riskLevel}
+                        </span>
+                      </div>
+
+                      {/* File Names */}
+                      <div className="space-y-2 mb-4">
+                        <div className="flex items-start gap-2 p-2 rounded-lg bg-white/60 backdrop-blur-sm border border-white/50 group-hover:bg-white/80 transition-all duration-300">
+                          <span className="text-lg mt-0.5">📄</span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[0.7rem] font-bold text-slate-800 truncate" title={currentPaper?.fileName}>
+                              {currentPaper?.fileName}
+                            </p>
+                            <p className="text-[0.65rem] text-slate-600 font-medium">Current</p>
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2 p-2 rounded-lg bg-white/60 backdrop-blur-sm border border-white/50 group-hover:bg-white/80 transition-all duration-300">
+                          <span className="text-lg mt-0.5">📚</span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[0.7rem] font-bold text-slate-800 truncate" title={`${historicalPaper?.fileName} (${historicalPaper?.semester} ${historicalPaper?.year})`}>
+                              {historicalPaper?.fileName}
+                            </p>
+                            <p className="text-[0.65rem] text-slate-600 font-medium">{historicalPaper?.semester} {historicalPaper?.year}</p>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div className="space-y-2 relative z-10">
+                        {/* Send to Vetting Button - appears when similarity <= 30% */}
+                        {result.similarityScore <= 30 && currentPaper && currentPaper.status !== 'in-vetting' && (
+                          <button
+                            type="button"
+                            className="w-full rounded-xl bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 px-3 py-2.5 text-[0.7rem] font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.03] transition-all duration-300 flex items-center justify-center gap-1.5 relative overflow-hidden group"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleSendToVetting(result.paperId);
+                            }}
+                          >
+                            <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                            <span className="text-base relative z-10">✓</span>
+                            <span className="relative z-10">Send to Vetting</span>
+                          </button>
+                        )}
+                        {currentPaper && currentPaper.status === 'in-vetting' && (
+                          <div className="w-full px-3 py-2 rounded-xl bg-gradient-to-r from-green-100 to-emerald-100 border-2 border-green-400 shadow-md">
+                            <p className="text-[0.65rem] font-bold text-green-800 flex items-center justify-center gap-1.5">
+                              <span className="text-base">✓</span>
+                              <span>Sent to Vetting</span>
+                            </p>
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          className="w-full text-[0.7rem] font-semibold text-slate-700 hover:text-slate-900 py-2 px-3 rounded-xl bg-white/70 hover:bg-white/90 backdrop-blur-sm transition-all duration-300 border border-slate-300/50 hover:border-slate-400 hover:shadow-md"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowDetails(showDetails === `${idx}` ? null : `${idx}`);
+                          }}
+                        >
+                          {showDetails === `${idx}` ? '▲ Hide Details' : '▼ Show Details'}
+                        </button>
+                      </div>
+                    </div>
+                    
+                    {/* Expanded Details */}
                     {showDetails === `${idx}` && (
-                      <div className="mt-3 pt-3 border-t border-slate-200 space-y-2">
+                      <div className="mt-4 pt-4 border-t-2 border-white/60 space-y-3 relative z-10 animate-in">
                         <div>
-                          <p className="text-xs font-semibold text-slate-700 mb-1">Matched Sections:</p>
-                          <div className="flex flex-wrap gap-2">
+                          <p className="text-[0.7rem] font-bold text-slate-700 mb-1.5 flex items-center gap-1">
+                            <span>🔍</span> Matched Sections
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
                             {result.matchedSections.map((section, sIdx) => (
-                              <span key={sIdx} className="px-2 py-1 rounded bg-white text-xs text-slate-700">
+                              <span key={sIdx} className="px-2 py-0.5 rounded-md bg-white/80 text-[0.65rem] text-slate-700 border border-slate-200 shadow-sm">
                                 {section}
                               </span>
                             ))}
                           </div>
                         </div>
-                        <div className="grid grid-cols-2 gap-2 text-xs">
-                          <div>
-                            <p className="text-slate-600">Current Paper</p>
-                            <p className="text-slate-800">{currentPaper?.courseCode} - {currentPaper?.semester} {currentPaper?.year}</p>
+                        <div className="grid grid-cols-2 gap-2 text-[0.65rem]">
+                          <div className="p-2 rounded-lg bg-white/60 border border-slate-200/50">
+                            <p className="font-semibold text-slate-600 mb-0.5">Current Paper</p>
+                            <p className="text-slate-800">{currentPaper?.courseCode}</p>
+                            <p className="text-slate-600">{currentPaper?.semester} {currentPaper?.year}</p>
                           </div>
-                          <div>
-                            <p className="text-slate-600">Historical Paper</p>
-                            <p className="text-slate-800">{historicalPaper?.courseCode} - {historicalPaper?.semester} {historicalPaper?.year}</p>
+                          <div className="p-2 rounded-lg bg-white/60 border border-slate-200/50">
+                            <p className="font-semibold text-slate-600 mb-0.5">Historical Paper</p>
+                            <p className="text-slate-800">{historicalPaper?.courseCode}</p>
+                            <p className="text-slate-600">{historicalPaper?.semester} {historicalPaper?.year}</p>
                           </div>
                         </div>
                         {result.similarityScore >= 70 && (
-                          <div className="mt-2 p-2 rounded bg-amber-500/10 border border-amber-500/30">
-                            <p className="text-xs text-amber-300">
-                              ⚠️ High similarity detected. Review recommended before approval.
+                          <div className="mt-2 p-2 rounded-lg bg-gradient-to-r from-amber-100 to-orange-100 border-2 border-amber-300/50 shadow-sm">
+                            <p className="text-[0.65rem] font-semibold text-amber-800 flex items-center gap-1">
+                              <span className="text-base">⚠️</span> High similarity detected. Review recommended before approval.
                             </p>
                           </div>
                         )}
@@ -8335,10 +10638,11 @@ function AISimilarityDetectionPanel({ repositoryPapers }: AISimilarityDetectionP
                 );
               })}
             </div>
+            )}
           </div>
         )}
 
-        {!isScanning && similarityResults.length === 0 && selectedCourse && (
+        {!isScanning && !scanCompleted && similarityResults.length === 0 && selectedCourse && (
           <div className="rounded-xl border border-slate-200 bg-white p-5 text-center">
             <p className="text-sm text-slate-600">
               Click "Run AI Similarity Scan" to compare submitted papers with historical papers.
@@ -8480,6 +10784,92 @@ function LecturerDashboardPanel({
   );
 }
 
+interface RepositoryPapersPanelProps {
+  repositoryPapers: RepositoryPaper[];
+}
+
+function RepositoryPapersPanel({ repositoryPapers }: RepositoryPapersPanelProps) {
+  return (
+    <SectionCard
+      title="Repository Papers"
+      kicker="Central Exam Repository"
+      description="Browse and manage all papers that have been deposited into the secure repository."
+    >
+      {repositoryPapers.length === 0 ? (
+        <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
+          No papers are currently in the repository for this semester.
+        </div>
+      ) : (
+        <div className="rounded-xl border border-slate-200 bg-white p-6">
+          <div className="mb-4">
+            <h3 className="text-base font-semibold text-slate-800">
+              Repository Papers
+            </h3>
+            <p className="text-sm text-slate-600 mt-1">
+              View and manage papers in the repository.
+            </p>
+          </div>
+
+          <div className="space-y-3 max-h-[480px] overflow-y-auto">
+            {repositoryPapers.map((paper) => (
+              <div
+                key={paper.id}
+                className="rounded-lg border border-slate-200 bg-white p-4"
+              >
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-2">
+                      <h4 className="text-sm font-semibold text-slate-800">
+                        {paper.fileName}
+                      </h4>
+                      <span className="px-2 py-0.5 rounded-lg text-xs font-medium border bg-cyan-500/10 text-cyan-700 border-cyan-500/40">
+                        {paper.courseCode}
+                      </span>
+                    </div>
+                    <div className="space-y-1 text-xs text-slate-600">
+                      <p>
+                        Course:{' '}
+                        <span className="text-slate-700">{paper.courseUnit}</span>
+                      </p>
+                      <p>
+                        Submitted by:{' '}
+                        <span className="text-slate-700">{paper.submittedBy}</span>
+                      </p>
+                      <p>
+                        Semester:{' '}
+                        <span className="text-slate-700">
+                          {paper.semester} {paper.year}
+                        </span>
+                      </p>
+                      <p>Added: {new Date(paper.submittedAt).toLocaleString()}</p>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-2 ml-4">
+                    <button
+                      type="button"
+                      className="px-3 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-xs font-medium text-cyan-700 border border-cyan-500/40 transition"
+                      onClick={() => {
+                        const blob = new Blob([paper.content], {
+                          type: 'application/pdf',
+                        });
+                        const url = URL.createObjectURL(blob);
+                        window.open(url, '_blank');
+                        setTimeout(() => URL.revokeObjectURL(url), 100);
+                      }}
+                    >
+                      View
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
 interface ChiefExaminerDashboardPanelProps {
   workflow: WorkflowState;
   submittedPapers: SubmittedPaper[];
@@ -8493,6 +10883,54 @@ function ChiefExaminerDashboardPanel({
   setterSubmissions,
   annotations,
 }: ChiefExaminerDashboardPanelProps) {
+  const effectiveStage = getEffectiveWorkflowStage(submittedPapers, workflow.stage);
+
+  // Helper functions for displaying paper status
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'submitted':
+        return 'text-violet-400 bg-violet-500/10 border-violet-500/30';
+      case 'in-vetting':
+        return 'text-amber-400 bg-amber-500/10 border-amber-500/30';
+      case 'vetted':
+        return 'text-blue-600 bg-blue-500/10 border-blue-500/30';
+      case 'approved':
+        return 'text-blue-600 bg-blue-500/10 border-blue-500/30';
+      default:
+        return 'text-slate-600 bg-slate-500/10 border-slate-500/30';
+    }
+  };
+
+  const getStatusLabel = (status: string) => {
+    switch (status) {
+      case 'submitted':
+        return 'Submitted';
+      case 'in-vetting':
+        return 'In Vetting';
+      case 'vetted':
+        return 'Vetted';
+      case 'approved':
+        return 'Approved';
+      default:
+        return 'Unknown';
+    }
+  };
+
+  const getWorkflowStageForPaper = (status: SubmittedPaper['status']): string => {
+    switch (status) {
+      case 'submitted':
+        return 'Submitted to Team Lead';
+      case 'in-vetting':
+        return 'Vetting in Progress';
+      case 'vetted':
+        return 'Vetted & Returned to Chief Examiner';
+      case 'approved':
+        return 'Approved';
+      default:
+        return 'Unknown';
+    }
+  };
+
   const paperStatusData = useMemo(() => {
     const statusCounts: Record<SubmittedPaper['status'], number> = {
       'submitted': 0,
@@ -8501,34 +10939,84 @@ function ChiefExaminerDashboardPanel({
       'approved': 0,
     };
 
+    // Count papers by status
+    // For 'submitted' status, exclude Team Lead papers (they're shown separately as "Lead Submissions")
+    // For 'in-vetting', 'vetted', and 'approved', include ALL papers regardless of role
     submittedPapers.forEach((paper) => {
-      statusCounts[paper.status] += 1;
+      if (paper.status === 'submitted') {
+        // Only count non-Team Lead papers in 'submitted' status
+        if (paper.submittedRole !== 'Team Lead') {
+          statusCounts[paper.status] += 1;
+        }
+      } else {
+        // For 'in-vetting', 'vetted', and 'approved', count ALL papers
+        statusCounts[paper.status] += 1;
+      }
     });
 
-    return Object.entries(statusCounts).map(([name, value]) => ({
+    // Get Team Lead submissions count (only papers with status 'submitted')
+    const leadSubmissionsCount = submittedPapers.filter(
+      (p) => p.submittedRole === 'Team Lead' && p.status === 'submitted'
+    ).length;
+
+    // Build the data array with ALL status counts (show all stages)
+    const data = Object.entries(statusCounts).map(([name, value]) => ({
       name,
       value,
     }));
+
+    // Always add Team Lead submissions as a separate entry (even if 0, to show in legend)
+    data.push({
+      name: 'lead submissions',
+      value: leadSubmissionsCount,
+    });
+
+    return data;
   }, [submittedPapers]);
 
-  const timelineData = useMemo(
-    () =>
-      workflow.timeline.map((event, index) => ({
-        step: index + 1,
-        label: event.stage,
-        stageIndex: index + 1,
-      })),
-    [workflow.timeline]
-  );
+  // Synthetic journey line so the chief examiner always sees progress up to
+  // the current effective stage, even if the in-memory workflow was reset.
+  const timelineData = useMemo(() => {
+    const orderedStages: WorkflowStage[] = [
+      'Awaiting Setter',
+      'Submitted to Team Lead',
+      'Compiled for Vetting',
+      'Vetting in Progress',
+      'Vetted & Returned to Chief Examiner',
+      'Revision Complete',
+      'Approved',
+    ];
 
-  const totalSubmissions = setterSubmissions.length;
+    const currentIndex = orderedStages.indexOf(effectiveStage as WorkflowStage);
+    const lastIndex = currentIndex === -1 ? 0 : currentIndex;
+
+    return orderedStages.slice(0, lastIndex + 1).map((stage, index) => ({
+      step: index + 1,
+      label: stage,
+      stageIndex: index + 1,
+    }));
+  }, [effectiveStage]);
+
+  // Setter submissions: only count papers submitted by Setters (not Team Lead)
+  const totalSubmissions =
+    setterSubmissions.length > 0
+      ? setterSubmissions.length
+      : submittedPapers.filter(
+          (p) => p.status === 'submitted' && (p.submittedRole === 'Setter' || !p.submittedRole || p.submittedRole === 'Unknown')
+        ).length;
+
+  // Lead submissions: count all papers submitted by Team Lead (regardless of status)
+  // This separates Team Lead submissions from Setter submissions
+  const totalLeadSubmissions = submittedPapers.filter(
+    (p) => p.submittedRole === 'Team Lead'
+  ).length;
   const totalAnnotations = annotations.length;
 
-  const pieColours = ['#6366f1', '#22c55e', '#eab308', '#f97316'];
+  const pieColours = ['#6366f1', '#22c55e', '#eab308', '#f97316', '#38bdf8']; // Added sky-400 for Team Lead submissions
   const lastEvent = workflow.timeline[workflow.timeline.length - 1];
 
   const nextSuggestedStep = (() => {
-    switch (workflow.stage) {
+    switch (effectiveStage) {
       case 'Awaiting Setter':
         return 'Nudge the setter to upload the draft paper into the workflow.';
       case 'Submitted to Team Lead':
@@ -8546,6 +11034,9 @@ function ChiefExaminerDashboardPanel({
     }
   })();
 
+  const teamLeadSubmissions = submittedPapers.filter((p) => p.submittedRole === 'Team Lead');
+  const hasTeamLeadSubmissions = teamLeadSubmissions.length > 0;
+
   return (
     <SectionCard
       title="Chief Examiner Dashboard"
@@ -8553,6 +11044,35 @@ function ChiefExaminerDashboardPanel({
       description="AI-styled cockpit showing how papers move through setting, vetting, approval and secure print preparation."
     >
       <div className="space-y-5">
+        {/* Alert for Team Lead Submissions */}
+        {hasTeamLeadSubmissions && (
+          <div className="rounded-2xl border-2 border-indigo-300 bg-gradient-to-r from-indigo-100 via-purple-100 to-pink-100 px-5 py-4 shadow-lg">
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  className="h-6 w-6 text-indigo-600"
+                  fill="currentColor"
+                >
+                  <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2Zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8Zm1-13a1 1 0 0 0-2 0v4a1 1 0 0 0 .293.707l2.828 2.829a1 1 0 1 0 1.415-1.415L13 11.586V7Z" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h3 className="text-sm font-bold text-indigo-900 mb-1">
+                  Team Lead Submissions Awaiting Your Review
+                </h3>
+                <p className="text-xs text-indigo-700 mb-2">
+                  {teamLeadSubmissions.length} paper{teamLeadSubmissions.length !== 1 ? 's' : ''} submitted by Team Lead {teamLeadSubmissions.length !== 1 ? 'are' : 'is'} ready for your AI similarity analysis before forwarding to vetting.
+                </p>
+                <p className="text-xs font-semibold text-indigo-800">
+                  📍 Scroll down to the <strong>"Submissions from Team Lead"</strong> section below to view and process these papers.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* AI status strip */}
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-indigo-100 bg-gradient-to-r from-indigo-50 via-sky-50 to-cyan-50 px-4 py-3">
           <div className="flex items-center gap-2 text-xs text-slate-700">
@@ -8581,7 +11101,7 @@ function ChiefExaminerDashboardPanel({
             <p className="text-sm text-slate-700">
               Current stage:{' '}
               <span className="font-semibold text-indigo-700">
-                {workflow.stage}
+                {effectiveStage}
               </span>
             </p>
             <div className="grid grid-cols-2 gap-3 pt-2 text-xs text-slate-700">
@@ -8637,7 +11157,7 @@ function ChiefExaminerDashboardPanel({
                 </PieChart>
               </ResponsiveContainer>
             </div>
-            {/* Legend for statuses */}
+            {/* Legend for statuses including lead submissions */}
             <div className="relative mt-3 grid grid-cols-2 gap-2 text-[0.7rem] text-slate-600">
               {paperStatusData.map((entry, index) => (
                 <div key={entry.name} className="flex items-center gap-2">
@@ -8645,7 +11165,11 @@ function ChiefExaminerDashboardPanel({
                     className="h-2 w-2 rounded-full"
                     style={{ backgroundColor: pieColours[index % pieColours.length] }}
                   />
-                  <span className="capitalize">{entry.name}</span>
+                  <span className="capitalize">
+                    {entry.name === 'lead submissions' 
+                      ? 'Lead submissions (compiled / forwarded)' 
+                      : entry.name}
+                  </span>
                   <span className="ml-auto font-semibold text-slate-800">
                     {entry.value}
                   </span>
@@ -8718,6 +11242,185 @@ function ChiefExaminerDashboardPanel({
           </div>
         </div>
       </div>
+
+      {/* Team Lead Submissions Section - Added to Dashboard for visibility */}
+      {submittedPapers.filter((p) => p.submittedRole === 'Team Lead').length > 0 && (
+        <div className="mt-6">
+          <SectionCard
+            title="Submissions from Team Lead"
+            kicker="Compiled Papers for Chief Examiner"
+            description="View all papers compiled and submitted by Team Lead. These papers are ready for Chief Examiner AI similarity analysis before vetting."
+          >
+            <div className="space-y-3">
+              {submittedPapers.filter((p) => p.submittedRole === 'Team Lead').map((paper: SubmittedPaper) => (
+                <div
+                  key={paper.id}
+                  className={`relative overflow-hidden rounded-2xl border-2 p-5 transition shadow-md bg-gradient-to-r from-indigo-100 via-purple-100 to-pink-100 ring-2 ring-indigo-200`}
+                >
+                  <div className="pointer-events-none absolute inset-0 opacity-45 mix-blend-normal bg-[radial-gradient(circle_at_top,_#6366f1_0,_transparent_50%),radial-gradient(circle_at_bottom,_#a855f7_0,_transparent_60%)]" />
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-2">
+                        <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-1">
+                          <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-indigo-100 text-indigo-600 ring-1 ring-indigo-300">
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 24 24"
+                              className="h-3.5 w-3.5"
+                              fill="currentColor"
+                            >
+                              <path d="M12 2a7 7 0 0 0-7 7v3.586l-.707.707A1 1 0 0 0 5 15h14a1 1 0 0 0 .707-1.707L19 12.586V9a7 7 0 0 0-7-7Zm0 20a3 3 0 0 0 2.995-2.824L15 19h-6a3 3 0 0 0 2.824 2.995L12 22Z" />
+                            </svg>
+                          </span>
+                          {paper.fileName}
+                        </h4>
+                        <span className={`px-2 py-0.5 rounded-lg text-xs font-medium border bg-white/80 text-slate-800`}>
+                          {getStatusLabel(paper.status)}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-lg text-xs font-semibold border bg-indigo-100 text-indigo-700 border-indigo-300">
+                          Team Lead Submission
+                        </span>
+                      </div>
+                      <div className="space-y-1 text-xs text-slate-700">
+                        <p>
+                          <span className="inline-flex items-center gap-1 text-indigo-700">
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 24 24"
+                              className="h-3.5 w-3.5 text-indigo-500"
+                              fill="currentColor"
+                            >
+                              <path d="M6.75 3A.75.75 0 0 0 6 3.75v.75H5.25a2.25 2.25 0 0 0-2.235 2.026L3 6.75v11.25A2.25 2.25 0 0 0 5.25 20.25h13.5A2.25 2.25 0 0 0 21 18V6.75a2.25 2.25 0 0 0-2.026-2.235L18.75 4.5H18v-.75a.75.75 0 0 0-.75-.75h-10.5ZM12 8.25a.75.75 0 0 1 .743.648l.007.102v4.19l2.22 2.22a.75.75 0 0 1-.976 1.133l-.084-.073-2.5-2.5A.75.75 0 0 1 11.25 13.5v-4.5a.75.75 0 0 1 .75-.75Z" />
+                            </svg>
+                            Submitted:
+                          </span>{' '}
+                          {new Date(paper.submittedAt).toLocaleString()}
+                        </p>
+                        <p>
+                          <span className="inline-flex items-center gap-1 text-emerald-700">
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 24 24"
+                              className="h-3.5 w-3.5 text-emerald-500"
+                              fill="currentColor"
+                            >
+                              <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-4 0-7 2-7 4v1.25A1.75 1.75 0 0 0 6.75 21h10.5A1.75 1.75 0 0 0 19 19.25V18c0-2-3-4-7-4Z" />
+                            </svg>
+                            Submitted By:
+                          </span>{' '}
+                          <span className="text-slate-900">
+                            {paper.submittedBy}
+                            <span className="ml-1 text-[0.7rem] rounded-full bg-indigo-100 px-2 py-0.5 font-semibold text-indigo-700">
+                              Team Lead
+                            </span>
+                          </span>
+                        </p>
+                        {paper.fileSize && (
+                          <p>
+                            <span className="inline-flex items-center gap-1 text-emerald-700">
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 24 24"
+                                className="h-3.5 w-3.5 text-emerald-500"
+                                fill="currentColor"
+                              >
+                                <path d="M6.75 2.25A2.25 2.25 0 0 0 4.5 4.5v15a2.25 2.25 0 0 0 2.25 2.25h10.5A2.25 2.25 0 0 0 19.5 19.5v-15A2.25 2.25 0 0 0 17.25 2.25H6.75ZM12 18a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z" />
+                              </svg>
+                              Size:
+                            </span>{' '}
+                            {(paper.fileSize / 1024).toFixed(2)} KB
+                          </p>
+                        )}
+                        {paper.courseCode && paper.courseUnit && (
+                          <p>
+                            <span className="inline-flex items-center gap-1 text-violet-700">
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 24 24"
+                                className="h-3.5 w-3.5 text-violet-500"
+                                fill="currentColor"
+                              >
+                                <path d="M12 2a10 10 0 0 0-7.071 17.071A10 10 0 1 0 12 2Zm0 3a7 7 0 1 1-4.95 11.95A7 7 0 0 1 12 5Zm-.75 2.75a.75.75 0 0 0-.743.648L10.5 8.5v4.25c0 .28.156.538.402.667l3 1.5a.75.75 0 0 0 .67-1.342L12 11.987V8.5a.75.75 0 0 0-.75-.75Z" />
+                              </svg>
+                              Course:
+                            </span>{' '}
+                            <span className="text-slate-900">
+                              {paper.courseCode} - {paper.courseUnit}
+                            </span>
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex flex-col gap-2 ml-4">
+                      <button
+                        type="button"
+                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-100 border border-indigo-300 hover:bg-indigo-200 text-xs font-medium text-indigo-800 transition"
+                        onClick={async () => {
+                          if (!paper.fileUrl) {
+                            alert('No file is available to view for this paper yet.');
+                            return;
+                          }
+                          const { data } = supabase.storage
+                            .from('exam_papers')
+                            .getPublicUrl(paper.fileUrl);
+                          if (!data?.publicUrl) {
+                            alert('Unable to generate a view link for this paper.');
+                            return;
+                          }
+                          window.open(data.publicUrl, '_blank');
+                        }}
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          className="h-3.5 w-3.5"
+                          fill="currentColor"
+                        >
+                          <path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7Zm0 4a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z" />
+                        </svg>
+                        <span>View</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-100 border border-emerald-300 hover:bg-emerald-200 text-xs font-medium text-emerald-800 transition"
+                        onClick={async () => {
+                          if (!paper.fileUrl) {
+                            alert('No file is available to download for this paper yet.');
+                            return;
+                          }
+                          const { data } = supabase.storage
+                            .from('exam_papers')
+                            .getPublicUrl(paper.fileUrl);
+                          if (!data?.publicUrl) {
+                            alert('Unable to generate a download link for this paper.');
+                            return;
+                          }
+                          const link = document.createElement('a');
+                          link.href = data.publicUrl;
+                          link.download = paper.fileName || 'exam-paper.pdf';
+                          document.body.appendChild(link);
+                          link.click();
+                          document.body.removeChild(link);
+                        }}
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          className="h-3.5 w-3.5"
+                          fill="currentColor"
+                        >
+                          <path d="M12 3a1 1 0 0 1 1 1v9.586l2.293-2.293a1 1 0 0 1 1.497 1.32l-.083.094-4 4a1 1 0 0 1-1.32.083l-.094-.083-4-4a1 1 0 0 1 1.32-1.497l.094.083L11 13.586V4a1 1 0 0 1 1-1Zm-7 14a1 1 0 0 1 .117 1.993L5 19H4a1 1 0 0 0-.993.883L3 20a1 1 0 0 0 .883.993L4 21h16a1 1 0 0 0 .993-.883L21 20a1 1 0 0 0-.883-.993L20 19h-1a1 1 0 0 1-.117-1.993L19 17h1a3 3 0 0 1 2.995 2.824L23 20a3 3 0 0 1-2.824 2.995L20 23H4a3 3 0 0 1-2.995-2.824L1 20a3 3 0 0 1 2.824-2.995L4 17h1Z" />
+                        </svg>
+                        <span>Download</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </SectionCard>
+        </div>
+      )}
     </SectionCard>
   );
 }
@@ -8731,6 +11434,8 @@ function PaperTrackingPanel({
   workflow,
   submittedPapers,
 }: PaperTrackingPanelProps) {
+  const effectiveStage = getEffectiveWorkflowStage(submittedPapers, workflow.stage);
+
   const stages: Array<{ id: WorkflowStage | 'Printing'; label: string }> = [
     { id: 'Awaiting Setter', label: 'Paper is being set' },
     { id: 'Submitted to Team Lead', label: 'Team Lead collecting drafts' },
@@ -8741,9 +11446,9 @@ function PaperTrackingPanel({
     { id: 'Printing', label: 'Released for secure printing' },
   ];
 
-  const currentIndex = stages.findIndex((s) => s.id === workflow.stage);
+  const currentIndex = stages.findIndex((s) => s.id === effectiveStage);
   const effectiveIndex =
-    currentIndex === -1 && workflow.stage === 'Vetted & Returned to Chief Examiner'
+    currentIndex === -1 && effectiveStage === 'Vetted & Returned to Chief Examiner'
       ? 4
       : currentIndex;
 
@@ -8764,7 +11469,7 @@ function PaperTrackingPanel({
           </p>
           <p className="mt-1 text-sm text-slate-700">
             The paper is currently in{' '}
-            <span className="font-semibold text-indigo-700">{workflow.stage}</span>
+            <span className="font-semibold text-indigo-700">{effectiveStage}</span>
           </p>
         </div>
 
@@ -10206,6 +12911,94 @@ function WorkflowOrchestration({
   );
 }
 
+interface VettingRecordCardProps {
+  record: VettingSessionRecord;
+  papersToDisplay: SubmittedPaper[];
+}
+
+function VettingRecordCard({ record, papersToDisplay }: VettingRecordCardProps) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const paper = papersToDisplay.find(p => p.id === record.paperId);
+  
+  return (
+    <div
+      className="rounded-lg border-2 border-slate-200 bg-white p-3 shadow-sm hover:shadow-md transition-all cursor-pointer"
+      onClick={() => setIsExpanded(!isExpanded)}
+    >
+      <div className="flex items-center justify-between">
+        <div className="flex-1">
+          <p className="text-xs font-bold text-slate-800">{record.paperName}</p>
+          <p className="text-[0.65rem] text-slate-600">
+            {record.courseCode} - {record.courseUnit} • {new Date(record.completedAt).toLocaleString()}
+          </p>
+          <p className="text-[0.6rem] text-slate-500 mt-1">
+            {record.vetters.length} vetter(s) • {record.annotations.length} annotation(s) • {record.durationMinutes} min
+          </p>
+        </div>
+        <div className="ml-2">
+          <span className="text-xs">{isExpanded ? '▼' : '▶'}</span>
+        </div>
+      </div>
+      
+      {isExpanded && (
+        <div className="mt-3 pt-3 border-t border-slate-200 space-y-3">
+          <div>
+            <p className="text-[0.65rem] font-semibold text-slate-700 mb-1">Vetters:</p>
+            {record.vetters.map(vetter => (
+              <div key={vetter.vetterId} className="text-[0.6rem] text-slate-600 ml-2">
+                - {vetter.vetterName} ({vetter.violations} violations, {vetter.warnings.length} warnings)
+              </div>
+            ))}
+          </div>
+          
+          {record.annotations.length > 0 && (
+            <div>
+              <p className="text-[0.65rem] font-semibold text-slate-700 mb-1">Annotations:</p>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {record.annotations.map(ann => (
+                  <div key={ann.id} className="text-[0.6rem] text-slate-600 ml-2 p-1 bg-slate-50 rounded">
+                    <span className="font-semibold">{ann.author}:</span> {ann.comment}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          
+          {record.checklistComments.size > 0 && (
+            <div>
+              <p className="text-[0.65rem] font-semibold text-slate-700 mb-1">Checklist Comments:</p>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {Array.from(record.checklistComments.entries()).map(([key, comment]) => (
+                  <div key={key} className="text-[0.6rem] text-blue-600 ml-2 p-1 bg-blue-50 rounded">
+                    <span className="font-semibold">{comment.vetterName}:</span> {comment.comment}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          
+          {record.vetters.some(v => v.warnings.length > 0) && (
+            <div>
+              <p className="text-[0.65rem] font-semibold text-slate-700 mb-1">Warnings & Violations:</p>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {record.vetters.flatMap(vetter => 
+                  vetter.warnings.map(w => (
+                    <div key={w.id} className={`text-[0.6rem] ml-2 p-1 rounded ${
+                      w.severity === 'critical' ? 'bg-red-50 text-red-800' : 'bg-amber-50 text-amber-800'
+                    }`}>
+                      <span className="font-semibold">{vetter.vetterName} - {w.type}:</span> {w.message}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface ActionButtonProps {
   label: string;
   description: string;
@@ -10265,7 +13058,22 @@ interface VettingAndAnnotationsProps {
   onStartVetting: (minutes: number) => void;
   onCompleteVetting: () => void;
   onAddAnnotation: (comment: string) => void;
+  submittedPapers?: SubmittedPaper[];
+  moderationSchedule?: ModerationSchedule;
+  onScheduleModeration?: (startDateTime: string) => void;
+  moderationStartCountdown?: string | null;
+  moderationEndCountdown?: string | null;
   sectionId?: string;
+  currentUserId?: string;
+  joinedVetters?: Set<string>;
+  vetterMonitoring?: Map<string, VetterMonitoring>;
+  logVetterWarning?: (vetterId: string, type: VetterWarning['type'], message: string, severity?: 'warning' | 'critical') => void;
+  checklistComments?: Map<string, { comment: string; vetterName: string; timestamp: number; color: string }>;
+  onChecklistCommentChange?: (key: string, comment: string | null) => void;
+  onEndSession?: () => void;
+  onApprove?: (notes: string) => void;
+  onReject?: (notes: string, newDeadline?: { days: number; hours: number; minutes: number }) => void;
+  vettingSessionRecords?: VettingSessionRecord[];
 }
 
 function VettingAndAnnotations({
@@ -10279,38 +13087,215 @@ function VettingAndAnnotations({
   onStartVetting,
   onCompleteVetting,
   onAddAnnotation,
+  submittedPapers = [],
+  moderationSchedule,
+  onScheduleModeration,
+  moderationStartCountdown,
+  moderationEndCountdown,
   sectionId,
+          currentUserId,
+          joinedVetters = new Set(),
+          vetterMonitoring,
+          logVetterWarning,
+          checklistComments = new Map(),
+          onChecklistCommentChange,
+          onEndSession,
+          onApprove,
+          onReject,
+          vettingSessionRecords = [],
 }: VettingAndAnnotationsProps) {
-  const [duration, setDuration] = useState(45);
   const [annotationDraft, setAnnotationDraft] = useState('');
+  
+  // State for editing checklist comments
+  const [editingComment, setEditingComment] = useState<string | null>(null);
+  const [editCommentText, setEditCommentText] = useState('');
+  
+  // Use submittedPapers from props
+  const papersToDisplay = submittedPapers.length > 0 ? submittedPapers : [];
+  
+  // Default to 30 minutes from now for start
+  const defaultStartDateTime = new Date(Date.now() + 30 * 60 * 1000).toISOString().slice(0, 16);
+  
+  // Helper component to render checklist item with comment functionality
+  const ChecklistItem = ({ item, category, bulletColor }: { item: string; category: string; bulletColor: string }) => {
+    const commentKey = `${category}-${item}`;
+    const comment = checklistComments?.get(commentKey);
+    const isEditing = editingComment === commentKey;
+    
+    return (
+      <li className="space-y-1.5">
+        <div className="flex items-start gap-2">
+          <span className="mt-0.5 h-1.5 w-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: bulletColor }} />
+          <span className="leading-relaxed flex-1">{item}</span>
+        </div>
+        {/* Comment section - editable by vetters who have joined the session */}
+        {isVetter && vetterHasJoined && (
+          <div className="ml-5 space-y-1">
+            {!isEditing ? (
+              <button
+                onClick={() => {
+                  setEditingComment(commentKey);
+                  setEditCommentText(comment?.comment || '');
+                }}
+                className="text-[0.6rem] text-blue-600 hover:text-blue-800 font-semibold"
+              >
+                {comment ? 'Edit Comment' : '+ Add Comment'}
+              </button>
+            ) : (
+              <div className="space-y-1">
+                <textarea
+                  value={editCommentText}
+                  onChange={(e) => setEditCommentText(e.target.value)}
+                  placeholder="Add your comment here..."
+                  className="w-full rounded border border-blue-300 bg-white px-2 py-1 text-[0.65rem] text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/40 resize-none"
+                  rows={2}
+                />
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => {
+                      if (editCommentText.trim() && onChecklistCommentChange) {
+                        onChecklistCommentChange(commentKey, editCommentText.trim());
+                      } else if (!editCommentText.trim() && onChecklistCommentChange) {
+                        onChecklistCommentChange(commentKey, null);
+                      }
+                      setEditingComment(null);
+                      setEditCommentText('');
+                    }}
+                    className="text-[0.6rem] bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600"
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEditCommentText(comment?.comment || '');
+                      setEditingComment(null);
+                    }}
+                    className="text-[0.6rem] bg-slate-300 text-slate-700 px-2 py-1 rounded hover:bg-slate-400"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            {comment && !isEditing && (
+              <div className="ml-0 mt-1 p-2 rounded bg-blue-50 border border-blue-200">
+                <p className="text-[0.65rem] text-blue-900 leading-relaxed" style={{ color: comment.color }}>
+                  {comment.comment}
+                </p>
+                <p className="text-[0.55rem] text-blue-600 mt-1">
+                  - {comment.vetterName} ({new Date(comment.timestamp).toLocaleTimeString()})
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+        {/* Show comments to Chief Examiner */}
+        {isChiefExaminer && comment && (
+          <div className="ml-5 mt-1 p-2 rounded bg-blue-50 border border-blue-200">
+            <p className="text-[0.65rem] text-blue-900 leading-relaxed" style={{ color: comment.color }}>
+              {comment.comment}
+            </p>
+            <p className="text-[0.55rem] text-blue-600 mt-1">
+              - {comment.vetterName} ({new Date(comment.timestamp).toLocaleTimeString()})
+            </p>
+          </div>
+        )}
+      </li>
+    );
+  };
+  
+  const [startDateTime, setStartDateTime] = useState(defaultStartDateTime);
+  
+  // Calculate duration from scheduled times or use default
+  const calculatedDuration = useMemo(() => {
+    if (moderationSchedule?.scheduledStartTime && moderationSchedule?.scheduledEndTime) {
+      const diffMs = moderationSchedule.scheduledEndTime - moderationSchedule.scheduledStartTime;
+      return Math.max(5, Math.floor(diffMs / (60 * 1000))); // Convert to minutes, minimum 5
+    }
+    return 45; // Default fallback
+  }, [moderationSchedule]);
+
+  // Custom session duration state - allow user to customize
+  const [customDuration, setCustomDuration] = useState<number>(calculatedDuration);
+  
+  // Update custom duration when calculated duration changes (but only if not already set by user)
+  useEffect(() => {
+    if (!vettingSession.active) {
+      setCustomDuration(calculatedDuration);
+    }
+  }, [calculatedDuration, vettingSession.active]);
+  const [selectedPaper, setSelectedPaper] = useState<SubmittedPaper | null>(
+    papersToDisplay.find(p => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0] || null
+  );
+  
+  // Update selected paper when papers change
+  useEffect(() => {
+    if (papersToDisplay.length > 0 && !selectedPaper) {
+      setSelectedPaper(papersToDisplay.find(p => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0] || null);
+    }
+  }, [papersToDisplay.length, selectedPaper]);
+
+  // Check if scheduled start time has been reached
+  // The countdown becomes null when the scheduled time has been reached
+  // This is calculated in the parent component using currentTime which updates every second
+  const isScheduledTimeReached = useMemo(() => {
+    if (!moderationSchedule?.scheduled) {
+      return true; // No schedule, allow starting anytime
+    }
+    // If countdown is null, it means currentTime >= scheduledStartTime (from parent calculation)
+    // So the scheduled time has definitely been reached
+    if (moderationStartCountdown === null) {
+      return true; // Countdown finished, time reached
+    }
+    // If countdown exists, time hasn't been reached yet
+    return false;
+  }, [moderationSchedule, moderationStartCountdown]);
 
   const canStartSession =
     userHasRole('Vetter') &&
     (workflowStage === 'Compiled for Vetting' ||
       workflowStage === 'Vetting Session Expired') &&
-    !vettingSession.active;
+    !vettingSession.active &&
+    isScheduledTimeReached;
+
+  // Debug logging (remove in production)
+  useEffect(() => {
+    if (moderationSchedule?.scheduled) {
+      console.log('Session start check:', {
+        hasVetterRole: userHasRole('Vetter'),
+        workflowStage,
+        sessionActive: vettingSession.active,
+        isScheduledTimeReached,
+        countdown: moderationStartCountdown,
+        canStart: canStartSession,
+      });
+    }
+  }, [moderationSchedule, workflowStage, vettingSession.active, isScheduledTimeReached, moderationStartCountdown, canStartSession, userHasRole]);
 
   const canCompleteSession =
     userHasRole('Vetter') &&
     vettingSession.active &&
     workflowStage === 'Vetting in Progress';
 
+  // When session is active and safe browser is enabled, all controls should be active
+  const isSafeBrowserActive = vettingSession.active && vettingSession.safeBrowserEnabled;
+  
   const safeBrowserStatus = [
     {
       label: 'Camera On',
-      active: vettingSession.active ? vettingSession.cameraOn : true,
+      active: isSafeBrowserActive && (vettingSession.cameraOn ?? true),
     },
     {
       label: 'Screenshots Blocked',
-      active: vettingSession.active ? vettingSession.screenshotBlocked : true,
+      active: isSafeBrowserActive && (vettingSession.screenshotBlocked ?? true),
     },
     {
       label: 'Tab Switching Disabled',
-      active: vettingSession.active ? vettingSession.switchingLocked : true,
+      active: isSafeBrowserActive && (vettingSession.switchingLocked ?? true),
     },
     {
       label: 'Timer Guarding Session',
-      active: vettingSession.active,
+      active: vettingSession.active && !!vettingSession.expiresAt,
     },
   ];
 
@@ -10320,6 +13305,19 @@ function VettingAndAnnotations({
     setAnnotationDraft('');
   };
 
+  const isChiefExaminer = userHasRole('Chief Examiner');
+  const isVetter = userHasRole('Vetter');
+  
+  // Check if current vetter has joined the session
+  const vetterHasJoined = currentUserId ? joinedVetters.has(currentUserId) : false;
+  
+  // Vetters can only see paper/checklist after they've joined
+  // Chief Examiner can always see everything
+  const canViewPaperAndChecklist = isChiefExaminer || (isVetter && vetterHasJoined);
+  
+  // Vetters can start their session only when global session is active and they haven't joined yet
+  const canVetterStartSession = isVetter && vettingSession.active && !vetterHasJoined;
+
   return (
     <SectionCard
       id={sectionId}
@@ -10327,7 +13325,21 @@ function VettingAndAnnotations({
       kicker="Safe Browser & Real-Time Sync"
       description="Enforce safe browser rules, coordinate real-time annotation, and cross-reference moderation checklists."
       actions={
-        vettingSession.active && vettingCountdown ? (
+        moderationStartCountdown ? (
+          <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-center text-sm font-semibold text-amber-700">
+            Moderation Begins In
+            <div className="mt-1 text-2xl tracking-widest text-amber-800">
+              {moderationStartCountdown}
+            </div>
+          </div>
+        ) : moderationEndCountdown ? (
+          <div className="rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-center text-sm font-semibold text-blue-700">
+            Moderation Ends In
+            <div className="mt-1 text-2xl tracking-widest text-blue-800">
+              {moderationEndCountdown}
+            </div>
+          </div>
+        ) : vettingSession.active && vettingCountdown ? (
           <div className="rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-center text-sm font-semibold text-blue-700">
             Session Countdown
             <div className="mt-1 text-2xl tracking-widest text-blue-800">
@@ -10345,171 +13357,923 @@ function VettingAndAnnotations({
     >
       <div className="grid gap-5 lg:grid-cols-[2fr_1fr]">
         <div className="space-y-5">
-          <div className="rounded-2xl border border-slate-200 bg-white p-5">
-            <h3 className="text-sm font-semibold text-slate-800">
-              Safe Browser Controls
-            </h3>
-            <p className="mt-1 text-xs text-slate-500">
-              Session enforces secure vetting environment from login to logout.
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {safeBrowserStatus.map((item) => (
-                <StatusPill
-                  key={item.label}
-                  label={item.label}
-                  active={item.active}
-                  tone={item.active ? 'blue' : 'amber'}
-                />
-              ))}
-            </div>
-
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <div>
-                <label
-                  htmlFor="session-minutes"
-                  className="text-xs font-semibold uppercase tracking-wide text-slate-600"
-                >
-                  Session Duration (minutes)
-                </label>
-                <input
-                  id="session-minutes"
-                  type="number"
-                  min={5}
-                  max={180}
-                  value={duration}
-                  onChange={(event) =>
-                    setDuration(Number.parseInt(event.target.value, 10))
-                  }
-                  className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
-                />
+          {/* Paper Viewer - Only visible to Chief Examiner or vetters who have joined */}
+          {canViewPaperAndChecklist && papersToDisplay.length > 0 && (
+            <div className="group relative overflow-hidden rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50 via-indigo-50 to-cyan-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+              {/* Animated background effects */}
+              <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+                <div className="absolute inset-0 bg-gradient-to-br from-blue-400/10 via-indigo-400/10 to-cyan-400/10"></div>
+                <div className="absolute top-0 left-0 w-32 h-32 bg-gradient-to-br from-blue-300/20 to-cyan-300/20 rounded-full blur-3xl transform -translate-x-1/2 -translate-y-1/2"></div>
               </div>
-              <div className="flex items-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => onStartVetting(duration)}
-                  disabled={!canStartSession}
-                  className="flex-1 rounded-xl bg-blue-500/90 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-blue-500/40 disabled:text-emerald-900"
-                >
-                  Start Safe Session
-                </button>
-                <button
-                  type="button"
-                  onClick={onCompleteVetting}
-                  disabled={!canCompleteSession}
-                  className="flex-1 rounded-xl bg-amber-400/90 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:bg-amber-500/40 disabled:text-amber-900"
-                >
-                  Complete Vetting
-                </button>
+              
+              <div className="relative z-10">
+                <div className="mb-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-md">
+                      <span className="text-white text-sm">📄</span>
+                    </div>
+                    <h3 className="text-xs font-bold text-slate-800">
+                      Exam Paper
+                    </h3>
+                  </div>
+                  {papersToDisplay.length > 1 && (
+                    <select
+                      value={selectedPaper?.id || ''}
+                      onChange={(e) => {
+                        const paper = papersToDisplay.find(p => p.id === e.target.value);
+                        setSelectedPaper(paper || null);
+                      }}
+                      className="rounded-lg border-2 border-blue-200 bg-white px-2 py-1 text-[0.65rem] text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 shadow-sm hover:shadow-md transition-all"
+                    >
+                      {papersToDisplay.map((paper) => (
+                        <option key={paper.id} value={paper.id}>
+                          {paper.fileName}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+                {selectedPaper ? (
+                  <div className="space-y-2.5">
+                    <div className="rounded-lg border border-blue-200/50 bg-white/80 backdrop-blur-sm p-2.5">
+                      <p className="text-[0.65rem] font-semibold text-slate-600 mb-0.5">File</p>
+                      <p className="text-xs font-bold text-slate-800 truncate">{selectedPaper.fileName}</p>
+                    </div>
+                    <div className="rounded-lg border border-indigo-200/50 bg-white/80 backdrop-blur-sm p-2.5">
+                      <p className="text-[0.65rem] font-semibold text-slate-600 mb-0.5">Course</p>
+                      <p className="text-xs font-bold text-slate-800">{selectedPaper.courseCode}</p>
+                    </div>
+                    {selectedPaper.fileUrl ? (
+                      <div className="space-y-2">
+                        <button
+                          onClick={async () => {
+                            if (!selectedPaper.fileUrl) return;
+                            
+                            // For vetters, open in new tab with fullscreen restrictions
+                            if (isVetter && vetterHasJoined) {
+                              const { data } = supabase.storage
+                                .from('exam_papers')
+                                .getPublicUrl(selectedPaper.fileUrl);
+                              
+                              if (data?.publicUrl) {
+                                // Open in new window with specific features for fullscreen
+                                const newWindow = window.open(
+                                  data.publicUrl,
+                                  '_blank',
+                                  'width=1920,height=1080,fullscreen=yes,scrollbars=yes,resizable=yes'
+                                );
+                                
+                                if (newWindow) {
+                                  // Try to make it fullscreen after load
+                                  newWindow.addEventListener('load', () => {
+                                    try {
+                                      if (newWindow.document.documentElement.requestFullscreen) {
+                                        newWindow.document.documentElement.requestFullscreen();
+                                      }
+                                    } catch (e) {
+                                      console.log('Fullscreen request failed:', e);
+                                    }
+                                  });
+                                  
+                                  // Block other tabs/windows from opening
+                                  setTimeout(() => {
+                                    const checkWindow = setInterval(() => {
+                                      if (newWindow.closed) {
+                                        clearInterval(checkWindow);
+                                      } else {
+                                        // Prevent opening other tabs
+                                        try {
+                                          newWindow.document.addEventListener('keydown', (e: KeyboardEvent) => {
+                                            if ((e.ctrlKey || e.metaKey) && (e.key === 't' || e.key === 'w' || e.key === 'n')) {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                            }
+                                          }, true);
+                                        } catch (err) {
+                                          // Ignore cross-origin errors
+                                        }
+                                      }
+                                    }, 1000);
+                                    
+                                    // Clean up interval after 5 minutes
+                                    setTimeout(() => clearInterval(checkWindow), 300000);
+                                  }, 1000);
+                                }
+                              }
+                            } else if (isChiefExaminer) {
+                              // For Chief Examiner, normal link behavior
+                              const { data } = supabase.storage
+                                .from('exam_papers')
+                                .getPublicUrl(selectedPaper.fileUrl);
+                              if (data?.publicUrl) {
+                                window.open(data.publicUrl, '_blank');
+                              }
+                            } else {
+                              // For vetters who haven't joined yet, show message
+                              alert('Please start your vetting session first by clicking "Start Session (Enable Camera)" button.');
+                            }
+                          }}
+                          className="block w-full rounded-lg bg-gradient-to-r from-blue-500 via-indigo-500 to-cyan-500 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 text-center relative overflow-hidden group"
+                        >
+                          <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                          <span className="relative z-10 flex items-center justify-center gap-1.5">
+                            <span>📄</span>
+                            <span>View Paper</span>
+                          </span>
+                        </button>
+                        
+                        {/* Action Buttons - Show after vetting is complete - ALWAYS SHOW ON VETTED PAPERS */}
+                        {isChiefExaminer && selectedPaper && selectedPaper.status === 'vetted' && (
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const notes = prompt('Optional notes for approval:') || '';
+                                if (onApprove) {
+                                  onApprove(notes);
+                                }
+                              }}
+                              className="flex-1 rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+                            >
+                              ✓ Push to Next Stage
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const notes = prompt('Rejection feedback (required):') || '';
+                                if (!notes.trim()) {
+                                  alert('Please provide feedback notes when rejecting a paper.');
+                                  return;
+                                }
+                                
+                                // Prompt for new deadline
+                                const days = parseInt(prompt('Set new deadline - Days:', '3') || '0') || 0;
+                                const hours = parseInt(prompt('Set new deadline - Hours:', '0') || '0') || 0;
+                                const minutes = parseInt(prompt('Set new deadline - Minutes:', '0') || '0') || 0;
+                                
+                                if (days === 0 && hours === 0 && minutes === 0) {
+                                  if (!confirm('No deadline set. Continue without deadline?')) {
+                                    return;
+                                  }
+                                }
+                                
+                                if (onReject) {
+                                  onReject(notes, days || hours || minutes ? { days, hours, minutes } : undefined);
+                                }
+                              }}
+                              className="flex-1 rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+                            >
+                              ✗ Rejected
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="rounded-lg border-2 border-amber-200 bg-amber-50/80 p-2.5 text-center">
+                        <p className="text-[0.65rem] text-amber-700">File not available</p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500">No paper selected</p>
+                )}
               </div>
             </div>
+          )}
 
-            <ul className="mt-4 space-y-2 text-sm text-slate-700">
-              {safeBrowserPolicies.map((policy) => (
-                <li key={policy} className="flex items-start gap-2">
-                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                  <span>{policy}</span>
-                </li>
-              ))}
-            </ul>
+          {/* Moderation Scheduling - Chief Examiner Only */}
+          {isChiefExaminer && onScheduleModeration && (
+            <div className="group relative overflow-hidden rounded-xl border-2 border-purple-300/50 bg-gradient-to-br from-purple-50 via-indigo-50 to-pink-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+              {/* Animated background effects */}
+              <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+                <div className="absolute inset-0 bg-gradient-to-br from-purple-400/10 via-indigo-400/10 to-pink-400/10"></div>
+                <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-purple-300/20 to-pink-300/20 rounded-full blur-3xl transform translate-x-1/2 -translate-y-1/2"></div>
+              </div>
+              
+              <div className="relative z-10">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 shadow-md">
+                    <span className="text-white text-sm">📅</span>
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-800">
+                      Schedule Moderation
+                    </h3>
+                    <p className="text-[0.65rem] text-slate-600">
+                      Set start date & time
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="space-y-3">
+                  <div className="relative">
+                    <label className="block text-[0.65rem] font-bold uppercase tracking-wide text-slate-700 mb-1.5">
+                      Start Date & Time
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={startDateTime}
+                      onChange={(e) => setStartDateTime(e.target.value)}
+                      className="w-full rounded-lg border-2 border-purple-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40 shadow-sm hover:shadow-md transition-all"
+                    />
+                  </div>
+                  
+                  <button
+                    type="button"
+                    onClick={() => onScheduleModeration(startDateTime)}
+                    className="w-full rounded-lg bg-gradient-to-r from-purple-500 via-indigo-500 to-pink-500 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
+                  >
+                    <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                    <span className="relative z-10 flex items-center justify-center gap-1.5">
+                      <span>✓</span>
+                      <span>Schedule Session</span>
+                    </span>
+                  </button>
+                  
+                  {moderationSchedule?.scheduled && moderationSchedule.startDateTime && (
+                    <div className="rounded-lg border-2 border-green-300 bg-gradient-to-r from-green-50 to-emerald-50 p-2.5">
+                      <p className="text-[0.65rem] font-bold text-green-700 flex items-center gap-1">
+                        <span>✓</span>
+                        <span>Scheduled</span>
+                      </p>
+                      <p className="text-[0.6rem] text-green-600 mt-1">
+                        Starts: {new Date(moderationSchedule.startDateTime).toLocaleString()}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="group relative overflow-hidden rounded-xl border-2 border-emerald-200/50 bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+            {/* Animated background effects */}
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+              <div className="absolute inset-0 bg-gradient-to-br from-emerald-400/10 via-teal-400/10 to-cyan-400/10"></div>
+              <div className="absolute bottom-0 right-0 w-32 h-32 bg-gradient-to-br from-emerald-300/20 to-cyan-300/20 rounded-full blur-3xl transform translate-x-1/2 translate-y-1/2"></div>
+            </div>
+            
+            <div className="relative z-10">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 shadow-md">
+                  <span className="text-white text-sm">🔒</span>
+                </div>
+                <div>
+                  <h3 className="text-xs font-bold text-slate-800">
+                    Safe Browser Controls
+                  </h3>
+                  <p className="text-[0.65rem] text-slate-600">
+                    Secure vetting environment
+                  </p>
+                </div>
+              </div>
+              
+              <div className="mb-3 flex flex-wrap gap-1.5">
+                {safeBrowserStatus.map((item) => (
+                  <div
+                    key={item.label}
+                    className={`rounded-lg px-2 py-1 text-[0.65rem] font-semibold border-2 transition-all ${
+                      item.active
+                        ? 'bg-blue-100 border-blue-300 text-blue-700 shadow-sm'
+                        : 'bg-amber-100 border-amber-300 text-amber-700 shadow-sm'
+                    }`}
+                  >
+                    {item.label}
+                  </div>
+                ))}
+              </div>
+
+              <div className="space-y-2.5">
+                <div>
+                  <label
+                    htmlFor="session-minutes"
+                    className="block text-[0.65rem] font-bold uppercase tracking-wide text-slate-700 mb-1.5"
+                  >
+                    Session Duration (minutes)
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="session-minutes"
+                      type="number"
+                      min={5}
+                      max={180}
+                      value={vettingSession.active && vettingSession.durationMinutes ? vettingSession.durationMinutes : customDuration}
+                      onChange={(e) => {
+                        const value = parseInt(e.target.value) || calculatedDuration;
+                        setCustomDuration(Math.max(5, Math.min(180, value)));
+                      }}
+                      disabled={vettingSession.active}
+                      className="w-full rounded-lg border-2 border-emerald-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 shadow-sm hover:shadow-md transition-all disabled:bg-emerald-50/50 disabled:cursor-not-allowed"
+                    />
+                    {!vettingSession.active && (
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                        <span className="text-[0.65rem] text-emerald-600 font-semibold">
+                          min
+                        </span>
+                      </div>
+                    )}
+                    {vettingSession.active && (
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                        <span className="text-[0.65rem] text-emerald-600 font-semibold">
+                          Active
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <p className="mt-1 text-[0.6rem] text-slate-600">
+                    {vettingSession.active 
+                      ? `Session active. ${vettingCountdown ? `Time remaining: ${vettingCountdown}` : 'Time expired'}`
+                      : moderationSchedule?.scheduled && moderationStartCountdown
+                      ? `Waiting for scheduled time... ${moderationStartCountdown} remaining`
+                      : moderationSchedule?.scheduled 
+                      ? `Scheduled time reached. Ready to start session.`
+                      : `Set schedule to auto-calculate`}
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {/* Start Session button - different behavior for Chief Examiner vs Vetter */}
+                  {isChiefExaminer ? (
+                    // Chief Examiner: Start global session or End session
+                    vettingSession.active ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (onEndSession) {
+                            if (confirm('Are you sure you want to end the vetting session? This will terminate all active vetter sessions.')) {
+                              onEndSession();
+                            }
+                          }
+                        }}
+                        className="rounded-lg bg-gradient-to-r from-red-500 to-rose-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
+                      >
+                        <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                        <span className="relative z-10">End Session</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onStartVetting(customDuration)}
+                        className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
+                      >
+                        <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                        <span className="relative z-10">Start Session</span>
+                      </button>
+                    )
+                  ) : (
+                    // Vetter: Join session (only shown when global session is active and they haven't joined)
+                    canVetterStartSession && (
+                      <button
+                        type="button"
+                        onClick={() => onStartVetting(customDuration)}
+                        className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
+                      >
+                        <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                        <span className="relative z-10">Start Session (Enable Camera)</span>
+                      </button>
+                    )
+                  )}
+                  {/* Complete button - only for vetters who have joined */}
+                  {isVetter && vetterHasJoined && (
+                    <button
+                      type="button"
+                      onClick={onCompleteVetting}
+                      className="rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
+                    >
+                      <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                      <span className="relative z-10">Complete</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
 
-          <div className="rounded-2xl border border-slate-200 bg-white p-5">
-            <h3 className="text-sm font-semibold text-slate-800">
-              Real-Time Digital Annotation
-            </h3>
-            <p className="mt-1 text-xs text-slate-500">
-              Comments synchronise instantly so vetters see collective feedback.
-            </p>
-            <form
-              onSubmit={handleAnnotationSubmit}
-              className="mt-3 flex flex-col gap-3 sm:flex-row"
-            >
-              <input
-                value={annotationDraft}
-                onChange={(event) => setAnnotationDraft(event.target.value)}
-                placeholder="Add annotation (Bloom’s taxonomy reference, etc.)"
-                className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60"
-                disabled={!vettingSession.active}
-              />
-              <button
-                type="submit"
-                disabled={!vettingSession.active}
-                className="rounded-xl bg-blue-500/90 px-4 py-2 text-sm font-semibold text-indigo-950 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-blue-500/40 disabled:text-indigo-900"
-              >
-                Publish Comment
-              </button>
-            </form>
-            <div className="mt-4 max-h-64 space-y-3 overflow-y-auto">
-              {annotations.length === 0 ? (
-                <p className="text-xs text-slate-500">
-                  No annotations posted yet. Start the vetting session to add
-                  synchronized comments.
-                </p>
-              ) : (
-                annotations.map((annotation) => (
-                  <div
-                    key={annotation.id}
-                    className="rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-700"
-                  >
-                    <p className="text-sm text-slate-900">
-                      “{annotation.comment}”
-                    </p>
-                    <div className="mt-2 flex items-center justify-between">
-                      <span className="font-semibold text-blue-700">
-                        {annotation.author}
-                      </span>
-                      <span className="text-slate-500">
-                        {formatTimestamp(annotation.timestamp)}
-                      </span>
-                    </div>
+          {/* Real-Time Annotations - Only visible to Chief Examiner or vetters who have joined */}
+          {canViewPaperAndChecklist && (
+            <div className="group relative overflow-hidden rounded-xl border-2 border-indigo-200/50 bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+              {/* Animated background effects */}
+              <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+                <div className="absolute inset-0 bg-gradient-to-br from-indigo-400/10 via-purple-400/10 to-pink-400/10"></div>
+                <div className="absolute top-0 left-0 w-32 h-32 bg-gradient-to-br from-indigo-300/20 to-pink-300/20 rounded-full blur-3xl transform -translate-x-1/2 -translate-y-1/2"></div>
+              </div>
+              
+              <div className="relative z-10">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 shadow-md">
+                    <span className="text-white text-sm">💬</span>
                   </div>
-                ))
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-800">
+                      Real-Time Annotations
+                    </h3>
+                    <p className="text-[0.65rem] text-slate-600">
+                      Synchronized comments
+                    </p>
+                  </div>
+                </div>
+                
+                <form
+                  onSubmit={handleAnnotationSubmit}
+                  className="space-y-2.5"
+                >
+                  <input
+                    value={annotationDraft}
+                    onChange={(event) => setAnnotationDraft(event.target.value)}
+                    placeholder="Add annotation (Bloom's taxonomy reference, etc.)"
+                    className="w-full rounded-lg border-2 border-indigo-200 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 shadow-sm hover:shadow-md transition-all disabled:opacity-60"
+                    disabled={!vettingSession.active || (isVetter && !vetterHasJoined)}
+                  />
+                  <button
+                    type="submit"
+                    disabled={!vettingSession.active || (isVetter && !vetterHasJoined)}
+                    className="w-full rounded-lg bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 relative overflow-hidden group"
+                  >
+                    <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                    <span className="relative z-10 flex items-center justify-center gap-1.5">
+                      <span>📤</span>
+                      <span>Publish Comment</span>
+                    </span>
+                  </button>
+                </form>
+              <div className="mt-3 max-h-48 space-y-2 overflow-y-auto pr-1">
+                {annotations.length === 0 ? (
+                  <p className="text-[0.65rem] text-slate-500 text-center py-4">
+                    No annotations yet. Start session to add comments.
+                  </p>
+                ) : (
+                  annotations.map((annotation) => (
+                    <div
+                      key={annotation.id}
+                      className="group/ann relative overflow-hidden rounded-lg border border-indigo-200/50 bg-white/80 backdrop-blur-sm p-2.5 text-[0.65rem] text-slate-700 shadow-sm hover:shadow-md transition-all"
+                    >
+                      <p className="text-xs font-semibold text-slate-900 mb-1.5">
+                        "{annotation.comment}"
+                      </p>
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-indigo-700 text-[0.65rem]">
+                          {annotation.author}
+                        </span>
+                        <span className="text-slate-500 text-[0.6rem]">
+                          {formatTimestamp(annotation.timestamp)}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+
+        {/* Moderation Checklist - Only visible to Chief Examiner or vetters who have joined */}
+        {canViewPaperAndChecklist && (
+          <div className="space-y-4">
+            {/* Download Checklist Button - Only for Chief Examiner */}
+            {isChiefExaminer && checklistComments && checklistComments.size > 0 && (
+              <div className="flex justify-end mb-4">
+                <button
+                  onClick={() => {
+                    // Generate downloadable checklist with comments
+                    let checklistText = 'MODERATION CHECKLIST WITH VETTER COMMENTS\n';
+                    checklistText += '=' .repeat(50) + '\n\n';
+                    
+                    checklistText += 'COURSE OUTLINE\n';
+                    checklistText += '-'.repeat(30) + '\n';
+                    digitalChecklist.courseOutline.forEach((item) => {
+                      const commentKey = `courseOutline-${item}`;
+                      const comment = checklistComments.get(commentKey);
+                      checklistText += `✓ ${item}\n`;
+                      if (comment) {
+                        checklistText += `  [Vetter Comment - ${comment.vetterName}]: ${comment.comment}\n`;
+                      }
+                      checklistText += '\n';
+                    });
+                    
+                    checklistText += '\nBLOOM\'S TAXONOMY\n';
+                    checklistText += '-'.repeat(30) + '\n';
+                    digitalChecklist.bloomsTaxonomy.forEach((item) => {
+                      const commentKey = `bloomsTaxonomy-${item}`;
+                      const comment = checklistComments.get(commentKey);
+                      checklistText += `✓ ${item}\n`;
+                      if (comment) {
+                        checklistText += `  [Vetter Comment - ${comment.vetterName}]: ${comment.comment}\n`;
+                      }
+                      checklistText += '\n';
+                    });
+                    
+                    checklistText += '\nCOMPLIANCE\n';
+                    checklistText += '-'.repeat(30) + '\n';
+                    digitalChecklist.compliance.forEach((item) => {
+                      const commentKey = `compliance-${item}`;
+                      const comment = checklistComments.get(commentKey);
+                      checklistText += `✓ ${item}\n`;
+                      if (comment) {
+                        checklistText += `  [Vetter Comment - ${comment.vetterName}]: ${comment.comment}\n`;
+                      }
+                      checklistText += '\n';
+                    });
+                    
+                    // Download as text file
+                    const blob = new Blob([checklistText], { type: 'text/plain' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `moderation-checklist-${new Date().toISOString().split('T')[0]}.txt`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    
+                    alert('Checklist with vetter comments downloaded successfully!');
+                  }}
+                  className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+                >
+                  📥 Download Checklist with Comments
+                </button>
+              </div>
+            )}
+            
+            <div className="group relative overflow-hidden rounded-xl border-2 border-emerald-200/50 bg-gradient-to-br from-emerald-50 via-green-50 to-teal-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+              <div className="absolute inset-0 bg-gradient-to-br from-emerald-400/10 via-green-400/10 to-teal-400/10"></div>
+            </div>
+            <div className="relative z-10">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-green-600 shadow-md">
+                  <span className="text-white text-sm">✓</span>
+                </div>
+                <h3 className="text-xs font-bold text-slate-800">
+                  Course Outline
+                </h3>
+              </div>
+              <ul className="space-y-2.5 text-[0.65rem] text-slate-700">
+                {digitalChecklist.courseOutline.map((item) => (
+                  <ChecklistItem key={item} item={item} category="courseOutline" bulletColor="#10b981" />
+                ))}
+              </ul>
+            </div>
+          </div>
+          
+          <div className="group relative overflow-hidden rounded-xl border-2 border-indigo-200/50 bg-gradient-to-br from-indigo-50 via-blue-50 to-purple-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+              <div className="absolute inset-0 bg-gradient-to-br from-indigo-400/10 via-blue-400/10 to-purple-400/10"></div>
+            </div>
+            <div className="relative z-10">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-blue-600 shadow-md">
+                  <span className="text-white text-sm">🧠</span>
+                </div>
+                <h3 className="text-xs font-bold text-slate-800">
+                  Bloom's Taxonomy
+                </h3>
+              </div>
+              <ul className="space-y-2.5 text-[0.65rem] text-slate-700">
+                {digitalChecklist.bloomsTaxonomy.map((item) => (
+                  <ChecklistItem key={item} item={item} category="bloomsTaxonomy" bulletColor="#6366f1" />
+                ))}
+              </ul>
+            </div>
+          </div>
+          
+          <div className="group relative overflow-hidden rounded-xl border-2 border-amber-200/50 bg-gradient-to-br from-amber-50 via-orange-50 to-yellow-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+              <div className="absolute inset-0 bg-gradient-to-br from-amber-400/10 via-orange-400/10 to-yellow-400/10"></div>
+            </div>
+            <div className="relative z-10">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 shadow-md">
+                  <span className="text-white text-sm">📋</span>
+                </div>
+                <h3 className="text-xs font-bold text-slate-800">
+                  Compliance
+                </h3>
+              </div>
+              <ul className="space-y-2.5 text-[0.65rem] text-slate-700">
+                {digitalChecklist.compliance.map((item) => (
+                  <ChecklistItem key={item} item={item} category="compliance" bulletColor="#f59e0b" />
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+        )}
+
+        {/* Chief Examiner Monitoring Panel - Shows vetter camera feeds and warnings - ALWAYS SHOW IF SESSION ACTIVE OR HAS COMPLETED RECORDS */}
+        {isChiefExaminer && (vettingSession.active || (vettingSessionRecords && vettingSessionRecords.length > 0)) && (
+          <div className="mt-5 space-y-4">
+            <div className="rounded-xl border-2 border-red-300/50 bg-gradient-to-br from-red-50 via-pink-50 to-orange-50 p-4 shadow-lg">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-red-500 to-pink-600 shadow-md">
+                    <span className="text-white text-lg">👁️</span>
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-800">
+                      Vetter Monitoring Dashboard
+                    </h3>
+                    <p className="text-xs text-slate-600">
+                      Real-time camera feeds and violation tracking
+                    </p>
+                  </div>
+                </div>
+                {/* Clear Records Button - Only show when session is not active and records exist */}
+                {!vettingSession.active && vettingSessionRecords && vettingSessionRecords.length > 0 && (
+                  <button
+                    onClick={() => {
+                      if (confirm('⚠️ Are you sure you want to clear ALL vetting session records? This action cannot be undone.')) {
+                        clearVettingRecords();
+                        alert('✅ All vetting session records have been cleared. You can now start a fresh session.');
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm transition-colors"
+                    title="Clear all vetting session records"
+                  >
+                    🗑️ Clear All Records
+                  </button>
+                )}
+              </div>
+
+              {/* Show message if no vetters have joined yet AND no completed sessions */}
+              {(!vettingSession.active || !vetterMonitoring || vetterMonitoring.size === 0) && (!vettingSessionRecords || vettingSessionRecords.length === 0) ? (
+                <div className="rounded-lg border-2 border-blue-200 bg-blue-50/30 p-4 text-center">
+                  <p className="text-sm font-semibold text-slate-700">
+                    Waiting for vetters to join...
+                  </p>
+                  <p className="text-xs text-slate-600 mt-1">
+                    Vetter camera feeds and warnings will appear here once they start their sessions.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2">
+                  {/* Live monitoring data - show during active session */}
+                  {vettingSession.active && vetterMonitoring && vetterMonitoring.size > 0 && Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
+                    const warnings = monitoring.warnings || [];
+                    const recentWarnings = warnings.slice(-10).reverse(); // Last 10 warnings, newest first
+                    const criticalWarnings = warnings.filter(w => w.severity === 'critical');
+                    
+                    return (
+                      <div
+                        key={vetterId}
+                        className={`rounded-lg border-2 p-3 ${
+                          monitoring.violations > 0
+                            ? 'border-red-300 bg-red-50/50'
+                            : 'border-blue-200 bg-blue-50/30'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between mb-3">
+                          <div>
+                            <h4 className="text-xs font-bold text-slate-800">
+                              {monitoring.vetterName}
+                            </h4>
+                            <p className="text-[0.65rem] text-slate-600">
+                              Joined: {new Date(monitoring.joinedAt).toLocaleTimeString()}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <div className={`text-xs font-bold ${
+                              monitoring.violations > 0 ? 'text-red-600' : 'text-green-600'
+                            }`}>
+                              {monitoring.violations} {monitoring.violations === 1 ? 'Violation' : 'Violations'}
+                            </div>
+                            <div className="text-[0.65rem] text-slate-600">
+                              {warnings.length} {warnings.length === 1 ? 'Warning' : 'Warnings'}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Camera Feed - LIVE VIDEO - ALWAYS SHOW TO CHIEF EXAMINER */}
+                        <div className="mb-3 rounded-lg overflow-hidden bg-slate-900 aspect-video relative border-2 border-green-500">
+                          {monitoring.cameraStream && monitoring.cameraStream.active ? (
+                            <>
+                              <div className="absolute top-2 left-2 z-10 bg-red-600 text-white text-[0.6rem] px-2 py-1 rounded font-bold flex items-center gap-1">
+                                <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse"></span>
+                                LIVE CAMERA
+                              </div>
+                              <video
+                                ref={(video) => {
+                                  if (video && monitoring.cameraStream) {
+                                    video.srcObject = monitoring.cameraStream;
+                                    video.play().catch(err => console.error('Camera playback error:', err));
+                                  }
+                                }}
+                                autoPlay
+                                playsInline
+                                muted
+                                className="w-full h-full object-cover"
+                              />
+                            </>
+                          ) : (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-900/90">
+                              <span className="text-white text-lg font-bold mb-2">⚠️ CAMERA OFF</span>
+                              <span className="text-white text-xs">Vetter camera is not active</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Critical Alerts - On-Screen Warnings That Appeared on Vetter's Screen - ALWAYS SHOW IF ANY */}
+                        {criticalWarnings.length > 0 ? (
+                          <div className="mb-3 space-y-1.5">
+                            <p className="text-[0.7rem] font-bold text-red-700 mb-2 flex items-center gap-1">
+                              🚨 CRITICAL ALERTS - What Vetter Saw ({criticalWarnings.length})
+                            </p>
+                            {criticalWarnings.slice(-10).reverse().map((warning) => (
+                              <div
+                                key={warning.id}
+                                className="bg-red-100 border-2 border-red-400 text-red-900 p-2 rounded animate-pulse"
+                              >
+                                <div className="flex items-start justify-between gap-2 mb-1">
+                                  <span className="font-bold text-[0.7rem]">⚠️ CRITICAL ALERT</span>
+                                  <span className="text-[0.6rem] opacity-75">
+                                    {new Date(warning.timestamp).toLocaleTimeString()}
+                                  </span>
+                                </div>
+                                <p className="text-[0.7rem] font-semibold leading-tight">
+                                  {warning.message}
+                                </p>
+                                <p className="text-[0.6rem] text-red-700 mt-1">
+                                  Type: {warning.type.replace(/_/g, ' ').toUpperCase()}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="mb-3 text-center py-2 bg-green-50 border border-green-200 rounded">
+                            <p className="text-[0.65rem] text-green-700 font-semibold">
+                              ✓ No critical alerts - Vetter following rules
+                            </p>
+                          </div>
+                        )}
+
+                        {/* All Warnings Log - ALWAYS SHOW ALL WARNINGS TO CHIEF EXAMINER */}
+                        {recentWarnings.length > 0 ? (
+                          <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                            <p className="text-[0.7rem] font-bold text-slate-800 mb-2 flex items-center gap-1">
+                              📋 Complete Activity Log ({warnings.length} total warnings):
+                            </p>
+                            {recentWarnings.map((warning) => (
+                              <div
+                                key={warning.id}
+                                className={`text-[0.65rem] p-2 rounded border ${
+                                  warning.severity === 'critical'
+                                    ? 'bg-red-100 border-red-300 text-red-900'
+                                    : 'bg-amber-100 border-amber-300 text-amber-900'
+                                }`}
+                              >
+                                <div className="flex items-start justify-between gap-2 mb-1">
+                                  <span className="font-bold text-[0.7rem]">
+                                    {warning.severity === 'critical' ? '🔴 CRITICAL' : '⚠️ WARNING'}: {warning.type.replace(/_/g, ' ').toUpperCase()}
+                                  </span>
+                                  <span className="text-[0.6rem] opacity-75 whitespace-nowrap">
+                                    {new Date(warning.timestamp).toLocaleTimeString()}
+                                  </span>
+                                </div>
+                                <p className="mt-0.5 leading-tight font-medium">{warning.message}</p>
+                              </div>
+                            ))}
+                            {warnings.length > 10 && (
+                              <p className="text-[0.6rem] text-slate-500 italic text-center pt-1">
+                                Showing last 10 warnings. Total: {warnings.length}
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-center py-2 bg-green-50 border border-green-200 rounded">
+                            <p className="text-[0.65rem] text-green-700 font-semibold">
+                              ✓ No warnings - Vetter following all rules
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  
+                  {/* Show completed session records - always show ALL completed sessions when session is not active */}
+                  {!vettingSession.active && vettingSessionRecords && vettingSessionRecords.length > 0 && (
+                    <div className="space-y-2">
+                      {vettingSessionRecords.map((record) => (
+                        <div key={record.id} className="rounded-lg border-2 border-blue-200 bg-blue-50/30 p-3">
+                          <h4 className="text-xs font-bold text-slate-800 mb-2">
+                            Completed Session: {record.paperName} ({new Date(record.completedAt).toLocaleString()})
+                          </h4>
+                          {record.vetters && record.vetters.map((vetter: any) => (
+                            <div key={vetter.vetterId} className="mb-2 p-2 bg-white rounded border border-blue-100">
+                              <p className="text-xs font-semibold text-slate-800">{vetter.vetterName}</p>
+                              <p className="text-[0.65rem] text-slate-600">
+                                Joined: {new Date(vetter.joinedAt).toLocaleTimeString()} | 
+                                Violations: {vetter.violations || 0} | 
+                                Warnings: {(vetter.warnings && vetter.warnings.length) || 0}
+                              </p>
+                              {vetter.warnings && vetter.warnings.length > 0 && (
+                                <div className="mt-1 space-y-1 max-h-20 overflow-y-auto">
+                                  {vetter.warnings.map((w: VetterWarning) => (
+                                    <div key={w.id} className={`text-[0.6rem] p-1 rounded ${
+                                      w.severity === 'critical' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800'
+                                    }`}>
+                                      {w.type}: {w.message} ({new Date(w.timestamp).toLocaleTimeString()})
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           </div>
-        </div>
+        )}
 
-        <div className="space-y-5">
-          <div className="rounded-2xl border border-slate-200 bg-white p-5">
-            <h3 className="text-sm font-semibold text-slate-800">
-              Moderation Checklist — Course Outline
-            </h3>
-            <ul className="mt-2 space-y-2 text-sm text-slate-700">
-              {digitalChecklist.courseOutline.map((item) => (
-                <li key={item} className="flex items-start gap-2">
-                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                  <span>{item}</span>
-                </li>
-              ))}
-            </ul>
+        {/* Vetting Session Records - Collapsible cards showing completed sessions - ALWAYS SHOW IF RECORDS EXIST */}
+        {vettingSessionRecords && vettingSessionRecords.length > 0 && (
+          <div className="mt-5 space-y-2">
+            <h3 className="text-sm font-bold text-slate-800 mb-3">📋 Vetting Session Records</h3>
+            {vettingSessionRecords.map((record) => (
+              <VettingRecordCard key={record.id} record={record} papersToDisplay={papersToDisplay} />
+            ))}
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-5">
-            <h3 className="text-sm font-semibold text-slate-800">
-              Bloom’s Taxonomy Coverage
-            </h3>
-            <ul className="mt-2 space-y-2 text-sm text-slate-700">
-              {digitalChecklist.bloomsTaxonomy.map((item) => (
-                <li key={item} className="flex items-start gap-2">
-                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-indigo-400" />
-                  <span>{item}</span>
-                </li>
-              ))}
-            </ul>
+        )}
+
+        {/* Approve/Reject Section for Chief Examiner when papers are vetted - ALWAYS SHOW IF PAPERS ARE VETTED */}
+        {isChiefExaminer && papersToDisplay.length > 0 && papersToDisplay.some((p: SubmittedPaper) => p.status === 'vetted') && (
+          <div className="mt-5 space-y-4">
+            <div className="rounded-xl border-2 border-green-300/50 bg-gradient-to-br from-green-50 via-emerald-50 to-teal-50 p-4 shadow-lg">
+              <div className="flex items-center gap-2 mb-4">
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 shadow-md">
+                  <span className="text-white text-lg">✓</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-800">
+                    Review & Decision
+                  </h3>
+                  <p className="text-xs text-slate-600">
+                    Approve paper for printing or return for revision
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <textarea
+                  id="decision-notes"
+                  placeholder="Decision notes (required for rejection, optional for approval)..."
+                  className="w-full rounded-lg border-2 border-green-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500/40 resize-none"
+                  rows={3}
+                />
+                
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const notesEl = document.getElementById('decision-notes') as HTMLTextAreaElement;
+                      const notes = notesEl?.value || '';
+                      if (onApprove) {
+                        onApprove(notes);
+                        if (notesEl) notesEl.value = '';
+                      }
+                    }}
+                    className="flex-1 rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+                  >
+                    ✓ Approve & Forward to Print
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const notesEl = document.getElementById('decision-notes') as HTMLTextAreaElement;
+                      const notes = notesEl?.value || '';
+                      if (!notes.trim()) {
+                        alert('Please provide feedback notes when rejecting a paper.');
+                        return;
+                      }
+                      
+                      // Prompt for new deadline
+                      const days = parseInt(prompt('Set new deadline - Days:', '3') || '0') || 0;
+                      const hours = parseInt(prompt('Set new deadline - Hours:', '0') || '0') || 0;
+                      const minutes = parseInt(prompt('Set new deadline - Minutes:', '0') || '0') || 0;
+                      
+                      if (days === 0 && hours === 0 && minutes === 0) {
+                        if (!confirm('No deadline set. Continue without deadline?')) {
+                          return;
+                        }
+                      }
+                      
+                      if (onReject) {
+                        onReject(notes, days || hours || minutes ? { days, hours, minutes } : undefined);
+                        if (notesEl) notesEl.value = '';
+                      }
+                    }}
+                    className="flex-1 rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-4 py-2.5 text-sm font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+                  >
+                    ✗ Reject & Return to Team Lead
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-5">
-            <h3 className="text-sm font-semibold text-slate-800">
-              Compliance Checklist
-            </h3>
-            <ul className="mt-2 space-y-2 text-sm text-slate-700">
-              {digitalChecklist.compliance.map((item) => (
-                <li key={item} className="flex items-start gap-2">
-                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-amber-400" />
-                  <span>{item}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
+        )}
       </div>
     </SectionCard>
   );
