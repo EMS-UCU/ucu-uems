@@ -10,18 +10,34 @@ export async function createNotification(data: {
   related_exam_paper_id?: string;
 }): Promise<{ success: boolean; error?: string }> {
   try {
-    const { error } = await supabase
+    console.log('📤 Creating notification:', { 
+      user_id: data.user_id, 
+      title: data.title,
+      type: data.type 
+    });
+    
+    const { data: insertedData, error } = await supabase
       .from('notifications')
-      .insert(data);
+      .insert(data)
+      .select()
+      .single();
 
     if (error) {
-      console.error('Error creating notification:', error);
+      console.error('❌ Error creating notification:', {
+        error: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+        data: data
+      });
       return { success: false, error: error.message };
     }
 
+    console.log('✅ Notification created successfully:', insertedData?.id);
     return { success: true };
   } catch (error: any) {
-    return { success: false, error: error.message };
+    console.error('❌ Exception creating notification:', error);
+    return { success: false, error: error.message || 'Unknown error' };
   }
 }
 

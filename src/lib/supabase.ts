@@ -114,7 +114,7 @@ export interface VettingSession {
   id: string;
   exam_paper_id: string;
   chief_examiner_id?: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'expired';
+  status: 'pending' | 'in_progress' | 'completed' | 'expired' | 'cancelled';
   started_at?: string;
   completed_at?: string;
   expires_at?: string;
