@@ -10970,175 +10970,14 @@ function TeamLeadPanel({
           kicker="Submission History"
           description="View all drafts lodged by setters and follow their journey through the vetting workflow."
         >
-          <div className="space-y-3">
-            {submittedPapers.filter((p) => p.submittedRole === 'Setter' || !p.submittedRole || p.submittedRole === 'Unknown').map((paper: SubmittedPaper) => (
-              <div
-                key={paper.id}
-                className={`relative overflow-hidden rounded-2xl border-2 p-5 transition shadow-md bg-gradient-to-r from-sky-100 via-indigo-100 to-slate-100 ring-2 ring-slate-200 ${getStatusColor(paper.status)}`}
-              >
-                <div className="pointer-events-none absolute inset-0 opacity-45 mix-blend-normal bg-[radial-gradient(circle_at_top,_#38bdf8_0,_transparent_50%),radial-gradient(circle_at_bottom,_#a855f7_0,_transparent_60%)]" />
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-2">
-                      <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-1">
-                        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-sky-100 text-sky-600 ring-1 ring-sky-300">
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            className="h-3.5 w-3.5"
-                            fill="currentColor"
-                          >
-                            <path d="M12 2a7 7 0 0 0-7 7v3.586l-.707.707A1 1 0 0 0 5 15h14a1 1 0 0 0 .707-1.707L19 12.586V9a7 7 0 0 0-7-7Zm0 20a3 3 0 0 0 2.995-2.824L15 19h-6a3 3 0 0 0 2.824 2.995L12 22Z" />
-                          </svg>
-                        </span>
-                        {paper.fileName}
-                      </h4>
-                      <span className={`px-2 py-0.5 rounded-lg text-xs font-medium border bg-white/80 text-slate-800 ${getStatusColor(paper.status)}`}>
-                        {getStatusLabel(paper.status)}
-                      </span>
-                    </div>
-                    <div className="space-y-1 text-xs text-slate-700">
-                      <p>
-                        <span className="inline-flex items-center gap-1 text-sky-700">
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            className="h-3.5 w-3.5 text-sky-500"
-                            fill="currentColor"
-                          >
-                            <path d="M6.75 3A.75.75 0 0 0 6 3.75v.75H5.25a2.25 2.25 0 0 0-2.235 2.026L3 6.75v11.25A2.25 2.25 0 0 0 5.25 20.25h13.5A2.25 2.25 0 0 0 21 18V6.75a2.25 2.25 0 0 0-2.026-2.235L18.75 4.5H18v-.75a.75.75 0 0 0-.75-.75h-10.5ZM12 8.25a.75.75 0 0 1 .743.648l.007.102v4.19l2.22 2.22a.75.75 0 0 1-.976 1.133l-.084-.073-2.5-2.5A.75.75 0 0 1 11.25 13.5v-4.5a.75.75 0 0 1 .75-.75Z" />
-                          </svg>
-                          Submitted:
-                        </span>{' '}
-                        {new Date(paper.submittedAt).toLocaleString()}
-                      </p>
-                      <p>
-                        <span className="inline-flex items-center gap-1 text-emerald-700">
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            className="h-3.5 w-3.5 text-emerald-500"
-                            fill="currentColor"
-                          >
-                            <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-4 0-7 2-7 4v1.25A1.75 1.75 0 0 0 6.75 21h10.5A1.75 1.75 0 0 0 19 19.25V18c0-2-3-4-7-4Z" />
-                          </svg>
-                          Submitted By:
-                        </span>{' '}
-                        <span className="text-slate-900">
-                          {paper.submittedBy}
-                          {paper.submittedRole && paper.submittedRole !== 'Unknown' && (
-                            <span className="ml-1 text-[0.7rem] rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-700">
-                              {paper.submittedRole}
-                            </span>
-                          )}
-                        </span>
-                      </p>
-                      {paper.fileSize && (
-                        <p>
-                          <span className="inline-flex items-center gap-1 text-emerald-700">
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              viewBox="0 0 24 24"
-                              className="h-3.5 w-3.5 text-emerald-500"
-                              fill="currentColor"
-                            >
-                              <path d="M6.75 2.25A2.25 2.25 0 0 0 4.5 4.5v15a2.25 2.25 0 0 0 2.25 2.25h10.5A2.25 2.25 0 0 0 19.5 19.5v-15A2.25 2.25 0 0 0 17.25 2.25H6.75ZM12 18a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z" />
-                            </svg>
-                            Size:
-                          </span>{' '}
-                          {(paper.fileSize / 1024).toFixed(2)} KB
-                        </p>
-                      )}
-                      <p>
-                        <span className="inline-flex items-center gap-1 text-violet-700">
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            className="h-3.5 w-3.5 text-violet-500"
-                            fill="currentColor"
-                          >
-                            <path d="M12 2a10 10 0 0 0-7.071 17.071A10 10 0 1 0 12 2Zm0 3a7 7 0 1 1-4.95 11.95A7 7 0 0 1 12 5Zm-.75 2.75a.75.75 0 0 0-.743.648L10.5 8.5v4.25c0 .28.156.538.402.667l3 1.5a.75.75 0 0 0 .67-1.342L12 11.987V8.5a.75.75 0 0 0-.75-.75Z" />
-                          </svg>
-                          Current Workflow Stage:
-                        </span>{' '}
-                        <span className="text-slate-900">
-                          {getWorkflowStageForPaper(paper)}
-                        </span>
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex flex-col gap-2 ml-4">
-                    <button
-                      type="button"
-                      className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-sky-100 border border-sky-300 hover:bg-sky-200 text-xs font-medium text-sky-800 transition"
-                      onClick={() => {
-                        const publicUrl = resolvePaperUrl(paper.fileUrl);
-                        if (!publicUrl) {
-                          alert('No file is available to view for this paper yet.');
-                          return;
-                        }
-                        window.open(publicUrl, '_blank');
-                      }}
-                    >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-3.5 w-3.5"
-                        fill="currentColor"
-                      >
-                        <path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7Zm0 4a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z" />
-                      </svg>
-                      <span>View</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-100 border border-emerald-300 hover:bg-emerald-200 text-xs font-medium text-emerald-800 transition"
-                      onClick={() => {
-                        const publicUrl = resolvePaperUrl(paper.fileUrl);
-                        if (!publicUrl) {
-                          alert('No file is available to download for this paper yet.');
-                          return;
-                        }
-                        const link = document.createElement('a');
-                        link.href = publicUrl;
-                        link.download = paper.fileName || 'exam-paper.pdf';
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                      }}
-                    >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-3.5 w-3.5"
-                        fill="currentColor"
-                      >
-                        <path d="M12 3a1 1 0 0 1 1 1v9.586l2.293-2.293a1 1 0 0 1 1.497 1.32l-.083.094-4 4a1 1 0 0 1-1.32.083l-.094-.083-4-4a1 1 0 0 1 1.32-1.497l.094.083L11 13.586V4a1 1 0 0 1 1-1Zm-7 14a1 1 0 0 1 .117 1.993L5 19H4a1 1 0 0 0-.993.883L3 20a1 1 0 0 0 .883.993L4 21h16a1 1 0 0 0 .993-.883L21 20a1 1 0 0 0-.883-.993L20 19h-1a1 1 0 0 1-.117-1.993L19 17h1a3 3 0 0 1 2.995 2.824L23 20a3 3 0 0 1-2.824 2.995L20 23H4a3 3 0 0 1-2.995-2.824L1 20a3 3 0 0 1 2.824-2.995L4 17h1Z" />
-                      </svg>
-                      <span>Download</span>
-                    </button>
-                    {paper.status === 'vetted' && (
-                      <button
-                        type="button"
-                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-100 hover:bg-indigo-200 text-xs font-medium text-indigo-800 transition"
-                        onClick={handleDownloadModerationChecklist}
-                      >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          className="h-3.5 w-3.5"
-                          fill="currentColor"
-                        >
-                          <path d="M7 2a2 2 0 0 0-2 2v16l7-3 7 3V4a2 2 0 0 0-2-2H7Zm2.5 5h5a1 1 0 0 1 .117 1.993L14.5 9h-5a1 1 0 0 1-.117-1.993L9.5 7h5-5Zm0 4h3a1 1 0 0 1 .117 1.993L12.5 13h-3a1 1 0 0 1-.117-1.993L9.5 11h3-3Z" />
-                        </svg>
-                        <span>Download Report</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
+          <CompactPaperCards 
+            papers={submittedPapers.filter((p) => p.submittedRole === 'Setter' || !p.submittedRole || p.submittedRole === 'Unknown')}
+            getSubmitterName={getSubmitterName}
+            getStatusLabel={getStatusLabel}
+            getStatusColor={getStatusColor}
+            getWorkflowStageForPaper={getWorkflowStageForPaper}
+            resolvePaperUrl={resolvePaperUrl}
+          />
         </SectionCard>
       )}
 
@@ -12275,7 +12114,7 @@ function CompactPaperCards({
                       {getStatusLabel(paper.status)}
                     </span>
                     <span className="px-2 py-0.5 rounded-md text-[0.65rem] font-semibold bg-purple-100 text-purple-700 border border-purple-200">
-                      Team Lead
+                      {paper.submittedRole === 'Team Lead' ? 'Team Lead' : paper.submittedRole === 'Setter' ? 'Setter' : paper.submittedRole || 'Unknown'}
                     </span>
                   </div>
                   <p className="text-xs text-slate-600 mt-2 truncate">
