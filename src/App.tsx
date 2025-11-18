@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -273,7 +274,21 @@ interface Annotation {
   timestamp: string;
 }
 
+type ChecklistComment = {
+  comment: string;
+  vetterName: string;
+  timestamp: number;
+  color: string;
+};
+
+type ChecklistCommentsMap = Map<string, ChecklistComment>;
+
 const DEFAULT_PASSWORD = 'user123';
+const DEFAULT_SESSION_MINUTES = 3;
+const CHECKLIST_COMMENTS_STORAGE_KEY = 'ucu-vetting-checklist-comments';
+const CHECKLIST_COMMENTS_CHANNEL = 'ucu-vetting-checklist-sync';
+const CHECKLIST_TYPING_TTL_MS = 6000;
+
 const defaultLecturerModules = [
   'Lecturer Dashboard',
   'My Classes',
@@ -537,6 +552,110 @@ const emptyVettingSession: VettingSessionState = {
   switchingLocked: false,
 };
 
+const DEMO_PAPER_ID = 'demo-networking';
+
+const stripDemoPaper = (papers: SubmittedPaper[]): SubmittedPaper[] =>
+  papers.filter((paper) => paper.id !== DEMO_PAPER_ID);
+
+const encodeToBase64 = (input: string): string => {
+  if (typeof window !== 'undefined' && typeof window.btoa === 'function') {
+    return window.btoa(input);
+  }
+  const globalBuffer = typeof globalThis !== 'undefined' ? (globalThis as any).Buffer : undefined;
+  if (globalBuffer?.from) {
+    return globalBuffer.from(input, 'binary').toString('base64');
+  }
+  if (typeof btoa === 'function') {
+    return btoa(input);
+  }
+  throw new Error('Base64 encoding not supported in this environment.');
+};
+
+const createDemoPdfDataUrl = (): string => {
+  const textStream = `BT
+/F1 20 Tf
+72 720 Td
+(UC Vetting Demo Paper) Tj
+0 -28 Td
+(Use this sample to test vetter tools.) Tj
+0 -28 Td
+(All violations remain visible to the Chief Examiner.) Tj
+ET
+`;
+
+  const objectContents = [
+    `<< /Type /Catalog /Pages 2 0 R >>`,
+    `<< /Type /Pages /Kids [3 0 R] /Count 1 >>`,
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>`,
+    `<< /Length ${textStream.length} >>\nstream\n${textStream}endstream\n`,
+    `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>`,
+  ].map((content, index) => `${index + 1} 0 obj\n${content}\nendobj\n`);
+
+  const header = '%PDF-1.4\n';
+  const offsets = [0];
+  let currentOffset = header.length;
+  objectContents.forEach((obj) => {
+    offsets.push(currentOffset);
+    currentOffset += obj.length;
+  });
+
+  const body = objectContents.join('');
+  const xrefStart = header.length + body.length;
+  const xrefEntries = ['0000000000 65535 f \n'];
+  for (let i = 1; i < offsets.length; i += 1) {
+    xrefEntries.push(`${offsets[i].toString().padStart(10, '0')} 00000 n \n`);
+  }
+  const xref = `xref\n0 ${offsets.length}\n${xrefEntries.join('')}`;
+  const trailer = `trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+  const pdfString = `${header}${body}${xref}${trailer}`;
+  return `data:application/pdf;base64,${encodeToBase64(pdfString)}`;
+};
+
+const DEMO_PDF_DATA_URL = createDemoPdfDataUrl();
+
+const createDemoPaper = (): SubmittedPaper => ({
+  id: DEMO_PAPER_ID,
+  fileName: 'networking.pdf',
+  submittedBy: 'Demo Setter',
+  submittedAt: new Date().toISOString(),
+  fileSize: 0,
+  status: 'in-vetting',
+  courseUnit: 'Computer Networks',
+  courseCode: 'CSE 3101',
+  semester: 'Advent',
+  year: `${new Date().getFullYear()}`,
+  fileUrl: DEMO_PDF_DATA_URL,
+  submittedRole: 'Setter',
+});
+
+const ensureDemoPaper = (papers: SubmittedPaper[]): SubmittedPaper[] => {
+  const cleaned = stripDemoPaper(papers);
+  if (cleaned.length === 0) {
+    return [createDemoPaper()];
+  }
+  return cleaned;
+};
+
+const directFileUrlPattern = /^(https?:\/\/|\/|data:)/i;
+
+const resolvePaperUrl = (fileUrl?: string | null): string | null => {
+  if (!fileUrl) return null;
+  if (directFileUrlPattern.test(fileUrl)) {
+    return fileUrl;
+  }
+
+  try {
+    const { data } = supabase.storage
+      .from('exam_papers')
+      .getPublicUrl(fileUrl);
+
+    return data?.publicUrl ?? null;
+  } catch (error) {
+    console.error('Error generating Supabase public URL:', error);
+    return null;
+  }
+};
+
 const safeBrowserPolicies = [
   'Camera stream locked on and monitored',
   'Screenshots and recordings disabled',
@@ -563,6 +682,214 @@ const digitalChecklist = {
     'Academic integrity statements embedded',
     'Formatting adheres to faculty print standards',
   ],
+};
+
+interface ChecklistSectionConfig {
+  id: string;
+  title: string;
+  placeholder: string;
+  headingColor: string;
+}
+
+const pdfChecklistSectionConfigs: ChecklistSectionConfig[] = [
+  {
+    id: 'section-pdf-section-a',
+    title: 'SECTION A — STRUCTURE & GENERAL QUALITY',
+    placeholder: 'Add your comments for Section A (Structure & General Quality)...',
+    headingColor: 'text-indigo-700',
+  },
+  {
+    id: 'section-pdf-section-b',
+    title: 'SECTION B — ALIGNMENT WITH COURSE OUTLINE',
+    placeholder: 'Add your comments for Section B (Alignment with Course Outline)...',
+    headingColor: 'text-purple-700',
+  },
+  {
+    id: 'section-pdf-section-c',
+    title: 'SECTION C — COGNITIVE DEPTH & BLOOM’S COVERAGE',
+    placeholder: 'Capture comments about Bloom’s levels, fairness, and balance...',
+    headingColor: 'text-blue-700',
+  },
+  {
+    id: 'section-pdf-section-d',
+    title: 'SECTION D — MARKING SCHEME & SOLUTION QUALITY',
+    placeholder: 'Document issues or approvals for the marking guide and solutions...',
+    headingColor: 'text-amber-700',
+  },
+  {
+    id: 'section-pdf-section-e',
+    title: 'SECTION E — ACADEMIC INTEGRITY & COMPLIANCE',
+    placeholder: 'Highlight integrity, formatting, or compliance observations...',
+    headingColor: 'text-emerald-700',
+  },
+  {
+    id: 'section-pdf-additional',
+    title: 'Additional Comments',
+    placeholder: 'Add any additional comments or observations...',
+    headingColor: 'text-rose-700',
+  },
+];
+
+const defaultChecklistSectionConfigs: ChecklistSectionConfig[] = [
+  {
+    id: 'section-courseOutline',
+    title: 'Course Outline Section',
+    placeholder: 'Add your comments for the Course Outline section...',
+    headingColor: 'text-blue-700',
+  },
+  {
+    id: 'section-bloomsTaxonomy',
+    title: 'Blooms Taxonomy Section',
+    placeholder: 'Add your comments for the Blooms Taxonomy section...',
+    headingColor: 'text-purple-700',
+  },
+  {
+    id: 'section-compliance',
+    title: 'Compliance Section',
+    placeholder: 'Add your comments for the Compliance section...',
+    headingColor: 'text-emerald-700',
+  },
+  {
+    id: 'section-general-observations',
+    title: 'General / Additional Comments',
+    placeholder: 'Capture overarching remarks that affect the whole paper...',
+    headingColor: 'text-rose-700',
+  },
+];
+
+const createDemoChecklistComments = (): ChecklistCommentsMap => {
+  const demoMap: ChecklistCommentsMap = new Map();
+  const demoKey1 = 'courseOutline-Coverage of core topics for the semester';
+  demoMap.set(demoKey1, {
+    comment: '✅ Good coverage of all core topics. All required sections are present and well-structured.',
+    vetterName: 'Dr. Sarah Johnson',
+    timestamp: Date.now() - 3600000,
+    color: '#10B981',
+  });
+  const demoKey2 = 'bloomsTaxonomy-Questions test different cognitive levels';
+  demoMap.set(demoKey2, {
+    comment: '⚠️ Some questions are too focused on lower-level recall. Recommend adding more analysis and evaluation questions.',
+    vetterName: 'Prof. Michael Chen',
+    timestamp: Date.now() - 1800000,
+    color: '#F59E0B',
+  });
+  const demoKey3 = 'compliance-All questions are answerable within the allocated time';
+  demoMap.set(demoKey3, {
+    comment: '✅ Time allocation is appropriate. All questions can be completed within the given timeframe.',
+    vetterName: 'Dr. Emily Williams',
+    timestamp: Date.now() - 900000,
+    color: '#3B82F6',
+  });
+  return demoMap;
+};
+
+const loadChecklistComments = (): ChecklistCommentsMap => {
+  try {
+    const saved = localStorage.getItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+    if (!saved) {
+      return createDemoChecklistComments();
+    }
+    const parsed = JSON.parse(saved) as Record<string, ChecklistComment>;
+    return new Map(Object.entries(parsed));
+  } catch (error) {
+    console.error('Error loading checklist comments:', error);
+    return createDemoChecklistComments();
+  }
+};
+
+const serializeChecklistComments = (comments: ChecklistCommentsMap): Record<string, ChecklistComment> => {
+  const obj: Record<string, ChecklistComment> = {};
+  comments.forEach((value, key) => {
+    obj[key] = value;
+  });
+  return obj;
+};
+
+const buildChecklistExportPayload = ({
+  comments,
+  hasCustomChecklistPdf,
+}: {
+  comments: ChecklistCommentsMap;
+  hasCustomChecklistPdf: boolean;
+}): string | null => {
+  if (comments.size === 0) {
+    return null;
+  }
+
+  const sectionConfigs = hasCustomChecklistPdf ? pdfChecklistSectionConfigs : defaultChecklistSectionConfigs;
+  let checklistText = 'MODERATION CHECKLIST WITH VETTER COMMENTS\n';
+  checklistText += '='.repeat(50) + '\n\n';
+
+  checklistText += 'SECTION COMMENTS\n';
+  checklistText += '-'.repeat(50) + '\n\n';
+
+  sectionConfigs.forEach((section) => {
+    const sectionComment = comments.get(section.id);
+    if (sectionComment?.comment) {
+      checklistText += `${section.title}\n`;
+      checklistText += `Comment: ${sectionComment.comment}\n`;
+      checklistText += `Added by: ${sectionComment.vetterName} on ${new Date(sectionComment.timestamp).toLocaleString()}\n\n`;
+    }
+  });
+
+  checklistText += '\nITEM-LEVEL COMMENTS\n';
+  checklistText += '-'.repeat(50) + '\n\n';
+
+  const itemComments: Array<[string, ChecklistComment]> = [];
+  comments.forEach((comment, key) => {
+    if (!key.startsWith('section-')) {
+      itemComments.push([key, comment]);
+    }
+  });
+
+  if (itemComments.length > 0) {
+    itemComments.forEach(([key, comment]) => {
+      checklistText += `Item: ${key}\n`;
+      checklistText += `Comment: ${comment.comment}\n`;
+      checklistText += `Added by: ${comment.vetterName} on ${new Date(comment.timestamp).toLocaleString()}\n\n`;
+    });
+  } else {
+    checklistText += 'No item-level comments.\n\n';
+  }
+
+  return checklistText;
+};
+
+const loadCustomChecklist = (): typeof digitalChecklist | null => {
+  try {
+    const saved = localStorage.getItem('ucu-custom-checklist');
+    if (!saved) {
+      return null;
+    }
+    const parsed = JSON.parse(saved);
+    if (
+      parsed &&
+      Array.isArray(parsed.courseOutline) &&
+      Array.isArray(parsed.bloomsTaxonomy) &&
+      Array.isArray(parsed.compliance)
+    ) {
+      return parsed;
+    }
+    return null;
+  } catch (error) {
+    console.error('Error loading custom checklist:', error);
+    return null;
+  }
+};
+
+const loadCustomChecklistPdf = (): { url: string; name: string; isWordDoc?: boolean } | null => {
+  try {
+    const saved = localStorage.getItem('ucu-custom-checklist-pdf');
+    if (!saved) return null;
+    const parsed = JSON.parse(saved);
+    if (parsed?.name) {
+      return { url: parsed.url || '', name: parsed.name, isWordDoc: parsed.isWordDoc || false };
+    }
+    return null;
+  } catch (error) {
+    console.error('Error loading custom checklist PDF:', error);
+    return null;
+  }
 };
 
 const createId = (() => {
@@ -665,15 +992,30 @@ function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
+
+  useEffect(() => {
+    if (!activeToast) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setActiveToast(null);
+    }, 3000);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [activeToast]);
   // Load persisted papers from localStorage
   const loadPersistedPapers = (): SubmittedPaper[] => {
     try {
       const saved = localStorage.getItem('ucu-moderation-papers');
-      if (!saved) return [];
-      return JSON.parse(saved) as SubmittedPaper[];
+      if (!saved) return ensureDemoPaper([]);
+      const parsed = JSON.parse(saved) as SubmittedPaper[];
+      return ensureDemoPaper(parsed);
     } catch (error) {
       console.error('Error loading persisted papers:', error);
-      return [];
+      return ensureDemoPaper([]);
     }
   };
 
@@ -720,6 +1062,8 @@ function App() {
   const [submittedPapers, setSubmittedPapers] = useState<SubmittedPaper[]>(loadPersistedPapers());
   const [setterSubmissions, setSetterSubmissions] = useState<SetterSubmission[]>([]);
   const [repositoryPapers, setRepositoryPapers] = useState<RepositoryPaper[]>([]);
+  const [customChecklist, setCustomChecklist] = useState<typeof digitalChecklist | null>(loadCustomChecklist());
+  const [customChecklistPdf, setCustomChecklistPdf] = useState<{ url: string; name: string; isWordDoc?: boolean } | null>(loadCustomChecklistPdf());
   const [currentTime, setCurrentTime] = useState(Date.now());
   const [activePanelId, setActivePanelId] = useState<string>('overview');
   const [moderationSchedule, setModerationSchedule] = useState<ModerationSchedule>(loadPersistedModerationSchedule());
@@ -731,7 +1075,10 @@ function App() {
   // Store camera stream references for Chief Examiner monitoring
   const vetterCameraStreams = useRef<Map<string, MediaStream>>(new Map());
   // Checklist comments - keyed by checklist category and item text
-  const [checklistComments, setChecklistComments] = useState<Map<string, { comment: string; vetterName: string; timestamp: number; color: string }>>(new Map());
+  const [checklistComments, setChecklistComments] = useState<ChecklistCommentsMap>(() => loadChecklistComments());
+  const [checklistTypingState, setChecklistTypingState] = useState<Map<string, Map<string, { name: string; timestamp: number }>>>(new Map());
+  const checklistCommentsChannelRef = useRef<BroadcastChannel | null>(null);
+  const activeChecklist = customChecklist ?? digitalChecklist;
   // Vetting session records - stores completed sessions
   const loadVettingRecords = (): VettingSessionRecord[] => {
     try {
@@ -774,6 +1121,200 @@ function App() {
   const currentUser = useMemo(
     () => users.find((user) => user.id === authUserId) ?? null,
     [authUserId, users]
+  );
+
+  useEffect(() => {
+    try {
+      const serialized = JSON.stringify(serializeChecklistComments(checklistComments));
+      localStorage.setItem(CHECKLIST_COMMENTS_STORAGE_KEY, serialized);
+    } catch (error) {
+      console.error('Error saving checklist comments:', error);
+    }
+  }, [checklistComments]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== CHECKLIST_COMMENTS_STORAGE_KEY || !event.newValue) {
+        return;
+      }
+      try {
+        const parsed = JSON.parse(event.newValue) as Record<string, ChecklistComment>;
+        setChecklistComments(new Map(Object.entries(parsed)));
+      } catch (error) {
+        console.error('Error syncing checklist comments from storage:', error);
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') {
+      return;
+    }
+    const channel = new BroadcastChannel(CHECKLIST_COMMENTS_CHANNEL);
+    checklistCommentsChannelRef.current = channel;
+    channel.onmessage = (event: MessageEvent) => {
+      const { type, payload } = event.data || {};
+      if (!payload) return;
+      if (payload.sourceUserId && payload.sourceUserId === currentUser?.id) {
+        return;
+      }
+      if (type === 'comment_update') {
+        const { commentKey, commentData } = payload as {
+          commentKey?: string;
+          commentData?: ChecklistComment | null;
+        };
+        if (!commentKey) return;
+        setChecklistComments((prev) => {
+          const next = new Map(prev);
+          if (commentData) {
+            next.set(commentKey, commentData);
+          } else {
+            next.delete(commentKey);
+          }
+          return next;
+        });
+      } else if (type === 'typing') {
+        const { commentKey, vetterId, vetterName, isTyping, timestamp } = payload as {
+          commentKey?: string;
+          vetterId?: string;
+          vetterName?: string;
+          isTyping?: boolean;
+          timestamp?: number;
+        };
+        if (!commentKey || !vetterId || vetterId === currentUser?.id) {
+          return;
+        }
+        setChecklistTypingState((prev) => {
+          const next = new Map(prev);
+          const existing = new Map(next.get(commentKey) ?? new Map());
+          if (isTyping) {
+            existing.set(vetterId, {
+              name: vetterName ?? 'Vetter',
+              timestamp: timestamp ?? Date.now(),
+            });
+          } else {
+            existing.delete(vetterId);
+          }
+          if (existing.size > 0) {
+            next.set(commentKey, existing);
+          } else {
+            next.delete(commentKey);
+          }
+          return next;
+        });
+      }
+    };
+    return () => {
+      channel.close();
+      checklistCommentsChannelRef.current = null;
+    };
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setChecklistTypingState((prev) => {
+        const now = Date.now();
+        let mutated = false;
+        const next = new Map<string, Map<string, { name: string; timestamp: number }>>();
+        prev.forEach((userMap, key) => {
+          const retained = new Map<string, { name: string; timestamp: number }>();
+          userMap.forEach((entry, userId) => {
+            if (now - entry.timestamp < CHECKLIST_TYPING_TTL_MS) {
+              retained.set(userId, entry);
+            } else {
+              mutated = true;
+            }
+          });
+          if (retained.size > 0) {
+            next.set(key, retained);
+          } else if (userMap.size > 0) {
+            mutated = true;
+          }
+        });
+        return mutated ? next : prev;
+      });
+    }, 2000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  const checklistTypingIndicators = useMemo(() => {
+    const indicatorMap = new Map<string, string[]>();
+    checklistTypingState.forEach((userMap, key) => {
+      const names = Array.from(userMap.values())
+        .map((entry) => entry.name)
+        .filter(Boolean);
+      if (names.length > 0) {
+        indicatorMap.set(key, Array.from(new Set(names)));
+      }
+    });
+    return indicatorMap;
+  }, [checklistTypingState]);
+
+  const broadcastChecklistCommentUpdate = useCallback(
+    (commentKey: string, commentData: ChecklistComment | null) => {
+      if (!commentKey || !currentUser?.id) return;
+      try {
+        checklistCommentsChannelRef.current?.postMessage({
+          type: 'comment_update',
+          payload: {
+            commentKey,
+            commentData,
+            sourceUserId: currentUser.id,
+          },
+        });
+      } catch (error) {
+        console.error('Error broadcasting checklist comment update:', error);
+      }
+    },
+    [currentUser?.id]
+  );
+
+  const handleChecklistTypingChange = useCallback(
+    (commentKey: string, isTyping: boolean) => {
+      if (!commentKey || !currentUser?.id) return;
+      const userId = currentUser.id;
+      setChecklistTypingState((prev) => {
+        const next = new Map(prev);
+        const existing = new Map(next.get(commentKey) ?? new Map());
+        if (isTyping) {
+          existing.set(userId, {
+            name: currentUser.name ?? 'Unknown',
+            timestamp: Date.now(),
+          });
+        } else {
+          existing.delete(userId);
+        }
+        if (existing.size > 0) {
+          next.set(commentKey, existing);
+        } else {
+          next.delete(commentKey);
+        }
+        return next;
+      });
+      try {
+        checklistCommentsChannelRef.current?.postMessage({
+          type: 'typing',
+          payload: {
+            commentKey,
+            vetterId: userId,
+            vetterName: currentUser.name ?? 'Unknown',
+            isTyping,
+            timestamp: Date.now(),
+            sourceUserId: userId,
+          },
+        });
+      } catch (error) {
+        console.error('Error broadcasting typing indicator:', error);
+      }
+    },
+    [currentUser?.id, currentUser?.name]
   );
 
   // Load persisted deadline state so countdowns continue across refresh / logout
@@ -865,6 +1406,23 @@ function App() {
     }
   }, [vettingSession]);
 
+  useEffect(() => {
+    try {
+      if (customChecklist) {
+        localStorage.setItem('ucu-custom-checklist', JSON.stringify(customChecklist));
+      } else {
+        localStorage.removeItem('ucu-custom-checklist');
+      }
+      if (customChecklistPdf) {
+        localStorage.setItem('ucu-custom-checklist-pdf', JSON.stringify(customChecklistPdf));
+      } else {
+        localStorage.removeItem('ucu-custom-checklist-pdf');
+      }
+    } catch (error) {
+      console.error('Error saving custom checklist:', error);
+    }
+  }, [customChecklist, customChecklistPdf]);
+
   // Load persisted exam papers from Supabase so they survive refresh/login
   useEffect(() => {
     const loadExamPapersFromSupabase = async () => {
@@ -949,12 +1507,13 @@ function App() {
         });
         // Add any persisted papers that aren't in Supabase yet
         const newPersisted = persistedPapers.filter(p => !submitted.find(s => s.id === p.id));
-        setSubmittedPapers([...mergedPapers, ...newPersisted]);
+        const finalPapers = ensureDemoPaper([...mergedPapers, ...newPersisted]);
+        setSubmittedPapers(finalPapers);
         setRepositoryPapers(repo);
         
         // Persist the merged papers
         try {
-          localStorage.setItem('ucu-moderation-papers', JSON.stringify([...mergedPapers, ...newPersisted]));
+          localStorage.setItem('ucu-moderation-papers', JSON.stringify(finalPapers));
         } catch (error) {
           console.error('Error saving merged papers to localStorage:', error);
         }
@@ -1329,47 +1888,66 @@ function App() {
       };
 
       const handleBlur = () => {
-        // STRICT: Warn when window loses focus
+        // STRICT: Immediately prevent leaving the vetting window
         if (document.hasFocus() === false && currentUser?.id) {
+          const vetterId = currentUser.id;
           setTimeout(() => {
             if (!document.hasFocus()) {
-              // Log warning for Chief Examiner monitoring
               logVetterWarning(
-                currentUser.id,
+                vetterId,
                 'window_leave',
-                'Vetter left the vetting session window.',
+                'Safe browser enforcement: attempt to leave vetting window detected. Forcing focus back.',
                 'critical'
               );
               
-              const confirmLeave = confirm('WARNING: You are leaving the vetting session window. If you continue, your session will be TERMINATED. Do you want to return to the session?');
-              if (confirmLeave) {
-                window.focus();
+              alert('Leaving the vetting window is not allowed. Returning focus to the vetting environment. Continued attempts will terminate your session.');
+              
+              const refocus = () => {
+                try {
+              window.focus();
+                } catch (error) {
+                  console.error('Error forcing focus back to vetting window:', error);
+                }
+              };
+              
+              refocus();
+              const refocusInterval = window.setInterval(() => {
+                if (!document.hasFocus()) {
+                  refocus();
               } else {
-                // User confirmed they want to leave - terminate their session
+                  window.clearInterval(refocusInterval);
+                }
+              }, 150);
+              
+              window.setTimeout(() => {
+                if (!document.hasFocus()) {
+                  window.clearInterval(refocusInterval);
+                  
                 logVetterWarning(
-                  currentUser.id,
+                    vetterId,
                   'window_leave',
-                  'Session terminated: Vetter confirmed leaving the window.',
+                    'Session terminated automatically: vetter continued leaving the window.',
                   'critical'
                 );
                 
-                alert('Your vetting session has been terminated due to leaving the window.');
-                if (currentUser.id && joinedVetters.has(currentUser.id)) {
+                  alert('Session terminated: the vetting window lost focus. Please rejoin to continue.');
+                  
+                  if (vetterId && joinedVetters.has(vetterId)) {
                   setJoinedVetters(prev => {
                     const newSet = new Set(prev);
-                    newSet.delete(currentUser.id!);
+                      newSet.delete(vetterId);
                     return newSet;
                   });
-                  // Clean up camera stream
-                  const stream = vetterCameraStreams.current.get(currentUser.id!);
+                    const stream = vetterCameraStreams.current.get(vetterId);
                   if (stream) {
                     stream.getTracks().forEach(track => track.stop());
-                    vetterCameraStreams.current.delete(currentUser.id!);
+                      vetterCameraStreams.current.delete(vetterId);
                   }
                 }
               }
+              }, 2000);
             }
-          }, 500);
+          }, 250);
         }
       };
 
@@ -1603,96 +2181,149 @@ function App() {
     };
   }, [vettingSession.active, vettingSession.safeBrowserEnabled, vettingSession.cameraOn, vettingSession.screenshotBlocked, vettingSession.switchingLocked, joinedVetters, currentUser?.id]);
 
-  // Auto-start vetting session when scheduled moderation begins
-  useEffect(() => {
-    if (
-      moderationSchedule.scheduled &&
-      moderationSchedule.scheduledStartTime &&
-      currentTime >= moderationSchedule.scheduledStartTime &&
-      !vettingSession.active &&
-      currentUserHasRole('Vetter') &&
-      (workflow.stage === 'Compiled for Vetting' || workflow.stage === 'Vetting Session Expired')
-    ) {
-      const calculatedDuration = moderationSchedule.scheduledEndTime && moderationSchedule.scheduledStartTime
-        ? Math.max(5, Math.floor((moderationSchedule.scheduledEndTime - moderationSchedule.scheduledStartTime) / (60 * 1000)))
-        : 45;
-      
-      const startedAt = Date.now();
-      const expiresAt = moderationSchedule.scheduledEndTime || (startedAt + calculatedDuration * 60 * 1000);
-      
-      setVettingSession({
-        active: true,
-        startedAt,
-        durationMinutes: calculatedDuration,
-        expiresAt,
-        safeBrowserEnabled: true,
-        cameraOn: true,
-        screenshotBlocked: true,
-        switchingLocked: true,
-      });
-
-      const actor = currentUser?.name ?? 'Unknown';
-      pushWorkflowEvent(
-        `Moderation session automatically started. Safe browser enabled for ${calculatedDuration} minutes.`,
-        actor,
-        { stage: 'Vetting in Progress' }
-      );
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [moderationSchedule.scheduled, moderationSchedule.scheduledStartTime, moderationSchedule.scheduledEndTime, currentTime, vettingSession.active, workflow.stage]);
-
-  // Auto-complete session when scheduled moderation ends
+  // Auto-complete session when scheduled moderation ends - handles ALL vetters
   useEffect(() => {
     if (
       moderationSchedule.scheduled &&
       moderationSchedule.scheduledEndTime &&
       currentTime >= moderationSchedule.scheduledEndTime &&
-      vettingSession.active &&
-      currentUser &&
-      currentUser.roles.includes('Vetter')
+      vettingSession.active
     ) {
+      joinedVetters.forEach((vetterId) => {
+        logVetterWarning?.(
+          vetterId,
+          'window_leave',
+          'Session expired. Camera feed terminated and vetter signed out automatically.',
+          'critical'
+        );
+      });
+      // Save records for all joined vetters before ending session
+      const vettedPaper = submittedPapers.find(p => p.status === 'in-vetting');
+      
+      if (vettedPaper && vettingSession.startedAt) {
+        const completedAt = Date.now();
+        const startedAt = vettingSession.startedAt;
+        const durationMinutes = vettingSession.durationMinutes || DEFAULT_SESSION_MINUTES;
+        
+        // Create vetting session record with all vetter data
+        const sessionRecord: VettingSessionRecord = {
+          id: createId(),
+          paperId: vettedPaper.id,
+          paperName: vettedPaper.fileName,
+          courseCode: vettedPaper.courseCode || 'Unknown',
+          courseUnit: vettedPaper.courseUnit || 'Unknown',
+          startedAt,
+          completedAt,
+          durationMinutes,
+          vetters: Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
+            const allWarnings = monitoring.warnings ? [...monitoring.warnings] : [];
+            // Count violations from critical warnings as backup, but prefer the tracked violations count
+            const criticalWarningsCount = allWarnings.filter(w => w.severity === 'critical').length;
+            const violations = typeof monitoring.violations === 'number' ? monitoring.violations : criticalWarningsCount;
+            
+            console.log(`📋 Recording vetter ${monitoring.vetterName} (moderation ended):`, {
+              vetterId,
+              warningsCount: allWarnings.length,
+              violations,
+              criticalWarningsCount,
+              monitoringViolations: monitoring.violations,
+            });
+            
+            return {
+              vetterId,
+              vetterName: monitoring.vetterName,
+              joinedAt: monitoring.joinedAt,
+              warnings: allWarnings,
+              violations: violations, // ALL violations recorded - use tracked count or count from critical warnings
+            };
+          }),
+          annotations: [...annotations],
+          checklistComments: new Map(checklistComments),
+          status: 'completed',
+        };
+        
+        // Store the session record
+        setVettingSessionRecords(prev => [sessionRecord, ...prev]);
+        
+        // Persist to localStorage
+        try {
+          const existing = JSON.parse(localStorage.getItem('ucu-vetting-records') || '[]');
+          const recordToSave = {
+            ...sessionRecord,
+            checklistComments: Object.fromEntries(sessionRecord.checklistComments),
+          };
+          existing.unshift(recordToSave);
+          localStorage.setItem('ucu-vetting-records', JSON.stringify(existing.slice(0, 50)));
+        } catch (error) {
+          console.error('Error saving vetting record:', error);
+        }
+        
+        // Update submitted papers status to 'vetted'
+        setSubmittedPapers(prev => {
+          const base = stripDemoPaper(prev);
+          const updated = base.map(paper =>
+            paper.status === 'in-vetting'
+              ? { ...paper, status: 'vetted' }
+              : paper
+          );
+          return ensureDemoPaper(updated);
+        });
+      }
+      
+      // Stop all camera streams for all vetters
+      vetterCameraStreams.current.forEach((stream, vetterId) => {
+        stream.getTracks().forEach(track => track.stop());
+        console.log(`📹 Stopped camera stream for vetter ${vetterId} (moderation ended)`);
+      });
+      vetterCameraStreams.current.clear();
+      
+      // Stop global monitoring camera stream if it exists
+      if ((window as any).__vettingCameraStream) {
+        const globalStream = (window as any).__vettingCameraStream as MediaStream;
+        globalStream.getTracks().forEach(track => track.stop());
+        delete (window as any).__vettingCameraStream;
+        console.log('📹 Stopped global monitoring camera stream (moderation ended)');
+      }
+      
+      // Remove all vetters from joined set
+      setJoinedVetters(new Set());
+      
+      // Clear monitoring data
+      setVetterMonitoring(new Map());
+      
       // Auto-submit all pending annotations (they're already saved, just log it)
       if (annotations.length > 0) {
-        const actor = currentUser?.name ?? 'Unknown';
         pushWorkflowEvent(
-          `Session ended. ${annotations.length} annotation(s) automatically submitted.`,
-          actor
+          `Moderation session ended. ${annotations.length} annotation(s) automatically submitted.`,
+          'System'
         );
       }
 
-      // Complete the vetting session
-      handleCompleteVetting();
-
-      // Close safe browser
+      // Close safe browser and end session
       setVettingSession({
         active: false,
         safeBrowserEnabled: false,
         cameraOn: false,
         screenshotBlocked: false,
         switchingLocked: false,
+        lastClosedReason: 'expired',
       });
+
+      pushWorkflowEvent(
+        'Moderation Session Ended: Session time expired. All vetter records saved, cameras stopped, and safe browser closed.',
+        'System',
+        { stage: 'Vetted & Returned to Chief Examiner' }
+      );
 
       // Show notification
       const notification: AppNotification = {
         id: createId(),
-        message: 'Moderation Session Ended: Session time expired. All comments have been submitted and safe browser closed.',
+        message: 'Moderation Session Ended: Session time expired. All vetter records have been saved and cameras stopped.',
         timestamp: new Date().toISOString(),
         read: false,
       };
       setNotifications((prev) => [notification, ...prev]);
       setActiveToast(notification);
-
-      // Auto-close window after a short delay (if in browser)
-      setTimeout(() => {
-        if (typeof window !== 'undefined') {
-          // Try to close the window/tab
-          window.close();
-          // If window.close() doesn't work (some browsers block it), at least try to navigate away
-          if (window.location) {
-            window.location.href = 'about:blank';
-          }
-        }
-      }, 2000);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [moderationSchedule.scheduled, moderationSchedule.scheduledEndTime, currentTime, vettingSession.active, annotations.length]);
@@ -2383,7 +3014,11 @@ function App() {
       submittedRole: 'Team Lead',
     };
 
-    setSubmittedPapers((prev) => [...prev, newPaper]);
+    setSubmittedPapers((prev) => {
+      const base = stripDemoPaper(prev);
+      const updated = [...base, newPaper];
+      return ensureDemoPaper(updated);
+    });
 
     // Auto-add to repository
     const reader = new FileReader();
@@ -2472,7 +3107,7 @@ function App() {
             submittedRole,
           };
         });
-        setSubmittedPapers(submitted);
+        setSubmittedPapers(ensureDemoPaper(submitted));
       }
     } catch (err) {
       console.error('Error reloading papers after Team Lead submission:', err);
@@ -2554,13 +3189,15 @@ function App() {
     const actor = currentUser?.name ?? 'Unknown';
     
     // Update submitted papers status to 'in-vetting'
-    setSubmittedPapers(prev => 
-      prev.map(paper => 
+    setSubmittedPapers(prev => {
+      const base = stripDemoPaper(prev);
+      const updated = base.map(paper =>
         paper.submittedBy === actor && paper.status === 'submitted'
           ? { ...paper, status: 'in-vetting' }
           : paper
-      )
-    );
+      );
+      return ensureDemoPaper(updated);
+    });
     
     pushWorkflowEvent(
       'Integrated all branch inputs and forwarded compiled document for vetting.',
@@ -2601,12 +3238,12 @@ function App() {
       if (vettingSession.active) {
         alert('A vetting session is already active.');
         console.error('Start session blocked: Session already active');
-        return;
-      }
+      return;
+    }
 
-      const duration = Math.max(5, minutes);
-      const startedAt = Date.now();
-      const expiresAt = startedAt + duration * 60 * 1000;
+    const duration = Math.max(DEFAULT_SESSION_MINUTES, minutes);
+    const startedAt = Date.now();
+    const expiresAt = startedAt + duration * 60 * 1000;
       
       console.log('Chief Examiner starting global vetting session:', {
         duration,
@@ -2615,24 +3252,24 @@ function App() {
       });
       
       // Start global vetting session - this enables the "Start Session" button for vetters
-      setVettingSession({
-        active: true,
-        startedAt,
-        durationMinutes: duration,
-        expiresAt,
+    setVettingSession({
+      active: true,
+      startedAt,
+      durationMinutes: duration,
+      expiresAt,
         safeBrowserEnabled: true, // Will be enforced only for vetters
-        cameraOn: true,
-        screenshotBlocked: true,
-        switchingLocked: true,
-      });
+      cameraOn: true,
+      screenshotBlocked: true,
+      switchingLocked: true,
+    });
 
       // Update workflow stage to 'Vetting in Progress'
-      const actor = currentUser?.name ?? 'Unknown';
-      pushWorkflowEvent(
+    const actor = currentUser?.name ?? 'Unknown';
+    pushWorkflowEvent(
         `Chief Examiner started vetting session with a ${duration}-minute secure window. Vetters can now join by clicking "Start Session" and enabling their camera.`,
-        actor,
-        { stage: 'Vetting in Progress' }
-      );
+      actor,
+      { stage: 'Vetting in Progress' }
+    );
       
       setWorkflow((prev) => ({
         ...prev,
@@ -2815,6 +3452,120 @@ function App() {
     );
   };
 
+  const handleRemoveChecklist = () => {
+    if (confirm('Are you sure you want to remove the checklist from vetting? This will clear the uploaded checklist PDF/template.')) {
+      setCustomChecklistPdf(null);
+      setCustomChecklist(null);
+      alert('Checklist removed from vetting. Default checklist will be used.');
+    }
+  };
+
+  const handleRemovePaperFromVetting = (paperId: string) => {
+    const paper = submittedPapers.find(p => p.id === paperId);
+    if (!paper) {
+      alert('Paper not found.');
+      return;
+    }
+    
+    if (confirm(`Are you sure you want to remove "${paper.fileName}" from vetting? This will change its status back to "submitted".`)) {
+      setSubmittedPapers(prev => {
+        const updated = prev.map(p => 
+          p.id === paperId 
+            ? { ...p, status: 'submitted' as const }
+            : p
+        );
+        // Persist to localStorage
+        try {
+          localStorage.setItem('ucu-moderation-papers', JSON.stringify(updated));
+        } catch (error) {
+          console.error('Error saving papers to localStorage:', error);
+        }
+        return updated;
+      });
+      alert(`Paper "${paper.fileName}" has been removed from vetting and returned to submitted status.`);
+    }
+  };
+
+  const handleUploadChecklistFile = (file: File) => {
+    // Accept Word documents (.docx) and PDFs - prefer Word for editing
+    const isWordDoc = file.name.toLowerCase().endsWith('.docx') || 
+                      file.name.toLowerCase().endsWith('.doc') ||
+                      file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+                      file.type === 'application/msword';
+    
+    if (isWordDoc) {
+      // For Word documents, we'll create an editable HTML version
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        // Store the file info - we'll display an editable Word-like interface
+        setCustomChecklist(null);
+        setCustomChecklistPdf({ url: '', name: file.name, isWordDoc: true });
+        alert('Word document uploaded! You can now edit the checklist directly in the editable document below.');
+      };
+      reader.onerror = () => {
+        alert('Unable to read the Word document. Please try again.');
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+    
+    if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const pdfUrl = event.target?.result as string;
+        setCustomChecklist(null);
+        setCustomChecklistPdf({ url: pdfUrl, name: file.name, isWordDoc: false });
+        alert('Checklist PDF uploaded. For better editing, consider uploading a Word document (.docx) instead.');
+      };
+      reader.onerror = () => {
+        alert('Unable to read the PDF file. Please try again.');
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = (event.target?.result as string) || '';
+      try {
+        let parsed = JSON.parse(text);
+        if (
+          !parsed ||
+          !Array.isArray(parsed.courseOutline) ||
+          !Array.isArray(parsed.bloomsTaxonomy) ||
+          !Array.isArray(parsed.compliance)
+        ) {
+          throw new Error('Invalid checklist format');
+        }
+        setCustomChecklist(parsed);
+        setCustomChecklistPdf(null);
+        alert('Checklist uploaded successfully. Vetters will now use the new template.');
+      } catch (error) {
+        const lines = text
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        if (lines.length === 0) {
+          alert('Failed to parse checklist. Please upload a JSON, text, or PDF file with checklist items.');
+          console.error('Checklist upload error:', error);
+          return;
+        }
+        const fallbackChecklist = {
+          courseOutline: lines,
+          bloomsTaxonomy: lines,
+          compliance: lines,
+        };
+        setCustomChecklist(fallbackChecklist);
+        setCustomChecklistPdf(null);
+        alert('Checklist uploaded as plain text. All sections will use the provided list.');
+      }
+    };
+    reader.onerror = () => {
+      alert('Unable to read the checklist file. Please try again.');
+    };
+    reader.readAsText(file);
+  };
+
   const handleCompleteVetting = () => {
     if (!currentUserHasRole('Vetter')) {
       return;
@@ -2825,7 +3576,7 @@ function App() {
     const actor = currentUser?.name ?? 'Unknown';
     const completedAt = Date.now();
     const startedAt = vettingSession.startedAt || completedAt;
-    const durationMinutes = vettingSession.durationMinutes || 45;
+    const durationMinutes = vettingSession.durationMinutes || DEFAULT_SESSION_MINUTES;
     
     // Find the paper being vetted
     const vettedPaper = submittedPapers.find(p => p.status === 'in-vetting');
@@ -2844,12 +3595,16 @@ function App() {
         vetters: Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
           // CRITICAL: Ensure ALL warnings are captured - deep copy to prevent any loss
           const allWarnings = monitoring.warnings ? [...monitoring.warnings] : [];
-          const violations = monitoring.violations || 0;
+          // Count violations from critical warnings as backup, but prefer the tracked violations count
+          const criticalWarningsCount = allWarnings.filter(w => w.severity === 'critical').length;
+          const violations = typeof monitoring.violations === 'number' ? monitoring.violations : criticalWarningsCount;
           
           console.log(`📋 Recording vetter ${monitoring.vetterName}:`, {
             vetterId,
             warningsCount: allWarnings.length,
             violations,
+            criticalWarningsCount,
+            monitoringViolations: monitoring.violations,
             warnings: allWarnings.map(w => ({
               type: w.type,
               message: w.message,
@@ -2863,7 +3618,7 @@ function App() {
             vetterName: monitoring.vetterName,
             joinedAt: monitoring.joinedAt,
             warnings: allWarnings, // ALL warnings recorded
-            violations: violations, // ALL violations recorded
+            violations: violations, // ALL violations recorded - use tracked count or count from critical warnings
           };
         }),
         annotations: [...annotations],
@@ -2888,20 +3643,72 @@ function App() {
       }
     }
     
+    // Stop camera stream for current user immediately
+    if (currentUser?.id) {
+      const stream = vetterCameraStreams.current.get(currentUser.id);
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        vetterCameraStreams.current.delete(currentUser.id);
+        console.log(`📹 Stopped camera stream for vetter ${currentUser.id}`);
+      }
+    }
+    
+    // Stop global monitoring camera stream if it exists
+    if ((window as any).__vettingCameraStream) {
+      const globalStream = (window as any).__vettingCameraStream as MediaStream;
+      globalStream.getTracks().forEach(track => track.stop());
+      delete (window as any).__vettingCameraStream;
+      console.log('📹 Stopped global monitoring camera stream');
+    }
+    
+    // Disable safe browser mode and stop all camera streams
     setVettingSession((prev) => ({
       ...prev,
       active: false,
+      safeBrowserEnabled: false,
+      cameraOn: false,
+      screenshotBlocked: false,
+      switchingLocked: false,
       lastClosedReason: 'completed',
     }));
     
+    setJoinedVetters((prev) => {
+      const updated = new Set(prev);
+      if (currentUser?.id) {
+        updated.delete(currentUser.id);
+      }
+      return updated;
+    });
+    
+    // Stop all remaining camera streams
+    vetterCameraStreams.current.forEach((stream, vetterId) => {
+      stream.getTracks().forEach(track => track.stop());
+      vetterCameraStreams.current.delete(vetterId);
+    });
+    
+    if (currentUser?.id) {
+      logVetterWarning?.(
+        currentUser.id,
+        'window_leave',
+        'Vetting session completed. Camera feed stopped and safe browser mode disabled.',
+        'critical'
+      );
+    }
+    
     // Update submitted papers status to 'vetted'
-    setSubmittedPapers(prev => 
-      prev.map(paper => 
+    setSubmittedPapers(prev => {
+      const base = stripDemoPaper(prev);
+      const updated = base.map(paper =>
         paper.status === 'in-vetting'
           ? { ...paper, status: 'vetted' }
           : paper
-      )
-    );
+      );
+      return ensureDemoPaper(updated);
+    });
+    
+    if (vettedPaper) {
+      void syncPaperStatusToSupabase(vettedPaper.id, 'vetted_with_comments');
+    }
     
     pushWorkflowEvent(
       'Returned annotated paper and digital moderation log to Chief Examiner.',
@@ -2929,17 +3736,216 @@ function App() {
       });
   };
 
+  const handleChecklistDownload = useCallback(() => {
+    const payload = buildChecklistExportPayload({
+      comments: checklistComments,
+      hasCustomChecklistPdf: Boolean(customChecklistPdf?.url),
+    });
+    if (!payload) {
+      alert('No checklist comments to download yet.');
+      return;
+    }
+
+    const blob = new Blob([payload], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `moderation-checklist-${new Date().toISOString().split('T')[0]}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    alert('Checklist with vetter comments downloaded successfully!');
+  }, [checklistComments, customChecklistPdf]);
+
+  const forwardChecklistPacketToTeamLead = useCallback(
+    (notes: string) => {
+      const payload = buildChecklistExportPayload({
+        comments: checklistComments,
+        hasCustomChecklistPdf: Boolean(customChecklistPdf?.url),
+      });
+      if (!payload) {
+        alert('No checklist comments are available to forward. Ask the vetters to capture their remarks first.');
+        return false;
+      }
+
+      const actor = currentUser?.name ?? 'Chief Examiner';
+      const teamLeads = users.filter((u) => u.roles.includes('Team Lead') && u.id);
+      if (teamLeads.length === 0) {
+        alert('No Team Lead accounts are available to receive the forwarded checklist.');
+        return false;
+      }
+
+      teamLeads.forEach((teamLead) => {
+        if (!teamLead.id) return;
+        void createNotification({
+          user_id: teamLead.id,
+          title: 'Vetting Feedback Packet',
+          message: `${notes}\n\n${payload}`,
+          type: 'warning',
+        });
+      });
+
+      pushWorkflowEvent(
+        'Forwarded vetting comments and annotated checklist back to Team Lead for action.',
+        actor
+      );
+      const toast: AppNotification = {
+        id: createId(),
+        message: 'Forwarded vetting feedback packet to Team Lead with all comment cards.',
+        timestamp: new Date().toISOString(),
+        read: false,
+      };
+      setNotifications((prev) => [toast, ...prev].slice(0, 20));
+      setActiveToast(toast);
+
+      return true;
+    },
+    [checklistComments, customChecklistPdf, currentUser?.name, users]
+  );
+
+  const handleForwardChecklistDecision = (decision: 'approved' | 'rejected', notes: string) => {
+    if (decision === 'approved') {
+      handleApprove(notes);
+    } else {
+      const forwarded = forwardChecklistPacketToTeamLead(notes);
+      if (!forwarded) {
+        return;
+      }
+      handleReject(notes, undefined);
+    }
+  };
+
   const handleVettingExpired = () => {
+    // Save records for all joined vetters before ending session
+    const vettedPaper = submittedPapers.find(p => p.status === 'in-vetting');
+    
+    if (vettedPaper && vettingSession.startedAt) {
+      const completedAt = Date.now();
+      const startedAt = vettingSession.startedAt;
+      const durationMinutes = vettingSession.durationMinutes || DEFAULT_SESSION_MINUTES;
+      
+      // Create vetting session record with all vetter data
+      const sessionRecord: VettingSessionRecord = {
+        id: createId(),
+        paperId: vettedPaper.id,
+        paperName: vettedPaper.fileName,
+        courseCode: vettedPaper.courseCode || 'Unknown',
+        courseUnit: vettedPaper.courseUnit || 'Unknown',
+        startedAt,
+        completedAt,
+        durationMinutes,
+        vetters: Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
+          // CRITICAL: Ensure ALL warnings are captured - deep copy to prevent any loss
+          const allWarnings = monitoring.warnings ? [...monitoring.warnings] : [];
+          // Count violations from critical warnings as backup, but prefer the tracked violations count
+          const criticalWarningsCount = allWarnings.filter(w => w.severity === 'critical').length;
+          const violations = typeof monitoring.violations === 'number' ? monitoring.violations : criticalWarningsCount;
+          
+          console.log(`📋 Recording vetter ${monitoring.vetterName} (expired session):`, {
+            vetterId,
+            warningsCount: allWarnings.length,
+            violations,
+            criticalWarningsCount,
+            monitoringViolations: monitoring.violations,
+            warnings: allWarnings.map(w => ({
+              type: w.type,
+              message: w.message,
+              severity: w.severity,
+              timestamp: new Date(w.timestamp).toLocaleString(),
+            })),
+          });
+          
+          return {
+            vetterId,
+            vetterName: monitoring.vetterName,
+            joinedAt: monitoring.joinedAt,
+            warnings: allWarnings, // ALL warnings recorded
+            violations: violations, // ALL violations recorded - use tracked count or count from critical warnings
+          };
+        }),
+        annotations: [...annotations],
+        checklistComments: new Map(checklistComments),
+        status: 'expired',
+      };
+      
+      // Store the session record
+      setVettingSessionRecords(prev => [sessionRecord, ...prev]);
+      
+      // Persist to localStorage (convert Map to object for JSON)
+      try {
+        const existing = JSON.parse(localStorage.getItem('ucu-vetting-records') || '[]');
+        const recordToSave = {
+          ...sessionRecord,
+          checklistComments: Object.fromEntries(sessionRecord.checklistComments),
+        };
+        existing.unshift(recordToSave);
+        localStorage.setItem('ucu-vetting-records', JSON.stringify(existing.slice(0, 50))); // Keep last 50
+      } catch (error) {
+        console.error('Error saving vetting record:', error);
+      }
+      
+      // Update submitted papers status to 'vetted' when session expires
+      setSubmittedPapers(prev => {
+        const base = stripDemoPaper(prev);
+        const updated = base.map(paper =>
+          paper.status === 'in-vetting'
+            ? { ...paper, status: 'vetted' }
+            : paper
+        );
+        return ensureDemoPaper(updated);
+      });
+      
+      void syncPaperStatusToSupabase(vettedPaper.id, 'vetted_with_comments');
+    }
+    
+    // Stop all camera streams for all vetters
+    vetterCameraStreams.current.forEach((stream, vetterId) => {
+      stream.getTracks().forEach(track => track.stop());
+      console.log(`📹 Stopped camera stream for vetter ${vetterId}`);
+    });
+    vetterCameraStreams.current.clear();
+    
+    // Stop global monitoring camera stream if it exists
+    if ((window as any).__vettingCameraStream) {
+      const globalStream = (window as any).__vettingCameraStream as MediaStream;
+      globalStream.getTracks().forEach(track => track.stop());
+      delete (window as any).__vettingCameraStream;
+      console.log('📹 Stopped global monitoring camera stream (session expired)');
+    }
+    
+    // Remove all vetters from joined set
+    setJoinedVetters(new Set());
+    
+    // Clear monitoring data
+    setVetterMonitoring(new Map());
+    
+    // End the session and disable safe browser mode
     setVettingSession((prev) => ({
       ...prev,
       active: false,
+      safeBrowserEnabled: false,
+      cameraOn: false,
+      screenshotBlocked: false,
+      switchingLocked: false,
       lastClosedReason: 'expired',
     }));
+    
     pushWorkflowEvent(
-      'Vetting window expired — vetter logged out automatically by safe browser.',
+      'Vetting window expired — all vetter sessions terminated automatically. Records saved and cameras stopped.',
       'System',
       { stage: 'Vetting Session Expired' }
     );
+    
+    // Show notification to all users
+    const notification: AppNotification = {
+      id: createId(),
+      message: 'Vetting Session Expired: Session time finished. All vetter records have been saved and cameras stopped.',
+      timestamp: new Date().toISOString(),
+      read: false,
+    };
+    setNotifications((prev) => [notification, ...prev]);
+    setActiveToast(notification);
   };
 
   const handleSanitizeAndForward = () => {
@@ -3017,13 +4023,15 @@ function App() {
     const vettedPapers = submittedPapers.filter(p => p.status === 'vetted');
     
     // Update submitted papers status to 'approved' and add to archive
-    setSubmittedPapers(prev => 
-      prev.map(paper => 
+    setSubmittedPapers(prev => {
+      const base = stripDemoPaper(prev);
+      const updated = base.map(paper =>
         paper.status === 'vetted'
           ? { ...paper, status: 'approved' }
           : paper
-      )
-    );
+      );
+      return ensureDemoPaper(updated);
+    });
     
     // Add approved papers to archive for AI similarity checking
     vettedPapers.forEach(paper => {
@@ -3122,13 +4130,15 @@ function App() {
       }
       
       // Update papers status back to 'submitted' so Team Lead can revise
-      setSubmittedPapers(prev => 
-        prev.map(paper => 
+      setSubmittedPapers(prev => {
+        const base = stripDemoPaper(prev);
+        const updated = base.map(paper =>
           paper.status === 'vetted'
             ? { ...paper, status: 'submitted' }
             : paper
-        )
-      );
+        );
+        return ensureDemoPaper(updated);
+      });
       
       // Update workflow stage back to Team Lead
       pushWorkflowEvent(
@@ -3212,39 +4222,39 @@ function App() {
         });
     } else {
       // Original rejection logic for "Awaiting Approval" stage
-      pushWorkflowEvent(
-        'Rejected — new setter required and recycling process initiated.',
-        actor,
-        {
-          stage: 'Rejected',
-          mutate: () => ({
-            portalOpen: false,
-            awaitingRecycle: true,
-            lastDecision: {
-              type: 'Rejected',
-              actor,
-              timestamp,
-              notes,
-            },
-          }),
-        }
-      );
-      appendVersionHistory(
-        actor,
-        notes
-          ? `Rejected and flagged for recycling. Notes: ${notes}`
-          : 'Rejected and flagged for recycling.'
-      );
-      setDestructionLog((prev) => [
-        {
-          id: createId(),
-          versionLabel: latestVersion,
-          timestamp,
-          details:
-            'Draft secured for digital destruction and archival pending new setter assignment.',
-        },
-        ...prev,
-      ]);
+    pushWorkflowEvent(
+      'Rejected — new setter required and recycling process initiated.',
+      actor,
+      {
+        stage: 'Rejected',
+        mutate: () => ({
+          portalOpen: false,
+          awaitingRecycle: true,
+          lastDecision: {
+            type: 'Rejected',
+            actor,
+            timestamp,
+            notes,
+          },
+        }),
+      }
+    );
+    appendVersionHistory(
+      actor,
+      notes
+        ? `Rejected and flagged for recycling. Notes: ${notes}`
+        : 'Rejected and flagged for recycling.'
+    );
+    setDestructionLog((prev) => [
+      {
+        id: createId(),
+        versionLabel: latestVersion,
+        timestamp,
+        details:
+          'Draft secured for digital destruction and archival pending new setter assignment.',
+      },
+      ...prev,
+    ]);
     }
   };
 
@@ -3291,10 +4301,10 @@ function App() {
       return;
     }
     const newAnnotation = {
-      id: createId(),
-      author: currentUser.name,
-      comment: trimmed,
-      timestamp: new Date().toISOString(),
+        id: createId(),
+        author: currentUser.name,
+        comment: trimmed,
+        timestamp: new Date().toISOString(),
     };
     setAnnotations((prev) => [newAnnotation, ...prev]);
 
@@ -4008,6 +5018,7 @@ function App() {
           submittedPapers={submittedPapers}
           setterSubmissions={setterSubmissions}
           annotations={annotations}
+          users={users}
         />
       ),
     });
@@ -4194,13 +5205,14 @@ function App() {
           vettingSession={vettingSession}
           annotations={annotations}
           safeBrowserPolicies={safeBrowserPolicies}
-          digitalChecklist={digitalChecklist}
+          checklist={activeChecklist}
+          customChecklistPdf={customChecklistPdf}
           vettingCountdown={vettingCountdown}
           userHasRole={currentUserHasRole}
           onStartVetting={handleStartVetting}
           onCompleteVetting={handleCompleteVetting}
           onAddAnnotation={handleAddAnnotation}
-          submittedPapers={submittedPapers.filter(p => p.status === 'in-vetting')}
+          submittedPapers={submittedPapers.filter(p => p.status === 'in-vetting' || p.status === 'vetted')}
           moderationSchedule={moderationSchedule}
           onScheduleModeration={handleScheduleModeration}
           moderationStartCountdown={moderationStartCountdown}
@@ -4210,22 +5222,115 @@ function App() {
           vetterMonitoring={vetterMonitoring}
           logVetterWarning={logVetterWarning}
           checklistComments={checklistComments}
-          onChecklistCommentChange={(key, comment) => {
-            const newComments = new Map(checklistComments);
-            if (comment) {
-              newComments.set(key, {
-                comment,
-                vetterName: currentUser?.name || 'Unknown',
-                timestamp: Date.now(),
-                color: '#3B82F6', // Blue color for vetter comments
-              });
-            } else {
-              newComments.delete(key);
+          typingIndicators={checklistTypingIndicators}
+          onChecklistCommentChange={(key, comment, color = '#3B82F6') => {
+            let entry: ChecklistComment | null = null;
+            setChecklistComments((prev) => {
+              const updated = new Map(prev);
+              if (comment) {
+                entry = {
+                  comment,
+                  vetterName: currentUser?.name || 'Unknown',
+                  timestamp: Date.now(),
+                  color,
+                };
+                updated.set(key, entry);
+              } else {
+                updated.delete(key);
+              }
+              return updated;
+            });
+            broadcastChecklistCommentUpdate(key, entry);
+            if (!comment) {
+              handleChecklistTypingChange(key, false);
             }
-            setChecklistComments(newComments);
           }}
+          onChecklistTypingChange={handleChecklistTypingChange}
+          onDownloadChecklistPacket={handleChecklistDownload}
+          onUploadChecklist={handleUploadChecklistFile}
+          onRemoveChecklist={handleRemoveChecklist}
+          onRemovePaperFromVetting={handleRemovePaperFromVetting}
           onEndSession={() => {
-            // End the global session
+            // Save vetting session record with all checklist comments before ending
+            const vettedPaper = submittedPapers.find(p => p.status === 'in-vetting');
+            
+            if (vettedPaper && vettingSession.startedAt) {
+              const completedAt = Date.now();
+              const startedAt = vettingSession.startedAt;
+              const durationMinutes = vettingSession.durationMinutes || DEFAULT_SESSION_MINUTES;
+              
+              // Create vetting session record with all vetter data and checklist comments
+              const sessionRecord: VettingSessionRecord = {
+                id: createId(),
+                paperId: vettedPaper.id,
+                paperName: vettedPaper.fileName,
+                courseCode: vettedPaper.courseCode || 'Unknown',
+                courseUnit: vettedPaper.courseUnit || 'Unknown',
+                startedAt,
+                completedAt,
+                durationMinutes,
+                vetters: Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
+                  const allWarnings = monitoring.warnings ? [...monitoring.warnings] : [];
+                  const criticalWarningsCount = allWarnings.filter(w => w.severity === 'critical').length;
+                  const violations = typeof monitoring.violations === 'number' ? monitoring.violations : criticalWarningsCount;
+                  
+                  return {
+                    vetterId,
+                    vetterName: monitoring.vetterName,
+                    joinedAt: monitoring.joinedAt,
+                    warnings: allWarnings,
+                    violations: violations,
+                  };
+                }),
+                annotations: [...annotations],
+                checklistComments: new Map(checklistComments), // Save all checklist comments (section and item-level)
+                status: 'terminated',
+              };
+              
+              // Store the session record
+              setVettingSessionRecords(prev => [sessionRecord, ...prev]);
+              
+              // Persist to localStorage
+              try {
+                const existing = JSON.parse(localStorage.getItem('ucu-vetting-records') || '[]');
+                const recordToSave = {
+                  ...sessionRecord,
+                  checklistComments: Object.fromEntries(sessionRecord.checklistComments),
+                };
+                existing.unshift(recordToSave);
+                localStorage.setItem('ucu-vetting-records', JSON.stringify(existing.slice(0, 50)));
+              } catch (error) {
+                console.error('Error saving vetting record:', error);
+              }
+              
+              // Update submitted papers status to 'vetted'
+              setSubmittedPapers(prev => {
+                const base = stripDemoPaper(prev);
+                const updated = base.map(paper =>
+                  paper.status === 'in-vetting'
+                    ? { ...paper, status: 'vetted' }
+                    : paper
+                );
+                return ensureDemoPaper(updated);
+              });
+            }
+            
+            // Stop all camera streams for all vetters
+            vetterCameraStreams.current.forEach((stream, vetterId) => {
+              stream.getTracks().forEach(track => track.stop());
+              console.log(`📹 Stopped camera stream for vetter ${vetterId} (session ended by Chief Examiner)`);
+            });
+            vetterCameraStreams.current.clear();
+            
+            // Stop global monitoring camera stream if it exists
+            if ((window as any).__vettingCameraStream) {
+              const globalStream = (window as any).__vettingCameraStream as MediaStream;
+              globalStream.getTracks().forEach(track => track.stop());
+              delete (window as any).__vettingCameraStream;
+              console.log('📹 Stopped global monitoring camera stream (session ended by Chief Examiner)');
+            }
+            
+            // End the global session and disable safe browser mode
             setVettingSession({
               active: false,
               safeBrowserEnabled: false,
@@ -4236,23 +5341,18 @@ function App() {
             });
             // Clear all joined vetters
             setJoinedVetters(new Set());
-            // Clean up all camera streams
-            vetterCameraStreams.current.forEach(stream => {
-              stream.getTracks().forEach(track => track.stop());
-            });
-            vetterCameraStreams.current.clear();
             // Clear monitoring data
             setVetterMonitoring(new Map());
             
             const actor = currentUser?.name ?? 'Unknown';
             pushWorkflowEvent(
-              'Chief Examiner ended the vetting session. All vetter sessions have been terminated.',
+              'Chief Examiner ended the vetting session. All vetter sessions have been terminated. All checklist comments and annotations have been saved.',
               actor
             );
           }}
+          onForwardChecklist={handleForwardChecklistDecision}
           onApprove={handleApprove}
           onReject={handleReject}
-          vettingSessionRecords={vettingSessionRecords}
         />
       ),
     });
@@ -4360,7 +5460,7 @@ function App() {
 
   // Check if current vetter has joined - hide sidebar and go fullscreen for vetters
   const isVetterActive = currentUserHasRole('Vetter') && currentUser?.id && joinedVetters.has(currentUser.id);
-  
+
   return (
     <div className={`min-h-screen bg-white text-slate-900 flex ${isVetterActive ? 'fullscreen-vetter-mode' : ''}`}>
       {/* Hide sidebar when vetter has joined - fullscreen vetting mode */}
@@ -4898,9 +5998,9 @@ function App() {
                         const unreadCount = mapped.filter(n => !n.read).length;
                         if (unreadCount > 0) {
                           await markAllNotificationsAsRead(currentUser.id);
-                          setNotifications((prev) =>
-                            prev.map((n) => ({ ...n, read: true }))
-                          );
+                    setNotifications((prev) =>
+                      prev.map((n) => ({ ...n, read: true }))
+                    );
                         }
                       } catch (error) {
                         console.error('Error refreshing notifications:', error);
@@ -5071,61 +6171,6 @@ function App() {
           </div>
         )}
 
-        {/* Hide header when vetter is in fullscreen mode */}
-        {!isVetterActive && (
-        <header className="relative border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-600">
-                {isAdmin
-                  ? 'Admin Dashboard'
-                  : isChiefExaminer
-                  ? 'Chief Examiner Console'
-                  : isTeamLead
-                  ? 'Team Lead Console'
-                  : isVetter
-                  ? 'Vetting Console'
-                  : isSetter
-                  ? 'Setter Console'
-                  : isPureLecturer
-                  ? 'Lecturer Dashboard'
-                  : 'Current Stage'}
-              </p>
-              <h2 className="mt-2 text-2xl font-semibold text-blue-900 sm:text-3xl">
-                {isAdmin
-                  ? 'System Administration'
-                  : isChiefExaminer
-                  ? 'Your currently assigned Chief Examiner role'
-                  : isTeamLead
-                  ? 'Your currently assigned Team Lead role'
-                  : isVetter
-                  ? 'Your currently assigned Vetting role'
-                  : isSetter
-                  ? 'Your currently assigned Setter role'
-                  : isPureLecturer
-                  ? 'Teaching & Student Engagement'
-                  : workflow.stage.replace(/-/g, ' ')}
-              </h2>
-              <p className="mt-1 text-sm text-slate-600">
-                {isAdmin
-                  ? 'Manage staff accounts and system configuration'
-                  : isChiefExaminer
-                  ? 'You now have privileges to assign and manage the exam process.'
-                  : isTeamLead
-                  ? 'You now have privileges to coordinate setters, vetters and manage team submissions.'
-                  : isVetter
-                  ? 'You now have privileges to review and vet exam papers.'
-                  : isSetter
-                  ? 'You now have privileges to create and submit exam drafts.'
-                  : isPureLecturer
-                  ? 'Access your teaching tools, student records, and class schedules.'
-                  : `Current workflow stage: ${workflow.stage.replace(/-/g, ' ')}`}
-              </p>
-            </div>
-          </div>
-        </header>
-        )}
-
         <main
           ref={mainContentRef}
           className={`flex-1 overflow-y-auto ${isVetterActive ? 'w-full px-0 py-0' : 'px-4 py-8 sm:px-6 lg:px-10'}`}
@@ -5203,6 +6248,23 @@ const statToneClasses: Record<
   blue: 'border-blue-300 bg-blue-50 text-blue-800',
   red: 'border-red-300 bg-red-50 text-red-800',
   amber: 'border-amber-300 bg-amber-50 text-amber-800',
+};
+
+const syncPaperStatusToSupabase = async (paperId: string, status: ExamPaperStatus) => {
+  if (!paperId) {
+    return;
+  }
+  try {
+    const { error } = await supabase
+      .from('exam_papers')
+      .update({ status })
+      .eq('id', paperId);
+    if (error) {
+      console.error(`Error updating paper ${paperId} to status "${status}":`, error);
+    }
+  } catch (error) {
+    console.error(`Unexpected error syncing paper ${paperId} status "${status}" to Supabase:`, error);
+  }
 };
 
 function DashboardStat({ label, value, tone }: DashboardStatProps) {
@@ -7164,18 +8226,35 @@ function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPane
 
 interface AdminSystemSettingsPanelProps {}
 
+const defaultSystemSettings = {
+  systemName: 'UCU Digital Paper Moderation System',
+  sessionTimeout: 30,
+  passwordPolicy: 'medium',
+  emailNotifications: true,
+  smsNotifications: false,
+  maintenanceMode: false,
+};
+
 function AdminSystemSettingsPanel({}: AdminSystemSettingsPanelProps) {
-  const [settings, setSettings] = useState({
-    systemName: 'UCU Digital Paper Moderation System',
-    sessionTimeout: 30,
-    passwordPolicy: 'medium',
-    emailNotifications: true,
-    smsNotifications: false,
-    maintenanceMode: false,
+  // Initialize state from localStorage or use defaults
+  const [settings, setSettings] = useState(() => {
+    const saved = localStorage.getItem('ucu-system-settings');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return { ...defaultSystemSettings, ...parsed };
+      } catch (error) {
+        console.error('Error loading settings:', error);
+        return defaultSystemSettings;
+      }
+    }
+    return defaultSystemSettings;
   });
 
   const handleSave = (e: FormEvent) => {
     e.preventDefault();
+    // Save to localStorage
+    localStorage.setItem('ucu-system-settings', JSON.stringify(settings));
     alert('System settings saved successfully!');
   };
 
@@ -9194,10 +10273,15 @@ function TeamLeadPanel({
   // Map a stored paper status (from Supabase) to a more precise workflow stage
   // so that the submission history reflects the real position of each paper,
   // even after a page refresh (when the in-memory workflow state resets).
-  const getWorkflowStageForPaper = (status: SubmittedPaper['status']): string => {
-    switch (status) {
+  const getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
+    // If paper is submitted by Team Lead, it's a submission TO Chief Examiner
+    if (paper.submittedRole === 'Team Lead' && paper.status === 'submitted') {
+      return 'Submitted to Chief Examiner';
+    }
+    
+    switch (paper.status) {
       case 'submitted':
-        // Setter has lodged the draft and it has been forwarded to the Team Lead / CE.
+        // Setter has lodged the draft and it has been forwarded to the Team Lead
         return 'Submitted to Team Lead';
       case 'in-vetting':
         return 'Vetting in Progress';
@@ -9208,6 +10292,10 @@ function TeamLeadPanel({
       default:
         return 'Unknown';
     }
+  };
+
+  const getSubmitterName = (paper: SubmittedPaper): string => {
+    return paper.submittedBy || 'Unknown';
   };
 
   const handleDownloadModerationChecklist = () => {
@@ -9613,7 +10701,7 @@ function TeamLeadPanel({
                           Current Workflow Stage:
                         </span>{' '}
                         <span className="text-slate-900">
-                          {getWorkflowStageForPaper(paper.status)}
+                          {getWorkflowStageForPaper(paper)}
                         </span>
                       </p>
                     </div>
@@ -9622,19 +10710,13 @@ function TeamLeadPanel({
                     <button
                       type="button"
                       className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-sky-100 border border-sky-300 hover:bg-sky-200 text-xs font-medium text-sky-800 transition"
-                      onClick={async () => {
-                        if (!paper.fileUrl) {
+                      onClick={() => {
+                        const publicUrl = resolvePaperUrl(paper.fileUrl);
+                        if (!publicUrl) {
                           alert('No file is available to view for this paper yet.');
                           return;
                         }
-                        const { data } = supabase.storage
-                          .from('exam_papers')
-                          .getPublicUrl(paper.fileUrl);
-                        if (!data?.publicUrl) {
-                          alert('Unable to generate a view link for this paper.');
-                          return;
-                        }
-                        window.open(data.publicUrl, '_blank');
+                        window.open(publicUrl, '_blank');
                       }}
                     >
                       <svg
@@ -9650,20 +10732,14 @@ function TeamLeadPanel({
                     <button
                       type="button"
                       className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-100 border border-emerald-300 hover:bg-emerald-200 text-xs font-medium text-emerald-800 transition"
-                      onClick={async () => {
-                        if (!paper.fileUrl) {
+                      onClick={() => {
+                        const publicUrl = resolvePaperUrl(paper.fileUrl);
+                        if (!publicUrl) {
                           alert('No file is available to download for this paper yet.');
                           return;
                         }
-                        const { data } = supabase.storage
-                          .from('exam_papers')
-                          .getPublicUrl(paper.fileUrl);
-                        if (!data?.publicUrl) {
-                          alert('Unable to generate a download link for this paper.');
-                          return;
-                        }
                         const link = document.createElement('a');
-                        link.href = data.publicUrl;
+                        link.href = publicUrl;
                         link.download = paper.fileName || 'exam-paper.pdf';
                         document.body.appendChild(link);
                         link.click();
@@ -9712,201 +10788,14 @@ function TeamLeadPanel({
           kicker="Compiled Papers for Chief Examiner"
           description="View all papers compiled and submitted by Team Lead. These papers are ready for Chief Examiner AI similarity analysis before vetting."
         >
-          <div className="space-y-3">
-            {submittedPapers.filter((p) => p.submittedRole === 'Team Lead').map((paper: SubmittedPaper) => (
-              <div
-                key={paper.id}
-                className={`relative overflow-hidden rounded-2xl border-2 p-5 transition shadow-md bg-gradient-to-r from-indigo-100 via-purple-100 to-pink-100 ring-2 ring-indigo-200 ${getStatusColor(paper.status)}`}
-              >
-                <div className="pointer-events-none absolute inset-0 opacity-45 mix-blend-normal bg-[radial-gradient(circle_at_top,_#6366f1_0,_transparent_50%),radial-gradient(circle_at_bottom,_#a855f7_0,_transparent_60%)]" />
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-2">
-                      <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-1">
-                        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-indigo-100 text-indigo-600 ring-1 ring-indigo-300">
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            className="h-3.5 w-3.5"
-                            fill="currentColor"
-                          >
-                            <path d="M12 2a7 7 0 0 0-7 7v3.586l-.707.707A1 1 0 0 0 5 15h14a1 1 0 0 0 .707-1.707L19 12.586V9a7 7 0 0 0-7-7Zm0 20a3 3 0 0 0 2.995-2.824L15 19h-6a3 3 0 0 0 2.824 2.995L12 22Z" />
-                          </svg>
-                        </span>
-                        {paper.fileName}
-                      </h4>
-                      <span className={`px-2 py-0.5 rounded-lg text-xs font-medium border bg-white/80 text-slate-800 ${getStatusColor(paper.status)}`}>
-                        {getStatusLabel(paper.status)}
-                      </span>
-                      <span className="px-2 py-0.5 rounded-lg text-xs font-semibold border bg-indigo-100 text-indigo-700 border-indigo-300">
-                        Team Lead Submission
-                      </span>
-                    </div>
-                    <div className="space-y-1 text-xs text-slate-700">
-                      <p>
-                        <span className="inline-flex items-center gap-1 text-indigo-700">
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            className="h-3.5 w-3.5 text-indigo-500"
-                            fill="currentColor"
-                          >
-                            <path d="M6.75 3A.75.75 0 0 0 6 3.75v.75H5.25a2.25 2.25 0 0 0-2.235 2.026L3 6.75v11.25A2.25 2.25 0 0 0 5.25 20.25h13.5A2.25 2.25 0 0 0 21 18V6.75a2.25 2.25 0 0 0-2.026-2.235L18.75 4.5H18v-.75a.75.75 0 0 0-.75-.75h-10.5ZM12 8.25a.75.75 0 0 1 .743.648l.007.102v4.19l2.22 2.22a.75.75 0 0 1-.976 1.133l-.084-.073-2.5-2.5A.75.75 0 0 1 11.25 13.5v-4.5a.75.75 0 0 1 .75-.75Z" />
-                          </svg>
-                          Submitted:
-                        </span>{' '}
-                        {new Date(paper.submittedAt).toLocaleString()}
-                      </p>
-                      <p>
-                        <span className="inline-flex items-center gap-1 text-emerald-700">
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            className="h-3.5 w-3.5 text-emerald-500"
-                            fill="currentColor"
-                          >
-                            <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-4 0-7 2-7 4v1.25A1.75 1.75 0 0 0 6.75 21h10.5A1.75 1.75 0 0 0 19 19.25V18c0-2-3-4-7-4Z" />
-                          </svg>
-                          Submitted By:
-                        </span>{' '}
-                        <span className="text-slate-900">
-                          {paper.submittedBy}
-                          <span className="ml-1 text-[0.7rem] rounded-full bg-indigo-100 px-2 py-0.5 font-semibold text-indigo-700">
-                            Team Lead
-                          </span>
-                        </span>
-                      </p>
-                      {paper.fileSize && (
-                        <p>
-                          <span className="inline-flex items-center gap-1 text-emerald-700">
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              viewBox="0 0 24 24"
-                              className="h-3.5 w-3.5 text-emerald-500"
-                              fill="currentColor"
-                            >
-                              <path d="M6.75 2.25A2.25 2.25 0 0 0 4.5 4.5v15a2.25 2.25 0 0 0 2.25 2.25h10.5A2.25 2.25 0 0 0 19.5 19.5v-15A2.25 2.25 0 0 0 17.25 2.25H6.75ZM12 18a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z" />
-                            </svg>
-                            Size:
-                          </span>{' '}
-                          {(paper.fileSize / 1024).toFixed(2)} KB
-                        </p>
-                      )}
-                      <p>
-                        <span className="inline-flex items-center gap-1 text-violet-700">
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            className="h-3.5 w-3.5 text-violet-500"
-                            fill="currentColor"
-                          >
-                            <path d="M12 2a10 10 0 0 0-7.071 17.071A10 10 0 1 0 12 2Zm0 3a7 7 0 1 1-4.95 11.95A7 7 0 0 1 12 5Zm-.75 2.75a.75.75 0 0 0-.743.648L10.5 8.5v4.25c0 .28.156.538.402.667l3 1.5a.75.75 0 0 0 .67-1.342L12 11.987V8.5a.75.75 0 0 0-.75-.75Z" />
-                          </svg>
-                          Current Workflow Stage:
-                        </span>{' '}
-                        <span className="text-slate-900">
-                          {getWorkflowStageForPaper(paper.status)}
-                        </span>
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex flex-col gap-2 ml-4">
-                    <button
-                      type="button"
-                      className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-100 border border-indigo-300 hover:bg-indigo-200 text-xs font-medium text-indigo-800 transition"
-                      onClick={async () => {
-                        if (!paper.fileUrl) {
-                          alert('No file is available to view for this paper yet.');
-                          return;
-                        }
-                        const { data } = supabase.storage
-                          .from('exam_papers')
-                          .getPublicUrl(paper.fileUrl);
-                        if (!data?.publicUrl) {
-                          alert('Unable to generate a view link for this paper.');
-                          return;
-                        }
-                        window.open(data.publicUrl, '_blank');
-                      }}
-                    >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-3.5 w-3.5"
-                        fill="currentColor"
-                      >
-                        <path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7Zm0 4a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z" />
-                      </svg>
-                      <span>View</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-100 border border-emerald-300 hover:bg-emerald-200 text-xs font-medium text-emerald-800 transition"
-                      onClick={async () => {
-                        if (!paper.fileUrl) {
-                          alert('No file is available to download for this paper yet.');
-                          return;
-                        }
-                        const { data } = supabase.storage
-                          .from('exam_papers')
-                          .getPublicUrl(paper.fileUrl);
-                        if (!data?.publicUrl) {
-                          alert('Unable to generate a download link for this paper.');
-                          return;
-                        }
-                        const link = document.createElement('a');
-                        link.href = data.publicUrl;
-                        link.download = paper.fileName || 'exam-paper.pdf';
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                      }}
-                    >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-3.5 w-3.5"
-                        fill="currentColor"
-                      >
-                        <path d="M12 3a1 1 0 0 1 1 1v9.586l2.293-2.293a1 1 0 0 1 1.497 1.32l-.083.094-4 4a1 1 0 0 1-1.32.083l-.094-.083-4-4a1 1 0 0 1 1.32-1.497l.094.083L11 13.586V4a1 1 0 0 1 1-1Zm-7 14a1 1 0 0 1 .117 1.993L5 19H4a1 1 0 0 0-.993.883L3 20a1 1 0 0 0 .883.993L4 21h16a1 1 0 0 0 .993-.883L21 20a1 1 0 0 0-.883-.993L20 19h-1a1 1 0 0 1-.117-1.993L19 17h1a3 3 0 0 1 2.995 2.824L23 20a3 3 0 0 1-2.824 2.995L20 23H4a3 3 0 0 1-2.995-2.824L1 20a3 3 0 0 1 2.824-2.995L4 17h1Z" />
-                      </svg>
-                      <span>Download</span>
-                    </button>
-                    {paper.status === 'vetted' && (
-                      <button
-                        type="button"
-                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-100 hover:bg-indigo-200 text-xs font-medium text-indigo-800 transition"
-                        onClick={async () => {
-                          if (!paper.fileUrl) {
-                            alert('No file is available for report generation.');
-                            return;
-                          }
-                          const { data } = supabase.storage
-                            .from('exam_papers')
-                            .getPublicUrl(paper.fileUrl);
-                          if (!data?.publicUrl) {
-                            alert('Unable to generate report link.');
-                            return;
-                          }
-                          window.open(data.publicUrl, '_blank');
-                        }}
-                      >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          className="h-3.5 w-3.5"
-                          fill="currentColor"
-                        >
-                          <path d="M7 2a2 2 0 0 0-2 2v16l7-3 7 3V4a2 2 0 0 0-2-2H7Zm2.5 5h5a1 1 0 0 1 .117 1.993L14.5 9h-5a1 1 0 0 1-.117-1.993L9.5 7h5-5Zm0 4h3a1 1 0 0 1 .117 1.993L12.5 13h-3a1 1 0 0 1-.117-1.993L9.5 11h3-3Z" />
-                        </svg>
-                        <span>Download Report</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
+          <CompactPaperCards 
+            papers={submittedPapers.filter((p) => p.submittedRole === 'Team Lead')}
+            getSubmitterName={getSubmitterName}
+            getStatusLabel={getStatusLabel}
+            getStatusColor={getStatusColor}
+            getWorkflowStageForPaper={getWorkflowStageForPaper}
+            resolvePaperUrl={resolvePaperUrl}
+          />
         </SectionCard>
       )}
     </div>
@@ -9924,6 +10813,61 @@ function TeamLeadDashboardPanel({
   submittedPapers,
   setterSubmissions,
 }: TeamLeadDashboardPanelProps) {
+  // Helper functions for paper cards
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'submitted':
+        return 'text-violet-400 bg-violet-500/10 border-violet-500/30';
+      case 'in-vetting':
+        return 'text-amber-400 bg-amber-500/10 border-amber-500/30';
+      case 'vetted':
+        return 'text-blue-600 bg-blue-500/10 border-blue-500/30';
+      case 'approved':
+        return 'text-green-600 bg-green-500/10 border-green-500/30';
+      default:
+        return 'text-slate-600 bg-slate-500/10 border-slate-500/30';
+    }
+  };
+
+  const getStatusLabel = (status: string) => {
+    switch (status) {
+      case 'submitted':
+        return 'Submitted';
+      case 'in-vetting':
+        return 'In Vetting';
+      case 'vetted':
+        return 'Vetted';
+      case 'approved':
+        return 'Approved';
+      default:
+        return status;
+    }
+  };
+
+  const getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
+    // If paper is submitted by Team Lead, it's a submission TO Chief Examiner
+    if (paper.submittedRole === 'Team Lead' && paper.status === 'submitted') {
+      return 'Submitted to Chief Examiner';
+    }
+    
+    switch (paper.status) {
+      case 'submitted':
+        return 'Submitted to Team Lead';
+      case 'in-vetting':
+        return 'Vetting in Progress';
+      case 'vetted':
+        return 'Vetted & Returned to Chief Examiner';
+      case 'approved':
+        return 'Approved';
+      default:
+        return 'Unknown';
+    }
+  };
+
+  const getSubmitterName = (paper: SubmittedPaper): string => {
+    return paper.submittedBy || 'Unknown';
+  };
+
   // Derive effective metrics from both in-memory submissions and persisted papers
   const dbSetterDrafts = useMemo(
     () => submittedPapers.filter((p) => p.status === 'submitted').length,
@@ -10093,6 +11037,61 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
   const [similarityResults, setSimilarityResults] = useState<SimilarityResult[]>([]);
   const [showDetails, setShowDetails] = useState<string | null>(null);
   const [scanCompleted, setScanCompleted] = useState(false);
+
+  // Helper functions for paper cards
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'submitted':
+        return 'text-violet-400 bg-violet-500/10 border-violet-500/30';
+      case 'in-vetting':
+        return 'text-amber-400 bg-amber-500/10 border-amber-500/30';
+      case 'vetted':
+        return 'text-blue-600 bg-blue-500/10 border-blue-500/30';
+      case 'approved':
+        return 'text-green-600 bg-green-500/10 border-green-500/30';
+      default:
+        return 'text-slate-600 bg-slate-500/10 border-slate-500/30';
+    }
+  };
+
+  const getStatusLabel = (status: string) => {
+    switch (status) {
+      case 'submitted':
+        return 'Submitted';
+      case 'in-vetting':
+        return 'In Vetting';
+      case 'vetted':
+        return 'Vetted';
+      case 'approved':
+        return 'Approved';
+      default:
+        return status;
+    }
+  };
+
+  const getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
+    // If paper is submitted by Team Lead, it's a submission TO Chief Examiner
+    if (paper.submittedRole === 'Team Lead' && paper.status === 'submitted') {
+      return 'Submitted to Chief Examiner';
+    }
+    
+    switch (paper.status) {
+      case 'submitted':
+        return 'Submitted to Team Lead';
+      case 'in-vetting':
+        return 'Vetting in Progress';
+      case 'vetted':
+        return 'Vetted & Returned to Chief Examiner';
+      case 'approved':
+        return 'Approved';
+      default:
+        return 'Unknown';
+    }
+  };
+
+  const getSubmitterName = (paper: SubmittedPaper): string => {
+    return paper.submittedBy || 'Unknown';
+  };
 
   // Convert repository papers to Paper format for comparison
   const allRepositoryPapers: Paper[] = repositoryPapers.map(paper => ({
@@ -10282,31 +11281,18 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
 
   const handleSendToVetting = (paperId: string) => {
     setSubmittedPapers((prev) => {
-      const updated = prev.map((paper) => {
+      const base = stripDemoPaper(prev);
+      const updated = base.map((paper) => {
         if (paper.id === paperId) {
           return { ...paper, status: 'in-vetting' as const };
         }
         return paper;
       });
-      
-      // Persist to localStorage
-      try {
-        const papersData = localStorage.getItem('ucu-moderation-papers');
-        if (papersData) {
-          const allPapers = JSON.parse(papersData);
-          const updatedAllPapers = allPapers.map((p: SubmittedPaper) => 
-            p.id === paperId ? { ...p, status: 'in-vetting' as const } : p
-          );
-          localStorage.setItem('ucu-moderation-papers', JSON.stringify(updatedAllPapers));
-        }
-      } catch (error) {
-        console.error('Error saving paper status to localStorage:', error);
-      }
-      
-      return updated;
+      return ensureDemoPaper(updated);
     });
     
-    alert('Paper has been sent to vetting successfully!');
+    void syncPaperStatusToSupabase(paperId, 'vetting_in_progress');
+    alert('Paper has been sent to vetting successfully! It will remain in the vetting suite until the session is completed or advanced.');
   };
 
   return (
@@ -10399,7 +11385,7 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleSendToVetting(paper.id);
+                                void handleSendToVetting(paper.id);
                               }}
                               className="mt-3 w-full rounded-xl bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 px-4 py-3 text-sm font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 flex items-center justify-center gap-2 relative overflow-hidden group"
                             >
@@ -10462,7 +11448,7 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                         <button
                           key={paper.id}
                           type="button"
-                          onClick={() => handleSendToVetting(paper.id)}
+                          onClick={() => void handleSendToVetting(paper.id)}
                           className="w-full rounded-xl bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 px-6 py-3 text-sm font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 flex items-center justify-center gap-2 relative overflow-hidden group"
                         >
                           <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
@@ -10569,7 +11555,7 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                             className="w-full rounded-xl bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 px-3 py-2.5 text-[0.7rem] font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.03] transition-all duration-300 flex items-center justify-center gap-1.5 relative overflow-hidden group"
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleSendToVetting(result.paperId);
+                              void handleSendToVetting(result.paperId);
                             }}
                           >
                             <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
@@ -10870,11 +11856,174 @@ function RepositoryPapersPanel({ repositoryPapers }: RepositoryPapersPanelProps)
   );
 }
 
+// Compact Paper Cards Component - Shared component
+function CompactPaperCards({ 
+    papers, 
+    getSubmitterName, 
+    getStatusLabel, 
+    getStatusColor, 
+    getWorkflowStageForPaper,
+    resolvePaperUrl 
+  }: {
+    papers: SubmittedPaper[];
+    getSubmitterName: (paper: SubmittedPaper) => string;
+    getStatusLabel: (status: string) => string;
+    getStatusColor: (status: string) => string;
+    getWorkflowStageForPaper: (paper: SubmittedPaper) => string;
+    resolvePaperUrl: (url?: string) => string | null;
+  }): JSX.Element {
+    const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
+
+    const toggleCard = (paperId: string) => {
+      setExpandedCards(prev => {
+        const next = new Set(prev);
+        if (next.has(paperId)) {
+          next.delete(paperId);
+        } else {
+          next.add(paperId);
+        }
+        return next;
+      });
+    };
+
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        {papers.map((paper) => {
+          const isExpanded = expandedCards.has(paper.id);
+          const submitterName = getSubmitterName(paper);
+          
+          return (
+            <div
+              key={paper.id}
+              className={`relative overflow-hidden rounded-xl border border-purple-200/50 bg-gradient-to-br from-purple-50 via-indigo-50 to-pink-50 p-4 transition-all duration-300 cursor-pointer hover:shadow-lg ${
+                isExpanded ? 'shadow-lg ring-2 ring-purple-300' : 'shadow-sm'
+              }`}
+              onClick={() => toggleCard(paper.id)}
+            >
+              {/* Compact View */}
+              <div className="flex items-center justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-purple-100 text-purple-600 text-xs font-bold flex-shrink-0">
+                      📄
+                    </span>
+                    <h4 className="text-sm font-semibold text-slate-800 truncate">{paper.fileName}</h4>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className={`px-2 py-0.5 rounded-md text-[0.65rem] font-medium ${getStatusColor(paper.status)}`}>
+                      {getStatusLabel(paper.status)}
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md text-[0.65rem] font-semibold bg-purple-100 text-purple-700 border border-purple-200">
+                      Team Lead
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600 mt-2 truncate">
+                    <span className="font-medium">By:</span> {submitterName}
+                  </p>
+                </div>
+                <div className="ml-2 flex-shrink-0">
+                  <svg
+                    className={`h-5 w-5 text-purple-600 transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </div>
+              </div>
+
+              {/* Expanded Details */}
+              {isExpanded && (
+                <div className="mt-4 pt-4 border-t border-purple-200/50 space-y-2.5 animate-in fade-in slide-in-from-top-2">
+                  <div className="space-y-1.5 text-xs">
+                    <p className="flex items-center gap-1.5 text-slate-700">
+                      <span className="text-indigo-500">📅</span>
+                      <span className="font-medium">Submitted:</span>
+                      <span>{new Date(paper.submittedAt).toLocaleString()}</span>
+                    </p>
+                    <p className="flex items-center gap-1.5 text-slate-700">
+                      <span className="text-emerald-500">👤</span>
+                      <span className="font-medium">By:</span>
+                      <span>{submitterName}</span>
+                    </p>
+                    {paper.fileSize && (
+                      <p className="flex items-center gap-1.5 text-slate-700">
+                        <span className="text-blue-500">💾</span>
+                        <span className="font-medium">Size:</span>
+                        <span>{(paper.fileSize / 1024).toFixed(2)} KB</span>
+                      </p>
+                    )}
+                    {paper.courseCode && paper.courseUnit && (
+                      <p className="flex items-center gap-1.5 text-slate-700">
+                        <span className="text-violet-500">📚</span>
+                        <span className="font-medium">Course:</span>
+                        <span>{paper.courseCode} - {paper.courseUnit}</span>
+                      </p>
+                    )}
+                    <p className="flex items-center gap-1.5 text-slate-700">
+                      <span className="text-amber-500">⚙️</span>
+                      <span className="font-medium">Stage:</span>
+                      <span>{getWorkflowStageForPaper(paper)}</span>
+                    </p>
+                  </div>
+                  <div className="flex gap-2 pt-2" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-medium transition shadow-sm"
+                      onClick={() => {
+                        const publicUrl = resolvePaperUrl(paper.fileUrl);
+                        if (!publicUrl) {
+                          alert('No file is available to view for this paper yet.');
+                          return;
+                        }
+                        window.open(publicUrl, '_blank');
+                      }}
+                    >
+                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      </svg>
+                      View
+                    </button>
+                    <button
+                      type="button"
+                      className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-medium transition shadow-sm"
+                      onClick={() => {
+                        const publicUrl = resolvePaperUrl(paper.fileUrl);
+                        if (!publicUrl) {
+                          alert('No file is available to download for this paper yet.');
+                          return;
+                        }
+                        const link = document.createElement('a');
+                        link.href = publicUrl;
+                        link.download = paper.fileName || 'exam-paper.pdf';
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                      }}
+                    >
+                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                      Download
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+}
+
 interface ChiefExaminerDashboardPanelProps {
   workflow: WorkflowState;
   submittedPapers: SubmittedPaper[];
   setterSubmissions: SetterSubmission[];
   annotations: Annotation[];
+  users: User[];
 }
 
 function ChiefExaminerDashboardPanel({
@@ -10882,8 +12031,20 @@ function ChiefExaminerDashboardPanel({
   submittedPapers,
   setterSubmissions,
   annotations,
+  users,
 }: ChiefExaminerDashboardPanelProps) {
   const effectiveStage = getEffectiveWorkflowStage(submittedPapers, workflow.stage);
+  
+  // Helper to get user name from ID or submittedBy field
+  const getSubmitterName = (paper: SubmittedPaper): string => {
+    // First try to find user by ID if submittedBy looks like an ID
+    if (paper.submittedBy && paper.submittedBy.length > 20) {
+      const user = users.find(u => u.id === paper.submittedBy);
+      if (user) return user.name;
+    }
+    // Otherwise return the submittedBy value (might already be a name)
+    return paper.submittedBy || 'Unknown';
+  };
 
   // Helper functions for displaying paper status
   const getStatusColor = (status: string) => {
@@ -10916,8 +12077,13 @@ function ChiefExaminerDashboardPanel({
     }
   };
 
-  const getWorkflowStageForPaper = (status: SubmittedPaper['status']): string => {
-    switch (status) {
+  const getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
+    // If paper is submitted by Team Lead, it's a submission TO Chief Examiner
+    if (paper.submittedRole === 'Team Lead' && paper.status === 'submitted') {
+      return 'Submitted to Chief Examiner';
+    }
+    
+    switch (paper.status) {
       case 'submitted':
         return 'Submitted to Team Lead';
       case 'in-vetting':
@@ -10945,7 +12111,7 @@ function ChiefExaminerDashboardPanel({
     submittedPapers.forEach((paper) => {
       if (paper.status === 'submitted') {
         // Only count non-Team Lead papers in 'submitted' status
-        if (paper.submittedRole !== 'Team Lead') {
+      if (paper.submittedRole !== 'Team Lead') {
           statusCounts[paper.status] += 1;
         }
       } else {
@@ -11251,173 +12417,14 @@ function ChiefExaminerDashboardPanel({
             kicker="Compiled Papers for Chief Examiner"
             description="View all papers compiled and submitted by Team Lead. These papers are ready for Chief Examiner AI similarity analysis before vetting."
           >
-            <div className="space-y-3">
-              {submittedPapers.filter((p) => p.submittedRole === 'Team Lead').map((paper: SubmittedPaper) => (
-                <div
-                  key={paper.id}
-                  className={`relative overflow-hidden rounded-2xl border-2 p-5 transition shadow-md bg-gradient-to-r from-indigo-100 via-purple-100 to-pink-100 ring-2 ring-indigo-200`}
-                >
-                  <div className="pointer-events-none absolute inset-0 opacity-45 mix-blend-normal bg-[radial-gradient(circle_at_top,_#6366f1_0,_transparent_50%),radial-gradient(circle_at_bottom,_#a855f7_0,_transparent_60%)]" />
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-2">
-                        <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-1">
-                          <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-indigo-100 text-indigo-600 ring-1 ring-indigo-300">
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              viewBox="0 0 24 24"
-                              className="h-3.5 w-3.5"
-                              fill="currentColor"
-                            >
-                              <path d="M12 2a7 7 0 0 0-7 7v3.586l-.707.707A1 1 0 0 0 5 15h14a1 1 0 0 0 .707-1.707L19 12.586V9a7 7 0 0 0-7-7Zm0 20a3 3 0 0 0 2.995-2.824L15 19h-6a3 3 0 0 0 2.824 2.995L12 22Z" />
-                            </svg>
-                          </span>
-                          {paper.fileName}
-                        </h4>
-                        <span className={`px-2 py-0.5 rounded-lg text-xs font-medium border bg-white/80 text-slate-800`}>
-                          {getStatusLabel(paper.status)}
-                        </span>
-                        <span className="px-2 py-0.5 rounded-lg text-xs font-semibold border bg-indigo-100 text-indigo-700 border-indigo-300">
-                          Team Lead Submission
-                        </span>
-                      </div>
-                      <div className="space-y-1 text-xs text-slate-700">
-                        <p>
-                          <span className="inline-flex items-center gap-1 text-indigo-700">
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              viewBox="0 0 24 24"
-                              className="h-3.5 w-3.5 text-indigo-500"
-                              fill="currentColor"
-                            >
-                              <path d="M6.75 3A.75.75 0 0 0 6 3.75v.75H5.25a2.25 2.25 0 0 0-2.235 2.026L3 6.75v11.25A2.25 2.25 0 0 0 5.25 20.25h13.5A2.25 2.25 0 0 0 21 18V6.75a2.25 2.25 0 0 0-2.026-2.235L18.75 4.5H18v-.75a.75.75 0 0 0-.75-.75h-10.5ZM12 8.25a.75.75 0 0 1 .743.648l.007.102v4.19l2.22 2.22a.75.75 0 0 1-.976 1.133l-.084-.073-2.5-2.5A.75.75 0 0 1 11.25 13.5v-4.5a.75.75 0 0 1 .75-.75Z" />
-                            </svg>
-                            Submitted:
-                          </span>{' '}
-                          {new Date(paper.submittedAt).toLocaleString()}
-                        </p>
-                        <p>
-                          <span className="inline-flex items-center gap-1 text-emerald-700">
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              viewBox="0 0 24 24"
-                              className="h-3.5 w-3.5 text-emerald-500"
-                              fill="currentColor"
-                            >
-                              <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-4 0-7 2-7 4v1.25A1.75 1.75 0 0 0 6.75 21h10.5A1.75 1.75 0 0 0 19 19.25V18c0-2-3-4-7-4Z" />
-                            </svg>
-                            Submitted By:
-                          </span>{' '}
-                          <span className="text-slate-900">
-                            {paper.submittedBy}
-                            <span className="ml-1 text-[0.7rem] rounded-full bg-indigo-100 px-2 py-0.5 font-semibold text-indigo-700">
-                              Team Lead
-                            </span>
-                          </span>
-                        </p>
-                        {paper.fileSize && (
-                          <p>
-                            <span className="inline-flex items-center gap-1 text-emerald-700">
-                              <svg
-                                xmlns="http://www.w3.org/2000/svg"
-                                viewBox="0 0 24 24"
-                                className="h-3.5 w-3.5 text-emerald-500"
-                                fill="currentColor"
-                              >
-                                <path d="M6.75 2.25A2.25 2.25 0 0 0 4.5 4.5v15a2.25 2.25 0 0 0 2.25 2.25h10.5A2.25 2.25 0 0 0 19.5 19.5v-15A2.25 2.25 0 0 0 17.25 2.25H6.75ZM12 18a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z" />
-                              </svg>
-                              Size:
-                            </span>{' '}
-                            {(paper.fileSize / 1024).toFixed(2)} KB
-                          </p>
-                        )}
-                        {paper.courseCode && paper.courseUnit && (
-                          <p>
-                            <span className="inline-flex items-center gap-1 text-violet-700">
-                              <svg
-                                xmlns="http://www.w3.org/2000/svg"
-                                viewBox="0 0 24 24"
-                                className="h-3.5 w-3.5 text-violet-500"
-                                fill="currentColor"
-                              >
-                                <path d="M12 2a10 10 0 0 0-7.071 17.071A10 10 0 1 0 12 2Zm0 3a7 7 0 1 1-4.95 11.95A7 7 0 0 1 12 5Zm-.75 2.75a.75.75 0 0 0-.743.648L10.5 8.5v4.25c0 .28.156.538.402.667l3 1.5a.75.75 0 0 0 .67-1.342L12 11.987V8.5a.75.75 0 0 0-.75-.75Z" />
-                              </svg>
-                              Course:
-                            </span>{' '}
-                            <span className="text-slate-900">
-                              {paper.courseCode} - {paper.courseUnit}
-                            </span>
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex flex-col gap-2 ml-4">
-                      <button
-                        type="button"
-                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-100 border border-indigo-300 hover:bg-indigo-200 text-xs font-medium text-indigo-800 transition"
-                        onClick={async () => {
-                          if (!paper.fileUrl) {
-                            alert('No file is available to view for this paper yet.');
-                            return;
-                          }
-                          const { data } = supabase.storage
-                            .from('exam_papers')
-                            .getPublicUrl(paper.fileUrl);
-                          if (!data?.publicUrl) {
-                            alert('Unable to generate a view link for this paper.');
-                            return;
-                          }
-                          window.open(data.publicUrl, '_blank');
-                        }}
-                      >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          className="h-3.5 w-3.5"
-                          fill="currentColor"
-                        >
-                          <path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7Zm0 4a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z" />
-                        </svg>
-                        <span>View</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-100 border border-emerald-300 hover:bg-emerald-200 text-xs font-medium text-emerald-800 transition"
-                        onClick={async () => {
-                          if (!paper.fileUrl) {
-                            alert('No file is available to download for this paper yet.');
-                            return;
-                          }
-                          const { data } = supabase.storage
-                            .from('exam_papers')
-                            .getPublicUrl(paper.fileUrl);
-                          if (!data?.publicUrl) {
-                            alert('Unable to generate a download link for this paper.');
-                            return;
-                          }
-                          const link = document.createElement('a');
-                          link.href = data.publicUrl;
-                          link.download = paper.fileName || 'exam-paper.pdf';
-                          document.body.appendChild(link);
-                          link.click();
-                          document.body.removeChild(link);
-                        }}
-                      >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          className="h-3.5 w-3.5"
-                          fill="currentColor"
-                        >
-                          <path d="M12 3a1 1 0 0 1 1 1v9.586l2.293-2.293a1 1 0 0 1 1.497 1.32l-.083.094-4 4a1 1 0 0 1-1.32.083l-.094-.083-4-4a1 1 0 0 1 1.32-1.497l.094.083L11 13.586V4a1 1 0 0 1 1-1Zm-7 14a1 1 0 0 1 .117 1.993L5 19H4a1 1 0 0 0-.993.883L3 20a1 1 0 0 0 .883.993L4 21h16a1 1 0 0 0 .993-.883L21 20a1 1 0 0 0-.883-.993L20 19h-1a1 1 0 0 1-.117-1.993L19 17h1a3 3 0 0 1 2.995 2.824L23 20a3 3 0 0 1-2.824 2.995L20 23H4a3 3 0 0 1-2.995-2.824L1 20a3 3 0 0 1 2.824-2.995L4 17h1Z" />
-                        </svg>
-                        <span>Download</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
+            <CompactPaperCards 
+              papers={submittedPapers.filter((p) => p.submittedRole === 'Team Lead')}
+              getSubmitterName={getSubmitterName}
+              getStatusLabel={getStatusLabel}
+              getStatusColor={getStatusColor}
+              getWorkflowStageForPaper={getWorkflowStageForPaper}
+              resolvePaperUrl={resolvePaperUrl}
+            />
           </SectionCard>
         </div>
       )}
@@ -12911,94 +13918,6 @@ function WorkflowOrchestration({
   );
 }
 
-interface VettingRecordCardProps {
-  record: VettingSessionRecord;
-  papersToDisplay: SubmittedPaper[];
-}
-
-function VettingRecordCard({ record, papersToDisplay }: VettingRecordCardProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const paper = papersToDisplay.find(p => p.id === record.paperId);
-  
-  return (
-    <div
-      className="rounded-lg border-2 border-slate-200 bg-white p-3 shadow-sm hover:shadow-md transition-all cursor-pointer"
-      onClick={() => setIsExpanded(!isExpanded)}
-    >
-      <div className="flex items-center justify-between">
-        <div className="flex-1">
-          <p className="text-xs font-bold text-slate-800">{record.paperName}</p>
-          <p className="text-[0.65rem] text-slate-600">
-            {record.courseCode} - {record.courseUnit} • {new Date(record.completedAt).toLocaleString()}
-          </p>
-          <p className="text-[0.6rem] text-slate-500 mt-1">
-            {record.vetters.length} vetter(s) • {record.annotations.length} annotation(s) • {record.durationMinutes} min
-          </p>
-        </div>
-        <div className="ml-2">
-          <span className="text-xs">{isExpanded ? '▼' : '▶'}</span>
-        </div>
-      </div>
-      
-      {isExpanded && (
-        <div className="mt-3 pt-3 border-t border-slate-200 space-y-3">
-          <div>
-            <p className="text-[0.65rem] font-semibold text-slate-700 mb-1">Vetters:</p>
-            {record.vetters.map(vetter => (
-              <div key={vetter.vetterId} className="text-[0.6rem] text-slate-600 ml-2">
-                - {vetter.vetterName} ({vetter.violations} violations, {vetter.warnings.length} warnings)
-              </div>
-            ))}
-          </div>
-          
-          {record.annotations.length > 0 && (
-            <div>
-              <p className="text-[0.65rem] font-semibold text-slate-700 mb-1">Annotations:</p>
-              <div className="space-y-1 max-h-32 overflow-y-auto">
-                {record.annotations.map(ann => (
-                  <div key={ann.id} className="text-[0.6rem] text-slate-600 ml-2 p-1 bg-slate-50 rounded">
-                    <span className="font-semibold">{ann.author}:</span> {ann.comment}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          
-          {record.checklistComments.size > 0 && (
-            <div>
-              <p className="text-[0.65rem] font-semibold text-slate-700 mb-1">Checklist Comments:</p>
-              <div className="space-y-1 max-h-32 overflow-y-auto">
-                {Array.from(record.checklistComments.entries()).map(([key, comment]) => (
-                  <div key={key} className="text-[0.6rem] text-blue-600 ml-2 p-1 bg-blue-50 rounded">
-                    <span className="font-semibold">{comment.vetterName}:</span> {comment.comment}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          
-          {record.vetters.some(v => v.warnings.length > 0) && (
-            <div>
-              <p className="text-[0.65rem] font-semibold text-slate-700 mb-1">Warnings & Violations:</p>
-              <div className="space-y-1 max-h-32 overflow-y-auto">
-                {record.vetters.flatMap(vetter => 
-                  vetter.warnings.map(w => (
-                    <div key={w.id} className={`text-[0.6rem] ml-2 p-1 rounded ${
-                      w.severity === 'critical' ? 'bg-red-50 text-red-800' : 'bg-amber-50 text-amber-800'
-                    }`}>
-                      <span className="font-semibold">{vetter.vetterName} - {w.type}:</span> {w.message}
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 interface ActionButtonProps {
   label: string;
   description: string;
@@ -13052,7 +13971,8 @@ interface VettingAndAnnotationsProps {
   vettingSession: VettingSessionState;
   annotations: Annotation[];
   safeBrowserPolicies: string[];
-  digitalChecklist: typeof digitalChecklist;
+  checklist: typeof digitalChecklist;
+  customChecklistPdf?: { url: string; name: string; isWordDoc?: boolean } | null;
   vettingCountdown: string | null;
   userHasRole: (role: Role) => boolean;
   onStartVetting: (minutes: number) => void;
@@ -13069,19 +13989,28 @@ interface VettingAndAnnotationsProps {
   vetterMonitoring?: Map<string, VetterMonitoring>;
   logVetterWarning?: (vetterId: string, type: VetterWarning['type'], message: string, severity?: 'warning' | 'critical') => void;
   checklistComments?: Map<string, { comment: string; vetterName: string; timestamp: number; color: string }>;
-  onChecklistCommentChange?: (key: string, comment: string | null) => void;
+  onChecklistCommentChange?: (key: string, comment: string | null, color?: string) => void;
+  typingIndicators?: Map<string, string[]>;
+  onChecklistTypingChange?: (key: string, isTyping: boolean) => void;
+  onUploadChecklist?: (file: File) => void;
+  onRemoveChecklist?: () => void;
+  onRemovePaperFromVetting?: (paperId: string) => void;
   onEndSession?: () => void;
   onApprove?: (notes: string) => void;
   onReject?: (notes: string, newDeadline?: { days: number; hours: number; minutes: number }) => void;
-  vettingSessionRecords?: VettingSessionRecord[];
+  onForwardChecklist?: (decision: 'approved' | 'rejected', notes: string) => void;
+  onDownloadChecklistPacket?: () => void;
 }
+
+type ChecklistSectionKey = 'courseOutline' | 'bloomsTaxonomy' | 'compliance';
 
 function VettingAndAnnotations({
   workflowStage,
   vettingSession,
   annotations,
   safeBrowserPolicies,
-  digitalChecklist,
+  checklist,
+  customChecklistPdf,
   vettingCountdown,
   userHasRole,
   onStartVetting,
@@ -13099,16 +14028,299 @@ function VettingAndAnnotations({
           logVetterWarning,
           checklistComments = new Map(),
           onChecklistCommentChange,
+          typingIndicators = new Map(),
+          onChecklistTypingChange,
+  onUploadChecklist,
+  onRemoveChecklist,
+  onRemovePaperFromVetting,
           onEndSession,
           onApprove,
           onReject,
-          vettingSessionRecords = [],
+  onForwardChecklist,
+  onDownloadChecklistPacket,
 }: VettingAndAnnotationsProps) {
   const [annotationDraft, setAnnotationDraft] = useState('');
+  const [forwardDecision, setForwardDecision] = useState<'approved' | 'rejected' | ''>('');
+  const [forwardNotes, setForwardNotes] = useState('');
+  const checklistUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const isChiefExaminer = userHasRole('Chief Examiner');
+  const isVetter = userHasRole('Vetter');
+  const vetterHasJoined = currentUserId ? joinedVetters.has(currentUserId) : false;
+  const showVetterFocusedLayout = isVetter && !isChiefExaminer;
   
-  // State for editing checklist comments
-  const [editingComment, setEditingComment] = useState<string | null>(null);
-  const [editCommentText, setEditCommentText] = useState('');
+  // Simple color selection for text comments (like Word document text color)
+  const [selectedColor, setSelectedColor] = useState('#2563EB');
+  const textColors = [
+    { name: 'Blue', value: '#2563EB' },
+    { name: 'Red', value: '#DC2626' },
+    { name: 'Green', value: '#059669' },
+    { name: 'Orange', value: '#F97316' },
+    { name: 'Purple', value: '#A855F7' },
+    { name: 'Yellow', value: '#EAB308' },
+    { name: 'Pink', value: '#EC4899' },
+    { name: 'Black', value: '#000000' },
+  ];
+  const getTypingStatus = (commentKey: string): string | null => {
+    const names = typingIndicators?.get(commentKey) ?? [];
+    if (!names || names.length === 0) {
+      return null;
+    }
+    if (names.length === 1) {
+      return `${names[0]} is typing…`;
+    }
+    if (names.length === 2) {
+      return `${names[0]} and ${names[1]} are typing…`;
+    }
+    return `${names[0]}, ${names[1]} +${names.length - 2} more are typing…`;
+  };
+
+  const SectionCommentArea = ({
+    sectionKey,
+    label,
+    accentColor,
+  }: {
+    sectionKey: ChecklistSectionKey;
+    label: string;
+    accentColor: string;
+  }) => {
+    const commentKey = `section-${sectionKey}`;
+    const comment = checklistComments?.get(commentKey);
+    const [sectionDraft, setSectionDraft] = useState(comment?.comment ?? '');
+    const typingStatus = getTypingStatus(commentKey);
+
+    useEffect(() => {
+      setSectionDraft(comment?.comment ?? '');
+    }, [comment?.comment, commentKey]);
+
+    const canEditSection = isVetter && vettingSession.active && Boolean(onChecklistCommentChange);
+    const canClearSection = Boolean(comment) && Boolean(onChecklistCommentChange);
+
+    return (
+      <div className="rounded-lg border border-slate-200 bg-white/80 p-3 space-y-2">
+        <div className="flex items-center gap-2">
+          <span
+            className="inline-flex h-6 w-6 items-center justify-center rounded-full border text-xs font-bold"
+            style={{
+              color: accentColor,
+              borderColor: accentColor,
+              backgroundColor: `${accentColor}10`,
+            }}
+          >
+            ✎
+          </span>
+          <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-slate-700">
+            {label} Section Comment
+          </p>
+        </div>
+        {canEditSection ? (
+          <>
+            <textarea
+              value={sectionDraft}
+              onChange={(event) => {
+                setSectionDraft(event.target.value);
+                onChecklistTypingChange?.(commentKey, true);
+              }}
+              onFocus={() => onChecklistTypingChange?.(commentKey, true)}
+              onBlur={() => onChecklistTypingChange?.(commentKey, false)}
+              placeholder="Capture the overall observations for this section."
+              className="w-full rounded border border-slate-300 bg-white px-2 py-1 text-[0.7rem] text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/30"
+              rows={3}
+            />
+            <div className="flex flex-wrap gap-2 text-[0.6rem]">
+              <button
+                type="button"
+                disabled={!sectionDraft.trim()}
+                onClick={() => {
+                  if (!onChecklistCommentChange) return;
+                  onChecklistCommentChange(commentKey, sectionDraft.trim(), accentColor);
+                  onChecklistTypingChange?.(commentKey, false);
+                }}
+                className="rounded bg-blue-600 px-3 py-1 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Save Section Comment
+              </button>
+              <button
+                type="button"
+                disabled={!sectionDraft && !canClearSection}
+                onClick={() => {
+                  if (!onChecklistCommentChange) return;
+                  onChecklistCommentChange(commentKey, null);
+                  setSectionDraft('');
+                  onChecklistTypingChange?.(commentKey, false);
+                }}
+                className="rounded bg-slate-200 px-3 py-1 font-semibold text-slate-700 transition hover:bg-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Clear
+              </button>
+            </div>
+            {typingStatus && (
+              <p className="text-[0.55rem] text-emerald-600">{typingStatus}</p>
+            )}
+          </>
+        ) : (
+          <div className="rounded border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-[0.65rem] text-slate-600">
+            {comment ? (
+              <>
+                <p className="font-semibold text-slate-800">{comment.comment}</p>
+                <p className="mt-1 text-[0.55rem] text-slate-500">
+                  - {comment.vetterName} ({new Date(comment.timestamp).toLocaleString()})
+                </p>
+              </>
+            ) : (
+              <p>No section comment captured yet.</p>
+            )}
+          </div>
+        )}
+        {comment && canEditSection && (
+          <p className="text-[0.55rem] text-slate-500">
+            Last saved by {comment.vetterName} at {new Date(comment.timestamp).toLocaleTimeString()}
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  const AiCommentCard = ({ section }: { section: ChecklistSectionConfig }) => {
+    const commentKey = section.id;
+    const commentEntry = checklistComments?.get(commentKey);
+    const [sectionDraft, setSectionDraft] = useState(commentEntry?.comment ?? '');
+    const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const typingStatus = getTypingStatus(commentKey);
+    const canEditSection = isVetter && vetterHasJoined && Boolean(onChecklistCommentChange);
+    const accentColor = canEditSection
+      ? selectedColor || commentEntry?.color || '#312e81'
+      : commentEntry?.color || '#312e81';
+
+    useEffect(() => {
+      setSectionDraft(commentEntry?.comment ?? '');
+    }, [commentEntry?.comment, commentKey]);
+
+    useEffect(() => {
+      return () => {
+        if (saveTimeoutRef.current) {
+          clearTimeout(saveTimeoutRef.current);
+        }
+        onChecklistTypingChange?.(commentKey, false);
+      };
+    }, [commentKey, onChecklistTypingChange]);
+
+    const persistComment = (value: string) => {
+      if (!onChecklistCommentChange) {
+        return;
+      }
+      onChecklistCommentChange(commentKey, value.trim() || null, accentColor);
+      if (!value.trim()) {
+        onChecklistTypingChange?.(commentKey, false);
+      }
+    };
+
+    const handleDraftChange = (value: string) => {
+      setSectionDraft(value);
+      if (!canEditSection) {
+        return;
+      }
+      onChecklistTypingChange?.(commentKey, true);
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+      saveTimeoutRef.current = setTimeout(() => persistComment(value), 450);
+    };
+
+    const handleBlur = () => {
+      if (!canEditSection) {
+        return;
+      }
+      onChecklistTypingChange?.(commentKey, false);
+      persistComment(sectionDraft);
+    };
+
+    return (
+      <div className="group relative overflow-hidden rounded-3xl border border-white/40 bg-gradient-to-br from-white/95 via-indigo-50/80 to-blue-50/70 p-4 shadow-[0_35px_80px_rgba(15,23,42,0.08)] transition-all duration-500 hover:-translate-y-1 hover:shadow-[0_45px_110px_rgba(79,70,229,0.25)]">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(99,102,241,0.22),_transparent_65%)] opacity-80" />
+        <div className="pointer-events-none absolute -top-10 right-0 h-32 w-32 rounded-full bg-gradient-to-br from-blue-500/40 via-indigo-500/30 to-purple-500/20 blur-3xl opacity-0 transition-opacity duration-500 group-hover:opacity-100" />
+        <div className="pointer-events-none absolute bottom-0 left-0 h-32 w-32 rounded-full bg-gradient-to-br from-sky-400/20 via-cyan-400/10 to-transparent blur-2xl opacity-60" />
+        <div className="relative z-10 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 via-indigo-600 to-purple-600 text-white shadow-lg shadow-indigo-600/40">
+                <span className="text-lg">✨</span>
+              </div>
+              <div>
+                <p className={`text-[0.6rem] font-semibold uppercase tracking-[0.2em] ${section.headingColor}`}>
+                  Section Comment Board
+                </p>
+                <h4 className="text-sm font-bold text-slate-900">{section.title}</h4>
+              </div>
+            </div>
+            <span className="inline-flex items-center gap-1 rounded-full bg-white/80 px-2 py-0.5 text-[0.55rem] font-semibold text-slate-600 shadow-sm shadow-white/70">
+              <span className={`h-1.5 w-1.5 rounded-full`} style={{ backgroundColor: accentColor }} />
+              {commentEntry?.comment ? 'Synced' : 'Ready'}
+            </span>
+          </div>
+          <p className="text-[0.65rem] text-slate-600">
+            {section.placeholder}
+          </p>
+          <div
+            className={`rounded-2xl border border-slate-200/60 bg-white/80 p-3 shadow-inner transition focus-within:border-indigo-400 focus-within:shadow-indigo-200/60 ${
+              canEditSection ? '' : 'opacity-80'
+            }`}
+            style={{
+              borderColor: `${accentColor}33`,
+              boxShadow: canEditSection ? `0 18px 40px ${accentColor}22` : undefined,
+            }}
+          >
+            <textarea
+              value={sectionDraft}
+              onChange={(event) => handleDraftChange(event.target.value)}
+              onFocus={() => canEditSection && onChecklistTypingChange?.(commentKey, true)}
+              onBlur={handleBlur}
+              placeholder="Stream your vetting thoughts here…"
+              readOnly={!canEditSection}
+              className={`w-full resize-none rounded-2xl border border-transparent bg-transparent px-2 py-2 text-xs font-medium leading-relaxed text-slate-900 placeholder:text-slate-400 focus:outline-none ${
+                canEditSection ? 'caret-indigo-500' : 'pointer-events-none select-text'
+              }`}
+              rows={4}
+              style={{
+                color: canEditSection ? selectedColor : commentEntry?.color || '#0f172a',
+              }}
+            />
+            <div className="mt-2 flex items-center justify-between text-[0.58rem] text-slate-500">
+              {canEditSection ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSectionDraft('');
+                      persistComment('');
+                    }}
+                    className="rounded-full bg-slate-100/80 px-2 py-0.5 font-semibold text-slate-600 transition hover:bg-slate-200 hover:text-slate-800"
+                  >
+                    Clear
+                  </button>
+                  {typingStatus && <span className="text-emerald-600">{typingStatus}</span>}
+                </div>
+              ) : (
+                <span className="italic opacity-80">Read-only preview</span>
+              )}
+              <span className="font-semibold" style={{ color: accentColor }}>
+                {commentEntry?.vetterName ? commentEntry.vetterName : 'Ready to capture'}
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center justify-between text-[0.55rem] text-slate-500">
+            {commentEntry?.timestamp ? (
+              <span>Last saved {new Date(commentEntry.timestamp).toLocaleString()}</span>
+            ) : (
+              <span>Not captured yet</span>
+            )}
+            <span className="rounded-full bg-white/70 px-2 py-0.5 font-semibold text-slate-600 shadow-inner">
+              {sectionDraft.trim().length}/500
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  };
   
   // Use submittedPapers from props
   const papersToDisplay = submittedPapers.length > 0 ? submittedPapers : [];
@@ -13116,88 +14328,201 @@ function VettingAndAnnotations({
   // Default to 30 minutes from now for start
   const defaultStartDateTime = new Date(Date.now() + 30 * 60 * 1000).toISOString().slice(0, 16);
   
-  // Helper component to render checklist item with comment functionality
+  // Editable Checklist Item Component - Simple working textarea
+  const EditableChecklistItem = ({ 
+    item, 
+    category, 
+    bulletColor, 
+    commentKey 
+  }: { 
+    item: string; 
+    category: string; 
+    bulletColor: string;
+    commentKey: string;
+  }) => {
+    const comment = checklistComments?.get(commentKey);
+    const [editText, setEditText] = useState(comment?.comment || '');
+    const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const typingStatus = getTypingStatus(commentKey);
+
+    // Update text when comment changes
+    useEffect(() => {
+      setEditText(comment?.comment || '');
+    }, [comment?.comment]);
+
+    // Cleanup timeout on unmount
+    useEffect(() => {
+      return () => {
+        if (saveTimeoutRef.current) {
+          clearTimeout(saveTimeoutRef.current);
+        }
+        onChecklistTypingChange?.(commentKey, false);
+      };
+    }, [commentKey, onChecklistTypingChange]);
+
+    // Handle text change - simple and direct
+    const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      const newValue = e.target.value;
+      setEditText(newValue);
+      onChecklistTypingChange?.(commentKey, true);
+      
+      // Auto-save after 500ms of no typing
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+      
+      if (onChecklistCommentChange) {
+        const colorToUse = selectedColor || '#2563EB';
+        saveTimeoutRef.current = setTimeout(() => {
+          onChecklistCommentChange(commentKey, newValue.trim() || null, colorToUse);
+          if (!newValue.trim()) {
+            onChecklistTypingChange?.(commentKey, false);
+          }
+        }, 500);
+      }
+    };
+
+    // Show read-only for Chief Examiner
+    if (isChiefExaminer) {
+      return (
+        <li className="flex items-start gap-2">
+          <span className="mt-1 h-1.5 w-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: bulletColor }} />
+          <div className="flex-1">
+            <p className="text-xs text-slate-700 mb-1">{item}</p>
+            {comment?.comment ? (
+              <div className="mb-2 rounded-lg border border-slate-200 bg-slate-50/80 p-2">
+                <div className="rounded border border-dashed border-slate-300 bg-white px-2 py-1.5 text-[0.65rem] text-slate-700">
+                  <p className="font-medium text-slate-800" style={{ color: comment.color }}>
+                    {comment.comment}
+                  </p>
+                  <p className="mt-0.5 text-[0.55rem] text-slate-500">
+                    - {comment.vetterName} ({new Date(comment.timestamp).toLocaleString()})
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="min-h-[32px] rounded border-2 border-dashed border-slate-200 bg-slate-50 px-2 py-1.5">
+                <p className="text-xs text-slate-400">No comment yet</p>
+              </div>
+            )}
+          </div>
+        </li>
+      );
+    }
+
+    // Simple working textarea for vetters
+    return (
+      <li className="flex items-start gap-2">
+        <span className="mt-1 h-1.5 w-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: bulletColor }} />
+        <div className="flex-1">
+          <p className="text-xs text-slate-700 mb-1">{item}</p>
+          <textarea
+            value={editText}
+            onChange={handleTextChange}
+            onFocus={() => onChecklistTypingChange?.(commentKey, true)}
+            onBlur={() => onChecklistTypingChange?.(commentKey, false)}
+            className="w-full rounded border-2 border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-y"
+            style={{ 
+              borderColor: selectedColor || bulletColor,
+            }}
+            rows={3}
+            placeholder="Type your comment here..."
+          />
+          {typingStatus && (
+            <p className="mt-1 text-[0.55rem] text-emerald-600">{typingStatus}</p>
+          )}
+        </div>
+      </li>
+    );
+  };
+
+  // Helper component to render checklist item with individual comment functionality
   const ChecklistItem = ({ item, category, bulletColor }: { item: string; category: string; bulletColor: string }) => {
     const commentKey = `${category}-${item}`;
     const comment = checklistComments?.get(commentKey);
-    const isEditing = editingComment === commentKey;
-    
+    const [itemDraft, setItemDraft] = useState(comment?.comment ?? '');
+
+    useEffect(() => {
+      setItemDraft(comment?.comment ?? '');
+    }, [comment?.comment, commentKey]);
+
+    const canEditItem = isVetter && vetterHasJoined && Boolean(onChecklistCommentChange);
+    const canClearItem = Boolean(comment) && Boolean(onChecklistCommentChange);
+
+    // Auto-save when text changes and color is selected
+    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const value = e.target.value;
+      setItemDraft(value);
+      // Auto-save if color is selected
+      if (value.trim() && selectedColor && onChecklistCommentChange) {
+        onChecklistCommentChange(commentKey, value.trim(), selectedColor);
+      }
+    };
+
+    // Save on blur
+    const handleBlur = () => {
+      if (itemDraft.trim() && selectedColor && onChecklistCommentChange) {
+        onChecklistCommentChange(commentKey, itemDraft.trim(), selectedColor);
+      }
+    };
+
     return (
       <li className="space-y-1.5">
         <div className="flex items-start gap-2">
           <span className="mt-0.5 h-1.5 w-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: bulletColor }} />
           <span className="leading-relaxed flex-1">{item}</span>
         </div>
-        {/* Comment section - editable by vetters who have joined the session */}
-        {isVetter && vetterHasJoined && (
-          <div className="ml-5 space-y-1">
-            {!isEditing ? (
+        {/* Simple comment input for vetters - auto-saves when color is selected */}
+        {canEditItem && (
+          <div className="ml-3.5">
+            <input
+              type="text"
+              value={itemDraft}
+              onChange={handleInputChange}
+              onBlur={handleBlur}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.currentTarget.blur();
+                }
+              }}
+              placeholder="Type comment here (select color first)..."
+              className="w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-[0.7rem] text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/30"
+            />
+            {canClearItem && (
               <button
+                type="button"
                 onClick={() => {
-                  setEditingComment(commentKey);
-                  setEditCommentText(comment?.comment || '');
+                  if (!onChecklistCommentChange) return;
+                  onChecklistCommentChange(commentKey, null);
+                  setItemDraft('');
                 }}
-                className="text-[0.6rem] text-blue-600 hover:text-blue-800 font-semibold"
+                className="mt-1 text-[0.6rem] text-red-600 hover:text-red-700 underline"
               >
-                {comment ? 'Edit Comment' : '+ Add Comment'}
+                Clear
               </button>
-            ) : (
-              <div className="space-y-1">
-                <textarea
-                  value={editCommentText}
-                  onChange={(e) => setEditCommentText(e.target.value)}
-                  placeholder="Add your comment here..."
-                  className="w-full rounded border border-blue-300 bg-white px-2 py-1 text-[0.65rem] text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/40 resize-none"
-                  rows={2}
-                />
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => {
-                      if (editCommentText.trim() && onChecklistCommentChange) {
-                        onChecklistCommentChange(commentKey, editCommentText.trim());
-                      } else if (!editCommentText.trim() && onChecklistCommentChange) {
-                        onChecklistCommentChange(commentKey, null);
-                      }
-                      setEditingComment(null);
-                      setEditCommentText('');
-                    }}
-                    className="text-[0.6rem] bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600"
-                  >
-                    Save
-                  </button>
-                  <button
-                    onClick={() => {
-                      setEditCommentText(comment?.comment || '');
-                      setEditingComment(null);
-                    }}
-                    className="text-[0.6rem] bg-slate-300 text-slate-700 px-2 py-1 rounded hover:bg-slate-400"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-            {comment && !isEditing && (
-              <div className="ml-0 mt-1 p-2 rounded bg-blue-50 border border-blue-200">
-                <p className="text-[0.65rem] text-blue-900 leading-relaxed" style={{ color: comment.color }}>
-                  {comment.comment}
-                </p>
-                <p className="text-[0.55rem] text-blue-600 mt-1">
-                  - {comment.vetterName} ({new Date(comment.timestamp).toLocaleTimeString()})
-                </p>
-              </div>
             )}
           </div>
         )}
-        {/* Show comments to Chief Examiner */}
-        {isChiefExaminer && comment && (
-          <div className="ml-5 mt-1 p-2 rounded bg-blue-50 border border-blue-200">
-            <p className="text-[0.65rem] text-blue-900 leading-relaxed" style={{ color: comment.color }}>
-              {comment.comment}
-            </p>
-            <p className="text-[0.55rem] text-blue-600 mt-1">
-              - {comment.vetterName} ({new Date(comment.timestamp).toLocaleTimeString()})
-            </p>
+        {/* Display comment for chief examiner (read-only) */}
+        {isChiefExaminer && comment && !canEditItem && (
+          <div className="ml-3.5 rounded-lg border border-slate-200 bg-slate-50/80 p-2">
+            <div className="rounded border border-dashed border-slate-300 bg-white px-2 py-1.5 text-[0.65rem] text-slate-700">
+              <p className="font-medium text-slate-800">{comment.comment}</p>
+              <p className="mt-0.5 text-[0.55rem] text-slate-500">
+                - {comment.vetterName} ({new Date(comment.timestamp).toLocaleString()})
+              </p>
+            </div>
+          </div>
+        )}
+        {/* Display saved comment for vetters */}
+        {canEditItem && comment && (
+          <div className="ml-3.5 rounded-lg border border-slate-200 bg-slate-50/80 p-2">
+            <div className="rounded border border-dashed border-slate-300 bg-white px-2 py-1.5 text-[0.65rem] text-slate-700">
+              <p className="font-medium text-slate-800">{comment.comment}</p>
+              <p className="mt-0.5 text-[0.55rem] text-slate-500">
+                Saved at {new Date(comment.timestamp).toLocaleString()}
+              </p>
+            </div>
           </div>
         )}
       </li>
@@ -13210,9 +14535,9 @@ function VettingAndAnnotations({
   const calculatedDuration = useMemo(() => {
     if (moderationSchedule?.scheduledStartTime && moderationSchedule?.scheduledEndTime) {
       const diffMs = moderationSchedule.scheduledEndTime - moderationSchedule.scheduledStartTime;
-      return Math.max(5, Math.floor(diffMs / (60 * 1000))); // Convert to minutes, minimum 5
+      return Math.max(DEFAULT_SESSION_MINUTES, Math.floor(diffMs / (60 * 1000))); // Convert to minutes, enforce minimum
     }
-    return 45; // Default fallback
+    return DEFAULT_SESSION_MINUTES; // Default fallback
   }, [moderationSchedule]);
 
   // Custom session duration state - allow user to customize
@@ -13227,13 +14552,35 @@ function VettingAndAnnotations({
   const [selectedPaper, setSelectedPaper] = useState<SubmittedPaper | null>(
     papersToDisplay.find(p => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0] || null
   );
+  const inlinePaperUrl = useMemo(() => {
+    if (!selectedPaper?.fileUrl) return null;
+    return resolvePaperUrl(selectedPaper.fileUrl);
+  }, [selectedPaper?.fileUrl]);
+
+  // For vetters, get first two papers to display side by side
+  const vetterPapers = isVetter && papersToDisplay.length >= 2 
+    ? papersToDisplay.slice(0, 2) 
+    : isVetter && papersToDisplay.length === 1
+    ? [papersToDisplay[0]]
+    : [];
+  
+  const getPaperUrl = (paper: SubmittedPaper) => {
+    if (!paper?.fileUrl) return null;
+    return resolvePaperUrl(paper.fileUrl);
+  };
+
+  // Track paper IDs to detect when papers are removed
+  const paperIds = useMemo(() => papersToDisplay.map(p => p.id).sort().join(','), [papersToDisplay]);
   
   // Update selected paper when papers change
   useEffect(() => {
-    if (papersToDisplay.length > 0 && !selectedPaper) {
+    // Clear selectedPaper if it's no longer in the papersToDisplay list
+    if (selectedPaper && !papersToDisplay.find(p => p.id === selectedPaper.id)) {
+      setSelectedPaper(papersToDisplay.find(p => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0] || null);
+    } else if (papersToDisplay.length > 0 && !selectedPaper) {
       setSelectedPaper(papersToDisplay.find(p => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0] || null);
     }
-  }, [papersToDisplay.length, selectedPaper]);
+  }, [paperIds, papersToDisplay, selectedPaper]);
 
   // Check if scheduled start time has been reached
   // The countdown becomes null when the scheduled time has been reached
@@ -13305,11 +14652,8 @@ function VettingAndAnnotations({
     setAnnotationDraft('');
   };
 
-  const isChiefExaminer = userHasRole('Chief Examiner');
-  const isVetter = userHasRole('Vetter');
-  
-  // Check if current vetter has joined the session
-  const vetterHasJoined = currentUserId ? joinedVetters.has(currentUserId) : false;
+  const hasCustomChecklist = checklist !== digitalChecklist;
+  const hasCustomChecklistPdf = Boolean(customChecklistPdf?.url);
   
   // Vetters can only see paper/checklist after they've joined
   // Chief Examiner can always see everything
@@ -13317,6 +14661,554 @@ function VettingAndAnnotations({
   
   // Vetters can start their session only when global session is active and they haven't joined yet
   const canVetterStartSession = isVetter && vettingSession.active && !vetterHasJoined;
+
+  const examWindow = (
+    <div className="group relative overflow-hidden rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50 via-indigo-50 to-cyan-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+      <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+        <div className="absolute inset-0 bg-gradient-to-br from-blue-400/10 via-indigo-400/10 to-cyan-400/10"></div>
+        <div className="absolute top-0 left-0 w-32 h-32 bg-gradient-to-br from-blue-300/20 to-cyan-300/20 rounded-full blur-3xl transform -translate-x-1/2 -translate-y-1/2"></div>
+      </div>
+      <div className="relative z-10">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-md">
+              <span className="text-white text-sm">📄</span>
+            </div>
+            <h3 className="text-xs font-bold text-slate-800">Exam Paper</h3>
+          </div>
+          {papersToDisplay.length > 1 && (
+            <select
+              value={selectedPaper?.id || ''}
+              onChange={(e) => {
+                const paper = papersToDisplay.find((p) => p.id === e.target.value);
+                setSelectedPaper(paper || null);
+              }}
+              className="rounded-lg border-2 border-blue-200 bg-white px-2 py-1 text-[0.65rem] text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 shadow-sm hover:shadow-md transition-all"
+            >
+              {papersToDisplay.map((paper) => (
+                <option key={paper.id} value={paper.id}>
+                  {paper.fileName}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+        {selectedPaper ? (
+          <div className="space-y-2.5">
+            {isChiefExaminer && (
+              <>
+                <div className="rounded-lg border border-blue-200/50 bg-white/80 backdrop-blur-sm p-2.5">
+                  <p className="text-[0.65rem] font-semibold text-slate-600 mb-0.5">File</p>
+                  <p className="text-xs font-bold text-slate-800 truncate">{selectedPaper.fileName}</p>
+                </div>
+                <div className="rounded-lg border border-indigo-200/50 bg-white/80 backdrop-blur-sm p-2.5">
+                  <p className="text-[0.65rem] font-semibold text-slate-600 mb-0.5">Course</p>
+                  <p className="text-xs font-bold text-slate-800">{selectedPaper.courseCode}</p>
+                </div>
+                {(selectedPaper.status === 'in-vetting' || selectedPaper.status === 'vetted') && onRemovePaperFromVetting && (
+                  <button
+                    type="button"
+                    onClick={() => onRemovePaperFromVetting(selectedPaper.id)}
+                    className="w-full rounded-lg bg-gradient-to-r from-red-500 to-rose-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+                  >
+                    Remove Paper from Vetting
+                  </button>
+                )}
+              </>
+            )}
+            {selectedPaper.fileUrl ? (
+              <div className="space-y-3">
+                {isVetter && vetterPapers.length > 0 ? (
+                  <div className={`grid gap-3 ${vetterPapers.length === 2 ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                    {vetterPapers.map((paper, index) => {
+                      const paperUrl = getPaperUrl(paper);
+                      if (!paperUrl) return null;
+                      return (
+                        <div key={paper.id} className="rounded-xl border-2 border-blue-300/70 bg-white/90 p-3 shadow-inner flex flex-col">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2">
+                              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow">
+                                <span className="text-white text-sm">🪟</span>
+                              </div>
+                              <div>
+                                <p className="text-xs font-bold text-slate-800">Secure In-Window Viewer</p>
+                                <p className="text-[0.6rem] text-slate-500">{paper.fileName}</p>
+                              </div>
+                            </div>
+                            <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.6rem] font-semibold text-emerald-700">
+                              Live Preview
+                            </span>
+                          </div>
+                          <div className="mt-3 aspect-[210/297] overflow-hidden rounded-lg border border-slate-200 bg-slate-900/5">
+                            <iframe
+                              key={paperUrl}
+                              src={`${paperUrl}#toolbar=0&navpanes=0`}
+                              title={`Secure viewer for ${paper.fileName}`}
+                              className="h-full w-full"
+                              loading="lazy"
+                            />
+                          </div>
+                          <p className="mt-2 text-[0.6rem] text-slate-500">Zoom, scroll, and annotate from here while Safe Browser keeps other tabs locked.</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  inlinePaperUrl && (
+                    <div className="rounded-xl border-2 border-blue-300/70 bg-white/90 p-3 shadow-inner flex flex-col">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow">
+                            <span className="text-white text-sm">🪟</span>
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-slate-800">Secure In-Window Viewer</p>
+                            <p className="text-[0.6rem] text-slate-500">Document stays inside the Safe Browser — no new tabs are required.</p>
+                          </div>
+                        </div>
+                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.6rem] font-semibold text-emerald-700">
+                          Live Preview
+                        </span>
+                      </div>
+                      <div className="mt-3 aspect-[210/297] overflow-hidden rounded-lg border border-slate-200 bg-slate-900/5">
+                        <iframe
+                          key={inlinePaperUrl}
+                          src={`${inlinePaperUrl}#toolbar=0&navpanes=0`}
+                          title={`Secure viewer for ${selectedPaper.fileName}`}
+                          className="h-full w-full"
+                          loading="lazy"
+                        />
+                      </div>
+                      <p className="mt-2 text-[0.6rem] text-slate-500">Zoom, scroll, and annotate from here while Safe Browser keeps other tabs locked.</p>
+                    </div>
+                  )
+                )}
+                {isChiefExaminer && selectedPaper.status === 'vetted' && (
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const notes = prompt('Optional notes for approval:') || '';
+                        if (onApprove) {
+                          onApprove(notes);
+                        }
+                      }}
+                      className="flex-1 rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+                    >
+                      ✓ Push to Next Stage
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const notes = prompt('Rejection feedback (required):') || '';
+                        if (!notes.trim()) {
+                          alert('Please provide feedback notes when rejecting a paper.');
+                          return;
+                        }
+                        const days = parseInt(prompt('Set new deadline - Days:', '3') || '0') || 0;
+                        const hours = parseInt(prompt('Set new deadline - Hours:', '0') || '0') || 0;
+                        const minutes = parseInt(prompt('Set new deadline - Minutes:', '0') || '0') || 0;
+                        if (days === 0 && hours === 0 && minutes === 0) {
+                          if (!confirm('No deadline set. Continue without deadline?')) {
+                            return;
+                          }
+                        }
+                        onReject?.(notes, days || hours || minutes ? { days, hours, minutes } : undefined);
+                      }}
+                      className="flex-1 rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all	duration-300"
+                    >
+                      ✗ Rejected
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-lg border-2 border-amber-200 bg-amber-50/80 p-2.5 text-center">
+                <p className="text-[0.65rem] text-amber-700">File not available</p>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-slate-500">No paper selected</p>
+        )}
+      </div>
+    </div>
+  );
+
+  // Simple comment box state
+  const [simpleComment, setSimpleComment] = useState('');
+  const [simpleCommentKey, setSimpleCommentKey] = useState('');
+
+  // Load existing quick comment on mount
+  useEffect(() => {
+    if (checklistComments) {
+      // Find any quick comment
+      for (const [key, comment] of checklistComments.entries()) {
+        if (key.startsWith('quick-comment-')) {
+          setSimpleComment(comment.comment);
+          setSimpleCommentKey(key);
+          break;
+        }
+      }
+    }
+  }, [checklistComments]);
+
+  const defaultChecklistWindows = (
+    <div className="space-y-4">
+      {/* Editable Checklist - Click to type directly on items */}
+      {((isVetter && vetterHasJoined) || isChiefExaminer) && !hasCustomChecklistPdf && (
+        <div className="rounded-xl border-2 border-blue-200 bg-white p-4 shadow-lg">
+          <div className="mb-4">
+            <h3 className="text-sm font-bold text-slate-800 mb-2">Moderation Checklist - Click any item to write on it</h3>
+            <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-slate-50/50 p-2">
+              <span className="text-[0.65rem] font-semibold text-slate-700">Select color:</span>
+              <div className="flex flex-wrap gap-1">
+                {textColors.map((color) => (
+                  <button
+                    key={color.value}
+                    type="button"
+                    onClick={() => setSelectedColor(color.value)}
+                    className={`h-6 w-6 rounded border-2 transition ${
+                      selectedColor === color.value
+                        ? 'border-slate-800 scale-110 shadow'
+                        : 'border-slate-300 hover:border-slate-500'
+                    }`}
+                    style={{ backgroundColor: color.value }}
+                    title={color.name}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+          
+          {/* Course Outline Section */}
+          <div className="mb-6">
+            <h4 className="text-xs font-bold text-blue-700 mb-2">Course Outline</h4>
+            <ul className="space-y-3">
+              {checklist.courseOutline.map((item, idx) => (
+                <EditableChecklistItem
+                  key={idx}
+                  item={item}
+                  category="courseOutline"
+                  bulletColor="#3B82F6"
+                  commentKey={`courseOutline-${item}`}
+                />
+              ))}
+            </ul>
+          </div>
+
+          {/* Blooms Taxonomy Section */}
+          <div className="mb-6">
+            <h4 className="text-xs font-bold text-purple-700 mb-2">Blooms Taxonomy</h4>
+            <ul className="space-y-3">
+              {checklist.bloomsTaxonomy.map((item, idx) => (
+                <EditableChecklistItem
+                  key={idx}
+                  item={item}
+                  category="bloomsTaxonomy"
+                  bulletColor="#A855F7"
+                  commentKey={`bloomsTaxonomy-${item}`}
+                />
+              ))}
+            </ul>
+          </div>
+
+          {/* Compliance Section */}
+          <div>
+            <h4 className="text-xs font-bold text-emerald-700 mb-2">Compliance</h4>
+            <ul className="space-y-3">
+              {checklist.compliance.map((item, idx) => (
+                <EditableChecklistItem
+                  key={idx}
+                  item={item}
+                  category="compliance"
+                  bulletColor="#10B981"
+                  commentKey={`compliance-${item}`}
+                />
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+      {hasCustomChecklistPdf && (
+        <div className="group relative overflow-hidden rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50 via-indigo-50 to-cyan-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+              <div className="absolute inset-0 bg-gradient-to-br from-blue-400/10 via-indigo-400/10 to-cyan-400/10"></div>
+            <div className="absolute top-0 left-0 w-32 h-32 bg-gradient-to-br from-blue-300/20 to-cyan-300/20 rounded-full blur-3xl transform -translate-x-1/2 -translate-y-1/2"></div>
+          </div>
+          <div className="relative z-10">
+            <div className="mb-3">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-md">
+                    <span className="text-white text-sm">📑</span>
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-800">
+                      {(customChecklistPdf as { url: string; name: string; isWordDoc?: boolean })?.isWordDoc ? 'Uploaded Checklist Word Document' : 'Uploaded Checklist PDF'}
+                    </h3>
+                    <p className="text-[0.65rem] text-slate-600">{customChecklistPdf?.name}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {/* Editable Word Document Interface */}
+            {(customChecklistPdf as { url: string; name: string; isWordDoc?: boolean })?.isWordDoc ? (
+              <div className="rounded-lg border-2 border-blue-200 bg-white p-8 shadow-lg" style={{ minHeight: '800px' }}>
+                <div 
+                  contentEditable 
+                  suppressContentEditableWarning
+                  className="w-full h-full outline-none prose prose-sm max-w-none"
+                  style={{
+                    fontFamily: 'Calibri, Arial, sans-serif',
+                    fontSize: '11pt',
+                    lineHeight: '1.15',
+                    padding: '1in',
+                    backgroundColor: 'white',
+                    minHeight: '800px'
+                  }}
+                  onInput={(e) => {
+                    // Auto-save content as user types
+                    const content = e.currentTarget.innerHTML;
+                    // You can save this to localStorage or state if needed
+                  }}
+                >
+                  <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+                    <h1 style={{ fontSize: '16pt', fontWeight: 'bold', color: '#0066CC', marginBottom: '10px' }}>
+                      UGANDA CHRISTIAN UNIVERSITY
+                    </h1>
+                    <p style={{ fontSize: '10pt', marginBottom: '5px' }}>Faculty of Science and Technology</p>
+                    <p style={{ fontSize: '10pt', marginBottom: '5px' }}>Department of Information Technology</p>
+                    <h2 style={{ fontSize: '14pt', fontWeight: 'bold', color: '#0066CC', marginTop: '15px', marginBottom: '20px' }}>
+                      MODERATION CHECKLIST FOR EXAMINATION PAPER
+                    </h2>
+                  </div>
+                  
+                  <div style={{ marginBottom: '15px' }}>
+                    <p><strong>Academic Year:</strong> <span contentEditable style={{ borderBottom: '1px solid black', minWidth: '200px', display: 'inline-block' }}></span></p>
+                    <p><strong>Moderator:</strong> <span contentEditable style={{ borderBottom: '1px solid black', minWidth: '200px', display: 'inline-block' }}></span></p>
+                    <p><strong>Date:</strong> <span contentEditable style={{ borderBottom: '1px solid black', minWidth: '200px', display: 'inline-block' }}></span></p>
+                  </div>
+
+                  <div style={{ marginTop: '30px' }}>
+                    <h3 style={{ fontSize: '12pt', fontWeight: 'bold', color: '#0066CC', marginBottom: '10px' }}>
+                      SECTION A — STRUCTURE & GENERAL QUALITY
+                    </h3>
+                    <h4 style={{ fontSize: '11pt', fontWeight: 'bold', marginTop: '15px', marginBottom: '10px' }}>
+                      1. Paper Structure
+                    </h4>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '20px' }}>
+                      <thead>
+                        <tr style={{ backgroundColor: '#E6F2FF' }}>
+                          <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left', fontSize: '10pt' }}>Item</th>
+                          <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center', fontSize: '10pt', width: '80px' }}>Yes/No</th>
+                          <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left', fontSize: '10pt' }}>Comments</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', fontSize: '10pt' }}>Paper includes clear instructions</td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center' }} contentEditable></td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px' }} contentEditable></td>
+                        </tr>
+                        <tr>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', fontSize: '10pt' }}>Time allocation is appropriate (2 hours)</td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center' }} contentEditable></td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px' }} contentEditable></td>
+                        </tr>
+                        <tr>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', fontSize: '10pt' }}>Number of questions meets course requirements</td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center' }} contentEditable></td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px' }} contentEditable></td>
+                        </tr>
+                        <tr>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', fontSize: '10pt' }}>Mark distribution is balanced</td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center' }} contentEditable></td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px' }} contentEditable></td>
+                        </tr>
+                        <tr>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', fontSize: '10pt' }}>Language is clear and unambiguous</td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center' }} contentEditable></td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px' }} contentEditable></td>
+                        </tr>
+                        <tr>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', fontSize: '10pt' }}>No grammatical or typographical errors</td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center' }} contentEditable></td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px' }} contentEditable></td>
+                        </tr>
+                      </tbody>
+                    </table>
+
+                    <h3 style={{ fontSize: '12pt', fontWeight: 'bold', color: '#0066CC', marginTop: '30px', marginBottom: '10px' }}>
+                      SECTION B — ALIGNMENT WITH COURSE OUTLINE
+                    </h3>
+                    <h4 style={{ fontSize: '11pt', fontWeight: 'bold', marginTop: '15px', marginBottom: '10px' }}>
+                      2. Coverage of Course Content
+                    </h4>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '20px' }}>
+                      <thead>
+                        <tr style={{ backgroundColor: '#E6F2FF' }}>
+                          <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left', fontSize: '10pt' }}>Core Topic from Course Outline</th>
+                          <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center', fontSize: '10pt', width: '80px' }}>Covered?</th>
+                          <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left', fontSize: '10pt' }}>Comments</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', fontSize: '10pt' }}>Software Defined Networking (SDN)</td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center' }} contentEditable></td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px' }} contentEditable></td>
+                        </tr>
+                        <tr>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', fontSize: '10pt' }}>OpenFlow Architecture</td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center' }} contentEditable></td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px' }} contentEditable></td>
+                        </tr>
+                        <tr>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', fontSize: '10pt' }}>Routing Algorithms</td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center' }} contentEditable></td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px' }} contentEditable></td>
+                        </tr>
+                        <tr>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', fontSize: '10pt' }}>Network Virtualization</td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center' }} contentEditable></td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px' }} contentEditable></td>
+                        </tr>
+                        <tr>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', fontSize: '10pt' }}>TCP/IP Protocols</td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'center' }} contentEditable></td>
+                          <td style={{ border: '1px solid #ccc', padding: '8px' }} contentEditable></td>
+                        </tr>
+                      </tbody>
+                    </table>
+
+                    <p style={{ fontSize: '10pt', marginTop: '30px', color: '#666' }}>
+                      <strong>Additional Comments:</strong>
+                    </p>
+                    <div contentEditable style={{ border: '1px solid #ccc', padding: '10px', minHeight: '100px', marginTop: '10px' }}></div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div id="checklist-pdf-container" className="relative rounded-lg border border-blue-200 bg-white overflow-hidden aspect-[210/297]">
+                <iframe 
+                  src={`${customChecklistPdf?.url}#toolbar=0&navpanes=0`} 
+                  title="Custom Checklist PDF" 
+                  className="w-full h-full"
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      {isChiefExaminer && checklistComments && checklistComments.size > 0 && onDownloadChecklistPacket && (
+        <div className="flex justify-end">
+          <button
+            onClick={onDownloadChecklistPacket}
+            className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+          >
+            📥 Download Checklist with Comments
+          </button>
+        </div>
+      )}
+      {isChiefExaminer && (
+        <div className="rounded-xl border-2 border-slate-200 bg-white p-4 shadow-lg space-y-3">
+          <div>
+            <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wide">Forward Checklist to Team Lead</h3>
+            <p className="text-[0.65rem] text-slate-500">Select verdict and include notes before sending outcomes downstream.</p>
+          </div>
+          <div className="flex gap-3 text-[0.7rem] font-semibold text-slate-700">
+            <label className="flex items-center gap-1">
+              <input type="radio" name="forward-decision" value="approved" checked={forwardDecision === 'approved'} onChange={() => setForwardDecision('approved')} />
+              Approved
+            </label>
+            <label className="flex items-center gap-1">
+              <input type="radio" name="forward-decision" value="rejected" checked={forwardDecision === 'rejected'} onChange={() => setForwardDecision('rejected')} />
+              Rejected
+            </label>
+          </div>
+          <textarea
+            value={forwardNotes}
+            onChange={(e) => setForwardNotes(e.target.value)}
+            placeholder="Add context, actions required, or attach summary..."
+            className="w-full rounded-lg border-2 border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+            rows={3}
+          />
+          <button
+            type="button"
+            disabled={!forwardDecision || !forwardNotes.trim()}
+            onClick={() => {
+              if (!forwardDecision) {
+                alert('Select Approved or Rejected before forwarding.');
+                return;
+              }
+              if (!forwardNotes.trim()) {
+                alert('Please include decision notes.');
+                return;
+              }
+              onForwardChecklist?.(forwardDecision, forwardNotes.trim());
+              setForwardNotes('');
+              setForwardDecision('');
+            }}
+            className="w-full rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Forward to Team Lead
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  const structuredChecklistCommentSections = hasCustomChecklistPdf
+    ? pdfChecklistSectionConfigs
+    : defaultChecklistSectionConfigs;
+
+  const paperChecklistColumns = (() => {
+    if (canViewPaperAndChecklist) {
+      // Both vetters and Chief Examiners see paper and checklist side by side
+      return (
+        <div className="grid gap-5 grid-cols-2">
+          <div className="space-y-4">{examWindow}</div>
+          <div className="space-y-4">{defaultChecklistWindows}</div>
+        </div>
+      );
+    }
+
+    if (showVetterFocusedLayout) {
+      return (
+        <div className="rounded-2xl border-2 border-dashed border-blue-200 bg-white/80 px-4 py-6 text-center text-sm text-slate-600">
+          Join the secure session to reveal the exam paper and moderation checklist.
+        </div>
+      );
+    }
+
+    return null;
+  })();
+
+  const vetterSessionPanel = showVetterFocusedLayout ? (
+    <div className="rounded-2xl border-2 border-blue-200/70 bg-white/90 p-4 shadow-lg">
+      {!vetterHasJoined ? (
+        <button
+          type="button"
+          onClick={() => onStartVetting(customDuration)}
+          disabled={!vettingSession.active}
+          className="w-full rounded-xl bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-3 text-sm font-bold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {vettingSession.active ? 'Start Session' : 'Waiting for Chief…'}
+        </button>
+      ) : (
+        <div className="space-y-2">
+          <button
+            type="button"
+            onClick={onCompleteVetting}
+            className="w-full rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 px-4 py-3 text-sm font-bold text-white shadow-lg transition"
+          >
+            Complete Vetting
+          </button>
+        </div>
+      )}
+    </div>
+  ) : null;
 
   return (
     <SectionCard
@@ -13347,621 +15239,353 @@ function VettingAndAnnotations({
             </div>
           </div>
         ) : (
-          <StatusPill
-            label="Session Idle"
-            active={false}
-            tone="slate"
-          />
+          <StatusPill label="Session Idle" active={false} tone="slate" />
         )
       }
     >
-      <div className="grid gap-5 lg:grid-cols-[2fr_1fr]">
-        <div className="space-y-5">
-          {/* Paper Viewer - Only visible to Chief Examiner or vetters who have joined */}
-          {canViewPaperAndChecklist && papersToDisplay.length > 0 && (
-            <div className="group relative overflow-hidden rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50 via-indigo-50 to-cyan-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
-              {/* Animated background effects */}
-              <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-                <div className="absolute inset-0 bg-gradient-to-br from-blue-400/10 via-indigo-400/10 to-cyan-400/10"></div>
-                <div className="absolute top-0 left-0 w-32 h-32 bg-gradient-to-br from-blue-300/20 to-cyan-300/20 rounded-full blur-3xl transform -translate-x-1/2 -translate-y-1/2"></div>
-              </div>
-              
-              <div className="relative z-10">
-                <div className="mb-3 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-md">
-                      <span className="text-white text-sm">📄</span>
-                    </div>
-                    <h3 className="text-xs font-bold text-slate-800">
-                      Exam Paper
-                    </h3>
-                  </div>
-                  {papersToDisplay.length > 1 && (
-                    <select
-                      value={selectedPaper?.id || ''}
-                      onChange={(e) => {
-                        const paper = papersToDisplay.find(p => p.id === e.target.value);
-                        setSelectedPaper(paper || null);
-                      }}
-                      className="rounded-lg border-2 border-blue-200 bg-white px-2 py-1 text-[0.65rem] text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 shadow-sm hover:shadow-md transition-all"
-                    >
-                      {papersToDisplay.map((paper) => (
-                        <option key={paper.id} value={paper.id}>
-                          {paper.fileName}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-                {selectedPaper ? (
-                  <div className="space-y-2.5">
-                    <div className="rounded-lg border border-blue-200/50 bg-white/80 backdrop-blur-sm p-2.5">
-                      <p className="text-[0.65rem] font-semibold text-slate-600 mb-0.5">File</p>
-                      <p className="text-xs font-bold text-slate-800 truncate">{selectedPaper.fileName}</p>
-                    </div>
-                    <div className="rounded-lg border border-indigo-200/50 bg-white/80 backdrop-blur-sm p-2.5">
-                      <p className="text-[0.65rem] font-semibold text-slate-600 mb-0.5">Course</p>
-                      <p className="text-xs font-bold text-slate-800">{selectedPaper.courseCode}</p>
-                    </div>
-                    {selectedPaper.fileUrl ? (
-                      <div className="space-y-2">
-                        <button
-                          onClick={async () => {
-                            if (!selectedPaper.fileUrl) return;
-                            
-                            // For vetters, open in new tab with fullscreen restrictions
-                            if (isVetter && vetterHasJoined) {
-                              const { data } = supabase.storage
-                                .from('exam_papers')
-                                .getPublicUrl(selectedPaper.fileUrl);
-                              
-                              if (data?.publicUrl) {
-                                // Open in new window with specific features for fullscreen
-                                const newWindow = window.open(
-                                  data.publicUrl,
-                                  '_blank',
-                                  'width=1920,height=1080,fullscreen=yes,scrollbars=yes,resizable=yes'
-                                );
-                                
-                                if (newWindow) {
-                                  // Try to make it fullscreen after load
-                                  newWindow.addEventListener('load', () => {
-                                    try {
-                                      if (newWindow.document.documentElement.requestFullscreen) {
-                                        newWindow.document.documentElement.requestFullscreen();
-                                      }
-                                    } catch (e) {
-                                      console.log('Fullscreen request failed:', e);
-                                    }
-                                  });
-                                  
-                                  // Block other tabs/windows from opening
-                                  setTimeout(() => {
-                                    const checkWindow = setInterval(() => {
-                                      if (newWindow.closed) {
-                                        clearInterval(checkWindow);
-                                      } else {
-                                        // Prevent opening other tabs
-                                        try {
-                                          newWindow.document.addEventListener('keydown', (e: KeyboardEvent) => {
-                                            if ((e.ctrlKey || e.metaKey) && (e.key === 't' || e.key === 'w' || e.key === 'n')) {
-                                              e.preventDefault();
-                                              e.stopPropagation();
-                                            }
-                                          }, true);
-                                        } catch (err) {
-                                          // Ignore cross-origin errors
-                                        }
-                                      }
-                                    }, 1000);
-                                    
-                                    // Clean up interval after 5 minutes
-                                    setTimeout(() => clearInterval(checkWindow), 300000);
-                                  }, 1000);
-                                }
-                              }
-                            } else if (isChiefExaminer) {
-                              // For Chief Examiner, normal link behavior
-                              const { data } = supabase.storage
-                                .from('exam_papers')
-                                .getPublicUrl(selectedPaper.fileUrl);
-                              if (data?.publicUrl) {
-                                window.open(data.publicUrl, '_blank');
-                              }
-                            } else {
-                              // For vetters who haven't joined yet, show message
-                              alert('Please start your vetting session first by clicking "Start Session (Enable Camera)" button.');
-                            }
-                          }}
-                          className="block w-full rounded-lg bg-gradient-to-r from-blue-500 via-indigo-500 to-cyan-500 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 text-center relative overflow-hidden group"
-                        >
-                          <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                          <span className="relative z-10 flex items-center justify-center gap-1.5">
-                            <span>📄</span>
-                            <span>View Paper</span>
-                          </span>
-                        </button>
-                        
-                        {/* Action Buttons - Show after vetting is complete - ALWAYS SHOW ON VETTED PAPERS */}
-                        {isChiefExaminer && selectedPaper && selectedPaper.status === 'vetted' && (
-                          <div className="flex gap-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const notes = prompt('Optional notes for approval:') || '';
-                                if (onApprove) {
-                                  onApprove(notes);
-                                }
-                              }}
-                              className="flex-1 rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
-                            >
-                              ✓ Push to Next Stage
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const notes = prompt('Rejection feedback (required):') || '';
-                                if (!notes.trim()) {
-                                  alert('Please provide feedback notes when rejecting a paper.');
-                                  return;
-                                }
-                                
-                                // Prompt for new deadline
-                                const days = parseInt(prompt('Set new deadline - Days:', '3') || '0') || 0;
-                                const hours = parseInt(prompt('Set new deadline - Hours:', '0') || '0') || 0;
-                                const minutes = parseInt(prompt('Set new deadline - Minutes:', '0') || '0') || 0;
-                                
-                                if (days === 0 && hours === 0 && minutes === 0) {
-                                  if (!confirm('No deadline set. Continue without deadline?')) {
-                                    return;
-                                  }
-                                }
-                                
-                                if (onReject) {
-                                  onReject(notes, days || hours || minutes ? { days, hours, minutes } : undefined);
-                                }
-                              }}
-                              className="flex-1 rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
-                            >
-                              ✗ Rejected
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="rounded-lg border-2 border-amber-200 bg-amber-50/80 p-2.5 text-center">
-                        <p className="text-[0.65rem] text-amber-700">File not available</p>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <p className="text-xs text-slate-500">No paper selected</p>
-                )}
-              </div>
-            </div>
-          )}
+      <div className="space-y-5">
+        {showVetterFocusedLayout && vetterSessionPanel}
+        {paperChecklistColumns}
 
-          {/* Moderation Scheduling - Chief Examiner Only */}
-          {isChiefExaminer && onScheduleModeration && (
-            <div className="group relative overflow-hidden rounded-xl border-2 border-purple-300/50 bg-gradient-to-br from-purple-50 via-indigo-50 to-pink-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
-              {/* Animated background effects */}
-              <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-                <div className="absolute inset-0 bg-gradient-to-br from-purple-400/10 via-indigo-400/10 to-pink-400/10"></div>
-                <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-purple-300/20 to-pink-300/20 rounded-full blur-3xl transform translate-x-1/2 -translate-y-1/2"></div>
-              </div>
-              
-              <div className="relative z-10">
-                <div className="flex items-center gap-2 mb-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 shadow-md">
-                    <span className="text-white text-sm">📅</span>
-                  </div>
-                  <div>
-                    <h3 className="text-xs font-bold text-slate-800">
-                      Schedule Moderation
-                    </h3>
-                    <p className="text-[0.65rem] text-slate-600">
-                      Set start date & time
-                    </p>
-                  </div>
-                </div>
-                
-                <div className="space-y-3">
-                  <div className="relative">
-                    <label className="block text-[0.65rem] font-bold uppercase tracking-wide text-slate-700 mb-1.5">
-                      Start Date & Time
-                    </label>
-                    <input
-                      type="datetime-local"
-                      value={startDateTime}
-                      onChange={(e) => setStartDateTime(e.target.value)}
-                      className="w-full rounded-lg border-2 border-purple-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40 shadow-sm hover:shadow-md transition-all"
-                    />
-                  </div>
-                  
-                  <button
-                    type="button"
-                    onClick={() => onScheduleModeration(startDateTime)}
-                    className="w-full rounded-lg bg-gradient-to-r from-purple-500 via-indigo-500 to-pink-500 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
-                  >
-                    <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                    <span className="relative z-10 flex items-center justify-center gap-1.5">
-                      <span>✓</span>
-                      <span>Schedule Session</span>
-                    </span>
-                  </button>
-                  
-                  {moderationSchedule?.scheduled && moderationSchedule.startDateTime && (
-                    <div className="rounded-lg border-2 border-green-300 bg-gradient-to-r from-green-50 to-emerald-50 p-2.5">
-                      <p className="text-[0.65rem] font-bold text-green-700 flex items-center gap-1">
-                        <span>✓</span>
-                        <span>Scheduled</span>
-                      </p>
-                      <p className="text-[0.6rem] text-green-600 mt-1">
-                        Starts: {new Date(moderationSchedule.startDateTime).toLocaleString()}
-                      </p>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="group relative overflow-hidden rounded-xl border-2 border-emerald-200/50 bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
-            {/* Animated background effects */}
-            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-              <div className="absolute inset-0 bg-gradient-to-br from-emerald-400/10 via-teal-400/10 to-cyan-400/10"></div>
-              <div className="absolute bottom-0 right-0 w-32 h-32 bg-gradient-to-br from-emerald-300/20 to-cyan-300/20 rounded-full blur-3xl transform translate-x-1/2 translate-y-1/2"></div>
-            </div>
-            
-            <div className="relative z-10">
-              <div className="flex items-center gap-2 mb-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 shadow-md">
-                  <span className="text-white text-sm">🔒</span>
-                </div>
-                <div>
-                  <h3 className="text-xs font-bold text-slate-800">
-                    Safe Browser Controls
-                  </h3>
-                  <p className="text-[0.65rem] text-slate-600">
-                    Secure vetting environment
-                  </p>
-                </div>
-              </div>
-              
-              <div className="mb-3 flex flex-wrap gap-1.5">
-                {safeBrowserStatus.map((item) => (
-                  <div
-                    key={item.label}
-                    className={`rounded-lg px-2 py-1 text-[0.65rem] font-semibold border-2 transition-all ${
-                      item.active
-                        ? 'bg-blue-100 border-blue-300 text-blue-700 shadow-sm'
-                        : 'bg-amber-100 border-amber-300 text-amber-700 shadow-sm'
-                    }`}
-                  >
-                    {item.label}
-                  </div>
-                ))}
-              </div>
-
-              <div className="space-y-2.5">
-                <div>
-                  <label
-                    htmlFor="session-minutes"
-                    className="block text-[0.65rem] font-bold uppercase tracking-wide text-slate-700 mb-1.5"
-                  >
-                    Session Duration (minutes)
-                  </label>
-                  <div className="relative">
-                    <input
-                      id="session-minutes"
-                      type="number"
-                      min={5}
-                      max={180}
-                      value={vettingSession.active && vettingSession.durationMinutes ? vettingSession.durationMinutes : customDuration}
-                      onChange={(e) => {
-                        const value = parseInt(e.target.value) || calculatedDuration;
-                        setCustomDuration(Math.max(5, Math.min(180, value)));
-                      }}
-                      disabled={vettingSession.active}
-                      className="w-full rounded-lg border-2 border-emerald-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 shadow-sm hover:shadow-md transition-all disabled:bg-emerald-50/50 disabled:cursor-not-allowed"
-                    />
-                    {!vettingSession.active && (
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <span className="text-[0.65rem] text-emerald-600 font-semibold">
-                          min
-                        </span>
-                      </div>
-                    )}
-                    {vettingSession.active && (
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <span className="text-[0.65rem] text-emerald-600 font-semibold">
-                          Active
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                  <p className="mt-1 text-[0.6rem] text-slate-600">
-                    {vettingSession.active 
-                      ? `Session active. ${vettingCountdown ? `Time remaining: ${vettingCountdown}` : 'Time expired'}`
-                      : moderationSchedule?.scheduled && moderationStartCountdown
-                      ? `Waiting for scheduled time... ${moderationStartCountdown} remaining`
-                      : moderationSchedule?.scheduled 
-                      ? `Scheduled time reached. Ready to start session.`
-                      : `Set schedule to auto-calculate`}
-                  </p>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  {/* Start Session button - different behavior for Chief Examiner vs Vetter */}
-                  {isChiefExaminer ? (
-                    // Chief Examiner: Start global session or End session
-                    vettingSession.active ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (onEndSession) {
-                            if (confirm('Are you sure you want to end the vetting session? This will terminate all active vetter sessions.')) {
-                              onEndSession();
-                            }
-                          }
-                        }}
-                        className="rounded-lg bg-gradient-to-r from-red-500 to-rose-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
-                      >
-                        <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                        <span className="relative z-10">End Session</span>
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => onStartVetting(customDuration)}
-                        className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
-                      >
-                        <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                        <span className="relative z-10">Start Session</span>
-                      </button>
-                    )
-                  ) : (
-                    // Vetter: Join session (only shown when global session is active and they haven't joined)
-                    canVetterStartSession && (
-                      <button
-                        type="button"
-                        onClick={() => onStartVetting(customDuration)}
-                        className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
-                      >
-                        <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                        <span className="relative z-10">Start Session (Enable Camera)</span>
-                      </button>
-                    )
-                  )}
-                  {/* Complete button - only for vetters who have joined */}
-                  {isVetter && vetterHasJoined && (
-                    <button
-                      type="button"
-                      onClick={onCompleteVetting}
-                      className="rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
-                    >
-                      <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                      <span className="relative z-10">Complete</span>
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Real-Time Annotations - Only visible to Chief Examiner or vetters who have joined */}
-          {canViewPaperAndChecklist && (
-            <div className="group relative overflow-hidden rounded-xl border-2 border-indigo-200/50 bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
-              {/* Animated background effects */}
-              <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-                <div className="absolute inset-0 bg-gradient-to-br from-indigo-400/10 via-purple-400/10 to-pink-400/10"></div>
-                <div className="absolute top-0 left-0 w-32 h-32 bg-gradient-to-br from-indigo-300/20 to-pink-300/20 rounded-full blur-3xl transform -translate-x-1/2 -translate-y-1/2"></div>
-              </div>
-              
-              <div className="relative z-10">
-                <div className="flex items-center gap-2 mb-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 shadow-md">
-                    <span className="text-white text-sm">💬</span>
-                  </div>
-                  <div>
-                    <h3 className="text-xs font-bold text-slate-800">
-                      Real-Time Annotations
-                    </h3>
-                    <p className="text-[0.65rem] text-slate-600">
-                      Synchronized comments
-                    </p>
-                  </div>
-                </div>
-                
-                <form
-                  onSubmit={handleAnnotationSubmit}
-                  className="space-y-2.5"
-                >
-                  <input
-                    value={annotationDraft}
-                    onChange={(event) => setAnnotationDraft(event.target.value)}
-                    placeholder="Add annotation (Bloom's taxonomy reference, etc.)"
-                    className="w-full rounded-lg border-2 border-indigo-200 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 shadow-sm hover:shadow-md transition-all disabled:opacity-60"
-                    disabled={!vettingSession.active || (isVetter && !vetterHasJoined)}
-                  />
-                  <button
-                    type="submit"
-                    disabled={!vettingSession.active || (isVetter && !vetterHasJoined)}
-                    className="w-full rounded-lg bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 relative overflow-hidden group"
-                  >
-                    <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                    <span className="relative z-10 flex items-center justify-center gap-1.5">
-                      <span>📤</span>
-                      <span>Publish Comment</span>
-                    </span>
-                  </button>
-                </form>
-              <div className="mt-3 max-h-48 space-y-2 overflow-y-auto pr-1">
-                {annotations.length === 0 ? (
-                  <p className="text-[0.65rem] text-slate-500 text-center py-4">
-                    No annotations yet. Start session to add comments.
-                  </p>
-                ) : (
-                  annotations.map((annotation) => (
-                    <div
-                      key={annotation.id}
-                      className="group/ann relative overflow-hidden rounded-lg border border-indigo-200/50 bg-white/80 backdrop-blur-sm p-2.5 text-[0.65rem] text-slate-700 shadow-sm hover:shadow-md transition-all"
-                    >
-                      <p className="text-xs font-semibold text-slate-900 mb-1.5">
-                        "{annotation.comment}"
-                      </p>
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-indigo-700 text-[0.65rem]">
-                          {annotation.author}
-                        </span>
-                        <span className="text-slate-500 text-[0.6rem]">
-                          {formatTimestamp(annotation.timestamp)}
-                        </span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-              </div>
-            </div>
-          )}
-
-        </div>
-
-        {/* Moderation Checklist - Only visible to Chief Examiner or vetters who have joined */}
-        {canViewPaperAndChecklist && (
+        {/* Editing Tool and Comments Section - After Preview Windows */}
+        {canViewPaperAndChecklist && ((isVetter && vetterHasJoined) || isChiefExaminer) && (
           <div className="space-y-4">
-            {/* Download Checklist Button - Only for Chief Examiner */}
-            {isChiefExaminer && checklistComments && checklistComments.size > 0 && (
-              <div className="flex justify-end mb-4">
-                <button
-                  onClick={() => {
-                    // Generate downloadable checklist with comments
-                    let checklistText = 'MODERATION CHECKLIST WITH VETTER COMMENTS\n';
-                    checklistText += '=' .repeat(50) + '\n\n';
-                    
-                    checklistText += 'COURSE OUTLINE\n';
-                    checklistText += '-'.repeat(30) + '\n';
-                    digitalChecklist.courseOutline.forEach((item) => {
-                      const commentKey = `courseOutline-${item}`;
-                      const comment = checklistComments.get(commentKey);
-                      checklistText += `✓ ${item}\n`;
-                      if (comment) {
-                        checklistText += `  [Vetter Comment - ${comment.vetterName}]: ${comment.comment}\n`;
-                      }
-                      checklistText += '\n';
-                    });
-                    
-                    checklistText += '\nBLOOM\'S TAXONOMY\n';
-                    checklistText += '-'.repeat(30) + '\n';
-                    digitalChecklist.bloomsTaxonomy.forEach((item) => {
-                      const commentKey = `bloomsTaxonomy-${item}`;
-                      const comment = checklistComments.get(commentKey);
-                      checklistText += `✓ ${item}\n`;
-                      if (comment) {
-                        checklistText += `  [Vetter Comment - ${comment.vetterName}]: ${comment.comment}\n`;
-                      }
-                      checklistText += '\n';
-                    });
-                    
-                    checklistText += '\nCOMPLIANCE\n';
-                    checklistText += '-'.repeat(30) + '\n';
-                    digitalChecklist.compliance.forEach((item) => {
-                      const commentKey = `compliance-${item}`;
-                      const comment = checklistComments.get(commentKey);
-                      checklistText += `✓ ${item}\n`;
-                      if (comment) {
-                        checklistText += `  [Vetter Comment - ${comment.vetterName}]: ${comment.comment}\n`;
-                      }
-                      checklistText += '\n';
-                    });
-                    
-                    // Download as text file
-                    const blob = new Blob([checklistText], { type: 'text/plain' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `moderation-checklist-${new Date().toISOString().split('T')[0]}.txt`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                    
-                    alert('Checklist with vetter comments downloaded successfully!');
-                  }}
-                  className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
-                >
-                  📥 Download Checklist with Comments
-                </button>
-              </div>
-            )}
-            
-            <div className="group relative overflow-hidden rounded-xl border-2 border-emerald-200/50 bg-gradient-to-br from-emerald-50 via-green-50 to-teal-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
-            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-              <div className="absolute inset-0 bg-gradient-to-br from-emerald-400/10 via-green-400/10 to-teal-400/10"></div>
-            </div>
-            <div className="relative z-10">
-              <div className="flex items-center gap-2 mb-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-green-600 shadow-md">
-                  <span className="text-white text-sm">✓</span>
+            {/* Color Selection Tool */}
+            <div className="rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50 via-indigo-50 to-cyan-50 p-4 shadow-lg">
+              <div className="mb-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-md">
+                    <span className="text-white text-sm">🎨</span>
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-800">Text Color Selection</h3>
+                    <p className="text-[0.65rem] text-slate-600">Choose a color for your comments</p>
+                  </div>
                 </div>
-                <h3 className="text-xs font-bold text-slate-800">
-                  Course Outline
-                </h3>
+                <div className="rounded-lg border border-blue-200 bg-white/90 p-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-[0.65rem] font-semibold text-slate-700">Text Color:</span>
+                    <div className="flex flex-wrap gap-1">
+                      {textColors.map((color) => (
+                        <button
+                          key={color.value}
+                          type="button"
+                          onClick={() => setSelectedColor(color.value)}
+                          className={`h-6 w-6 rounded border-2 transition ${
+                            selectedColor === color.value
+                              ? 'border-slate-800 scale-110 shadow'
+                              : 'border-slate-300 hover:border-slate-500'
+                          }`}
+                          style={{ backgroundColor: color.value }}
+                          title={color.name}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  <p className="text-[0.6rem] text-slate-500">
+                    Select a color, then add your comments in the sections below
+                  </p>
+                </div>
               </div>
-              <ul className="space-y-2.5 text-[0.65rem] text-slate-700">
-                {digitalChecklist.courseOutline.map((item) => (
-                  <ChecklistItem key={item} item={item} category="courseOutline" bulletColor="#10b981" />
+            </div>
+
+            {/* Structured Comments Section */}
+            <div className="rounded-3xl border-2 border-indigo-200/60 bg-[radial-gradient(circle_at_top,_rgba(129,140,248,0.15),_transparent_70%)] p-5 shadow-[0_35px_90px_rgba(79,70,229,0.18)]">
+              <div className="flex flex-wrap items-center gap-3 mb-5">
+                <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 text-white shadow-lg shadow-indigo-500/40">
+                  <span className="text-base">📝</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Glass Styled Checklist Commentary</h3>
+                  <p className="text-[0.7rem] text-slate-600">
+                    Hover over any card to reveal the smooth glassmorphic surface and capture remarks per section.
+                  </p>
+                </div>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                {structuredChecklistCommentSections.map((section) => (
+                  <AiCommentCard key={section.id} section={section} />
                 ))}
-              </ul>
+              </div>
             </div>
           </div>
-          
-          <div className="group relative overflow-hidden rounded-xl border-2 border-indigo-200/50 bg-gradient-to-br from-indigo-50 via-blue-50 to-purple-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
-            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-              <div className="absolute inset-0 bg-gradient-to-br from-indigo-400/10 via-blue-400/10 to-purple-400/10"></div>
-            </div>
-            <div className="relative z-10">
-              <div className="flex items-center gap-2 mb-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-blue-600 shadow-md">
-                  <span className="text-white text-sm">🧠</span>
-                </div>
-                <h3 className="text-xs font-bold text-slate-800">
-                  Bloom's Taxonomy
-                </h3>
-              </div>
-              <ul className="space-y-2.5 text-[0.65rem] text-slate-700">
-                {digitalChecklist.bloomsTaxonomy.map((item) => (
-                  <ChecklistItem key={item} item={item} category="bloomsTaxonomy" bulletColor="#6366f1" />
-                ))}
-              </ul>
-            </div>
-          </div>
-          
-          <div className="group relative overflow-hidden rounded-xl border-2 border-amber-200/50 bg-gradient-to-br from-amber-50 via-orange-50 to-yellow-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
-            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-              <div className="absolute inset-0 bg-gradient-to-br from-amber-400/10 via-orange-400/10 to-yellow-400/10"></div>
-            </div>
-            <div className="relative z-10">
-              <div className="flex items-center gap-2 mb-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 shadow-md">
-                  <span className="text-white text-sm">📋</span>
-                </div>
-                <h3 className="text-xs font-bold text-slate-800">
-                  Compliance
-                </h3>
-              </div>
-              <ul className="space-y-2.5 text-[0.65rem] text-slate-700">
-                {digitalChecklist.compliance.map((item) => (
-                  <ChecklistItem key={item} item={item} category="compliance" bulletColor="#f59e0b" />
-                ))}
-              </ul>
-            </div>
-          </div>
-        </div>
         )}
 
-        {/* Chief Examiner Monitoring Panel - Shows vetter camera feeds and warnings - ALWAYS SHOW IF SESSION ACTIVE OR HAS COMPLETED RECORDS */}
-        {isChiefExaminer && (vettingSession.active || (vettingSessionRecords && vettingSessionRecords.length > 0)) && (
+        {isChiefExaminer && !showVetterFocusedLayout && (
+          <>
+            {/* Moderation Scheduling - Chief Examiner Only */}
+            {isChiefExaminer && onScheduleModeration && (
+              <div className="group relative overflow-hidden rounded-xl border-2 border-purple-300/50 bg-gradient-to-br from-purple-50 via-indigo-50 to-pink-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+                <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+                  <div className="absolute inset-0 bg-gradient-to-br from-purple-400/10 via-indigo-400/10 to-pink-400/10"></div>
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-purple-300/20 to-pink-300/20 rounded-full blur-3xl transform translate-x-1/2 -translate-y-1/2"></div>
+                </div>
+                <div className="relative z-10">
+                  <div className="flex items-center gap-2 mb-3">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 shadow-md">
+                      <span className="text-white text-sm">📅</span>
+                    </div>
+                    <div>
+                      <h3 className="text-xs font-bold text-slate-800">Schedule Moderation</h3>
+                      <p className="text-[0.65rem] text-slate-600">Set start date & time</p>
+                    </div>
+                  </div>
+                  <div className="space-y-3">
+                    <div className="relative">
+                      <label className="block text-[0.65rem] font-bold uppercase tracking-wide text-slate-700 mb-1.5">Start Date & Time</label>
+                      <input
+                        type="datetime-local"
+                        value={startDateTime}
+                        onChange={(e) => setStartDateTime(e.target.value)}
+                        className="w-full rounded-lg border-2 border-purple-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40 shadow-sm hover:shadow-md transition-all"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onScheduleModeration(startDateTime)}
+                      className="w-full rounded-lg bg-gradient-to-r from-purple-500 via-indigo-500 to-pink-500 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
+                    >
+                      <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                      <span className="relative z-10 flex items-center justify-center gap-1.5">
+                        <span>✓</span>
+                        <span>Schedule Session</span>
+                      </span>
+                    </button>
+                    {moderationSchedule?.scheduled && moderationSchedule.startDateTime && (
+                      <div className="rounded-lg border-2 border-green-300 bg-gradient-to-r from-green-50 to-emerald-50 p-2.5">
+                        <p className="text-[0.65rem] font-bold text-green-700 flex items-center gap-1">
+                          <span>✓</span>
+                          <span>Scheduled</span>
+                        </p>
+                        <p className="text-[0.6rem] text-green-600 mt-1">Starts: {new Date(moderationSchedule.startDateTime).toLocaleString()}</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="group relative overflow-hidden rounded-xl border-2 border-emerald-200/50 bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+              <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+                <div className="absolute inset-0 bg-gradient-to-br from-emerald-400/10 via-teal-400/10 to-cyan-400/10"></div>
+                <div className="absolute bottom-0 right-0 w-32 h-32 bg-gradient-to-br from-emerald-300/20 to-cyan-300/20 rounded-full blur-3xl transform translate-x-1/2 translate-y-1/2"></div>
+              </div>
+              <div className="relative z-10">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 shadow-md">
+                    <span className="text-white text-sm">🔒</span>
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-800">Safe Browser Controls</h3>
+                    <p className="text-[0.65rem] text-slate-600">Secure vetting environment</p>
+                  </div>
+                </div>
+                <div className="mb-3 flex flex-wrap gap-1.5">
+                  {safeBrowserStatus.map((item) => (
+                    <div
+                      key={item.label}
+                      className={`rounded-lg px-2 py-1 text-[0.65rem] font-semibold border-2 transition-all ${
+                        item.active ? 'bg-blue-100 border-blue-300 text-blue-700 shadow-sm' : 'bg-amber-100 border-amber-300 text-amber-700 shadow-sm'
+                      }`}
+                    >
+                      {item.label}
+                    </div>
+                  ))}
+                </div>
+                {isChiefExaminer && (
+                  <>
+                    <input
+                      ref={checklistUploadInputRef}
+                      type="file"
+                      accept=".json,.txt,.pdf,.docx,.doc,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
+                      className="hidden"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file && onUploadChecklist) {
+                          onUploadChecklist(file);
+                        }
+                        if (event.target) {
+                          event.target.value = '';
+                        }
+                      }}
+                    />
+                    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-white/80 p-3">
+                      <button
+                        type="button"
+                        onClick={() => checklistUploadInputRef.current?.click()}
+                        className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-1.5 text-[0.65rem] font-bold text-white shadow hover:shadow-md"
+                      >
+                        Upload Vetting Checklist
+                      </button>
+                      {hasCustomChecklistPdf && onRemoveChecklist && (
+                        <button
+                          type="button"
+                          onClick={onRemoveChecklist}
+                          className="rounded-lg bg-gradient-to-r from-red-500 to-rose-600 px-3 py-1.5 text-[0.65rem] font-bold text-white shadow hover:shadow-md"
+                        >
+                          Remove Checklist
+                        </button>
+                      )}
+                      <span className="text-[0.6rem] font-semibold text-blue-700">
+                        {hasCustomChecklist ? 'Custom template active' : hasCustomChecklistPdf ? 'Custom PDF active' : 'Default template active'}
+                      </span>
+                    </div>
+                  </>
+                )}
+                <div className="space-y-2.5">
+                  <div>
+                    <label htmlFor="session-minutes" className="block text-[0.65rem] font-bold uppercase tracking-wide text-slate-700 mb-1.5">
+                      Session Duration (minutes)
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="session-minutes"
+                        type="number"
+                        min={DEFAULT_SESSION_MINUTES}
+                        max={180}
+                        value={vettingSession.active && vettingSession.durationMinutes ? vettingSession.durationMinutes : customDuration}
+                        onChange={(e) => {
+                          const value = parseInt(e.target.value) || calculatedDuration;
+                          setCustomDuration(Math.max(DEFAULT_SESSION_MINUTES, Math.min(180, value)));
+                        }}
+                        disabled={vettingSession.active}
+                        className="w-full rounded-lg border-2 border-emerald-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 shadow-sm hover:shadow-md transition-all disabled:bg-emerald-50/50 disabled:cursor-not-allowed"
+                      />
+                      {!vettingSession.active && (
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                          <span className="text-[0.65rem] text-emerald-600 font-semibold">min</span>
+                        </div>
+                      )}
+                      {vettingSession.active && (
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                          <span className="text-[0.65rem] text-emerald-600 font-semibold">Active</span>
+                        </div>
+                      )}
+                    </div>
+                    <p className="mt-1 text-[0.6rem] text-slate-600">
+                      {vettingSession.active
+                        ? `Session active. ${vettingCountdown ? `Time remaining: ${vettingCountdown}` : 'Time expired'}`
+                        : moderationSchedule?.scheduled && moderationStartCountdown
+                        ? `Waiting for scheduled time... ${moderationStartCountdown} remaining`
+                        : moderationSchedule?.scheduled
+                        ? `Scheduled time reached. Ready to start session.`
+                        : `Set schedule to auto-calculate`}
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {isChiefExaminer
+                      ? vettingSession.active
+                        ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (onEndSession && confirm('Are you sure you want to end the vetting session? This will terminate all active vetter sessions.')) {
+                                onEndSession();
+                              }
+                            }}
+                            className="rounded-lg bg-gradient-to-r from-red-500 to-rose-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
+                          >
+                            <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                            <span className="relative z-10">End Session</span>
+                          </button>
+                        )
+                        : (
+                          <button
+                            type="button"
+                            onClick={() => onStartVetting(customDuration)}
+                            className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
+                          >
+                            <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                            <span className="relative z-10">Start Session</span>
+                          </button>
+                        )
+                      : canVetterStartSession && (
+                          <button
+                            type="button"
+                            onClick={() => onStartVetting(customDuration)}
+                            className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
+                          >
+                            <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                            <span className="relative z-10">Start Session (Enable Camera)</span>
+                          </button>
+                        )}
+                    {isVetter && vetterHasJoined && (
+                      <button
+                        type="button"
+                        onClick={onCompleteVetting}
+                        className="rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
+                      >
+                        <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                        <span className="relative z-10">Complete</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {canViewPaperAndChecklist && (
+              <div className="group relative overflow-hidden rounded-xl border-2 border-indigo-200/50 bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
+                <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+                  <div className="absolute inset-0 bg-gradient-to-br from-indigo-400/10 via-purple-400/10 to-pink-400/10"></div>
+                  <div className="absolute top-0 left-0 w-32 h-32 bg-gradient-to-br from-indigo-300/20 to-pink-300/20 rounded-full blur-3xl transform -translate-x-1/2 -translate-y-1/2"></div>
+                </div>
+                <div className="relative z-10">
+                  <div className="flex items-center gap-2 mb-3">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 shadow-md">
+                      <span className="text-white text-sm">💬</span>
+                    </div>
+                    <div>
+                      <h3 className="text-xs font-bold text-slate-800">Real-Time Annotations</h3>
+                      <p className="text-[0.65rem] text-slate-600">Synchronized comments</p>
+                    </div>
+                  </div>
+                  <form onSubmit={handleAnnotationSubmit} className="space-y-2.5">
+                    <input
+                      value={annotationDraft}
+                      onChange={(event) => setAnnotationDraft(event.target.value)}
+                      placeholder="Add annotation (Bloom's taxonomy reference, etc.)"
+                      className="w-full rounded-lg border-2 border-indigo-200 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 shadow-sm hover:shadow-md transition-all disabled:opacity-60"
+                      disabled={!vettingSession.active || (isVetter && !vetterHasJoined)}
+                    />
+                    <button
+                      type="submit"
+                      disabled={!vettingSession.active || (isVetter && !vetterHasJoined)}
+                      className="w-full rounded-lg bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 relative overflow-hidden group"
+                    >
+                      <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
+                      <span className="relative z-10 flex items-center justify-center gap-1.5">
+                        <span>📤</span>
+                        <span>Publish Comment</span>
+                      </span>
+                    </button>
+                  </form>
+                  <div className="mt-3 max-h-48 space-y-2 overflow-y-auto pr-1">
+                    {annotations.length === 0 ? (
+                      <p className="text-[0.65rem] text-slate-500 text-center py-4">No annotations yet. Start session to add comments.</p>
+                    ) : (
+                      annotations.map((annotation) => (
+                        <div
+                          key={annotation.id}
+                          className="group/ann relative overflow-hidden rounded-lg border border-indigo-200/50 bg-white/80 backdrop-blur-sm p-2.5 text-[0.65rem] text-slate-700 shadow-sm hover:shadow-md transition-all"
+                        >
+                          <p className="text-xs font-semibold text-slate-900 mb-1.5">"{annotation.comment}"</p>
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-indigo-700 text-[0.65rem]">{annotation.author}</span>
+                            <span className="text-slate-500 text-[0.6rem]">{formatTimestamp(annotation.timestamp)}</span>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Chief Examiner Monitoring Panel - Shows vetter camera feeds and warnings */}
+        {isChiefExaminer && vettingSession.active && (
           <div className="mt-5 space-y-4">
             <div className="rounded-xl border-2 border-red-300/50 bg-gradient-to-br from-red-50 via-pink-50 to-orange-50 p-4 shadow-lg">
               <div className="flex items-center justify-between mb-4">
@@ -13979,24 +15603,11 @@ function VettingAndAnnotations({
                   </div>
                 </div>
                 {/* Clear Records Button - Only show when session is not active and records exist */}
-                {!vettingSession.active && vettingSessionRecords && vettingSessionRecords.length > 0 && (
-                  <button
-                    onClick={() => {
-                      if (confirm('⚠️ Are you sure you want to clear ALL vetting session records? This action cannot be undone.')) {
-                        clearVettingRecords();
-                        alert('✅ All vetting session records have been cleared. You can now start a fresh session.');
-                      }
-                    }}
-                    className="px-3 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm transition-colors"
-                    title="Clear all vetting session records"
-                  >
-                    🗑️ Clear All Records
-                  </button>
-                )}
+                {/* Note: This button would need clearVettingRecords passed as prop - removed for now to fix error */}
               </div>
 
-              {/* Show message if no vetters have joined yet AND no completed sessions */}
-              {(!vettingSession.active || !vetterMonitoring || vetterMonitoring.size === 0) && (!vettingSessionRecords || vettingSessionRecords.length === 0) ? (
+              {/* Show message if no vetters have joined yet */}
+              {!vetterMonitoring || vetterMonitoring.size === 0 ? (
                 <div className="rounded-lg border-2 border-blue-200 bg-blue-50/30 p-4 text-center">
                   <p className="text-sm font-semibold text-slate-700">
                     Waiting for vetters to join...
@@ -14149,52 +15760,9 @@ function VettingAndAnnotations({
                     );
                   })}
                   
-                  {/* Show completed session records - always show ALL completed sessions when session is not active */}
-                  {!vettingSession.active && vettingSessionRecords && vettingSessionRecords.length > 0 && (
-                    <div className="space-y-2">
-                      {vettingSessionRecords.map((record) => (
-                        <div key={record.id} className="rounded-lg border-2 border-blue-200 bg-blue-50/30 p-3">
-                          <h4 className="text-xs font-bold text-slate-800 mb-2">
-                            Completed Session: {record.paperName} ({new Date(record.completedAt).toLocaleString()})
-                          </h4>
-                          {record.vetters && record.vetters.map((vetter: any) => (
-                            <div key={vetter.vetterId} className="mb-2 p-2 bg-white rounded border border-blue-100">
-                              <p className="text-xs font-semibold text-slate-800">{vetter.vetterName}</p>
-                              <p className="text-[0.65rem] text-slate-600">
-                                Joined: {new Date(vetter.joinedAt).toLocaleTimeString()} | 
-                                Violations: {vetter.violations || 0} | 
-                                Warnings: {(vetter.warnings && vetter.warnings.length) || 0}
-                              </p>
-                              {vetter.warnings && vetter.warnings.length > 0 && (
-                                <div className="mt-1 space-y-1 max-h-20 overflow-y-auto">
-                                  {vetter.warnings.map((w: VetterWarning) => (
-                                    <div key={w.id} className={`text-[0.6rem] p-1 rounded ${
-                                      w.severity === 'critical' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800'
-                                    }`}>
-                                      {w.type}: {w.message} ({new Date(w.timestamp).toLocaleTimeString()})
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </div>
               )}
             </div>
-          </div>
-        )}
-
-        {/* Vetting Session Records - Collapsible cards showing completed sessions - ALWAYS SHOW IF RECORDS EXIST */}
-        {vettingSessionRecords && vettingSessionRecords.length > 0 && (
-          <div className="mt-5 space-y-2">
-            <h3 className="text-sm font-bold text-slate-800 mb-3">📋 Vetting Session Records</h3>
-            {vettingSessionRecords.map((record) => (
-              <VettingRecordCard key={record.id} record={record} papersToDisplay={papersToDisplay} />
-            ))}
           </div>
         )}
 
