@@ -1,0 +1,163 @@
+[1mdiff --cc src/App.tsx[m
+[1mindex 248959b,887846b..0000000[m
+[1m--- a/src/App.tsx[m
+[1m+++ b/src/App.tsx[m
+[36m@@@ -1062,10 -742,9 +1083,11 @@@[m [mfunction App() [m
+    const [submittedPapers, setSubmittedPapers] = useState<SubmittedPaper[]>(loadPersistedPapers());[m
+    const [setterSubmissions, setSetterSubmissions] = useState<SetterSubmission[]>([]);[m
+    const [repositoryPapers, setRepositoryPapers] = useState<RepositoryPaper[]>([]);[m
+[32m +  const [customChecklist, setCustomChecklist] = useState<typeof digitalChecklist | null>(loadCustomChecklist());[m
+[32m +  const [customChecklistPdf, setCustomChecklistPdf] = useState<{ url: string; name: string; isWordDoc?: boolean } | null>(loadCustomChecklistPdf());[m
+    const [currentTime, setCurrentTime] = useState(Date.now());[m
+    const [activePanelId, setActivePanelId] = useState<string>('overview');[m
+[32m+   const [mobileNavOpen, setMobileNavOpen] = useState(false);[m
+    const [moderationSchedule, setModerationSchedule] = useState<ModerationSchedule>(loadPersistedModerationSchedule());[m
+    const [vettingSession, setVettingSession] = useState<VettingSessionState>(loadPersistedVettingSession());[m
+    // Track which vetters have joined the session (enabled camera and started their individual session)[m
+[36m@@@ -1074,11 -753,16 +1096,19 @@@[m
+    const [vetterMonitoring, setVetterMonitoring] = useState<Map<string, VetterMonitoring>>(new Map());[m
+    // Store camera stream references for Chief Examiner monitoring[m
+    const vetterCameraStreams = useRef<Map<string, MediaStream>>(new Map());[m
+[32m+   const [monitorMode, setMonitorMode] = useState(false);[m
+[32m+   const [monitorSnapshot, setMonitorSnapshot] = useState<VetterMonitorSnapshot>({[m
+[32m+     sessionActive: false,[m
+[32m+     countdown: null,[m
+[32m+     updatedAt: Date.now(),[m
+[32m+     vetters: [],[m
+[32m+   });[m
+[32m+   const monitorChannelRef = useRef<BroadcastChannel | null>(null);[m
+    // Checklist comments - keyed by checklist category and item text[m
+[31m -  const [checklistComments, setChecklistComments] = useState<Map<string, { comment: string; vetterName: string; timestamp: number; color: string }>>(new Map());[m
+[32m +  const [checklistComments, setChecklistComments] = useState<ChecklistCommentsMap>(() => loadChecklistComments());[m
+[32m +  const [checklistTypingState, setChecklistTypingState] = useState<Map<string, Map<string, { name: string; timestamp: number }>>>(new Map());[m
+[32m +  const checklistCommentsChannelRef = useRef<BroadcastChannel | null>(null);[m
+[32m +  const activeChecklist = customChecklist ?? digitalChecklist;[m
+    // Vetting session records - stores completed sessions[m
+    const loadVettingRecords = (): VettingSessionRecord[] => {[m
+      try {[m
+[36m@@@ -3238,38 -2699,78 +3335,90 @@@[m
+        if (vettingSession.active) {[m
+          alert('A vetting session is already active.');[m
+          console.error('Start session blocked: Session already active');[m
+[31m-       return;[m
+[31m-     }[m
+[32m+         return;[m
+[32m+       }[m
+[32m+ [m
+[31m -      const duration = Math.max(5, minutes);[m
+[32m++      const duration = Math.max(DEFAULT_SESSION_MINUTES, minutes);[m
+[32m+       const startedAt = Date.now();[m
+[32m+       const expiresAt = startedAt + duration * 60 * 1000;[m
+[31m -      [m
+[32m +[m
+[31m-     const duration = Math.max(DEFAULT_SESSION_MINUTES, minutes);[m
+[31m-     const startedAt = Date.now();[m
+[31m-     const expiresAt = startedAt + duration * 60 * 1000;[m
+[31m-       [m
+        console.log('Chief Examiner starting global vetting session:', {[m
+          duration,[m
+          startedAt,[m
+          expiresAt,[m
+        });[m
+[31m--      [m
+[32m++[m
+[32m+       try {[m
+[32m+         await supabase[m
+[32m+           .from('vetting_sessions')[m
+[32m+           .update({[m
+[32m+             status: 'expired',[m
+[32m+             completed_at: new Date().toISOString(),[m
+[32m+           })[m
+[32m+           .in('status', ['pending', 'in_progress']);[m
+[32m+       } catch (error) {[m
+[32m+         console.warn('Unable to expire previous vetting sessions:', error);[m
+[32m+       }[m
+[32m+ [m
+[32m+       const sessionPayload: Record<string, any> = {[m
+[32m+         chief_examiner_id: currentUser?.id ?? null,[m
+[32m+         status: 'in_progress',[m
+[32m+         started_at: new Date(startedAt).toISOString(),[m
+[32m+         expires_at: new Date(expiresAt).toISOString(),[m
+[32m+       };[m
+[32m+       const activePaper =[m
+[32m+         paper ?? submittedPapers.find((p) => p.status === 'in-vetting') ?? submittedPapers[0];[m
+[32m+       if (!activePaper?.id) {[m
+[32m+         alert('Please select a paper to tie this vetting session to.');[m
+[32m+         return;[m
+[32m+       }[m
+[32m+       sessionPayload.exam_paper_id = activePaper.id;[m
+[32m+ [m
+[32m+       const { data: persistedSession, error: persistError } = await supabase[m
+[32m+         .from('vetting_sessions')[m
+[32m+         .insert(sessionPayload)[m
+[32m+         .select()[m
+[32m+         .single();[m
+[32m+ [m
+[32m+       if (persistError || !persistedSession) {[m
+[32m+         console.error('Failed to save vetting session to Supabase:', persistError);[m
+[32m+         alert([m
+[32m+           `Failed to persist the vetting session. ${persistError?.message ?? 'Please try again.'}`[m
+[32m+         );[m
+[32m+         return;[m
+[32m+       }[m
+[32m+ [m
+[32m +      // Start global vetting session - this enables the "Start Session" button for vetters[m
+[31m-     setVettingSession({[m
+[31m-       active: true,[m
+[31m-       startedAt,[m
+[31m-       durationMinutes: duration,[m
+[31m-       expiresAt,[m
+[32m++      setVettingSession({[m
+[32m++        active: true,[m
+[32m++        startedAt,[m
+[32m++        durationMinutes: duration,[m
+[32m++        expiresAt,[m
+[32m +        safeBrowserEnabled: true, // Will be enforced only for vetters[m
+[31m-       cameraOn: true,[m
+[31m-       screenshotBlocked: true,[m
+[31m-       switchingLocked: true,[m
+[31m-     });[m
+[32m++        cameraOn: true,[m
+[32m++        screenshotBlocked: true,[m
+[32m++        switchingLocked: true,[m
+[32m++      });[m
+[32m++[m
+[32m+       applySupabaseSessionState(persistedSession);[m
+[32m+       openMonitoringWindow();[m
+[32m+       if (!monitorMode && typeof window !== 'undefined') {[m
+[32m+         const monitorUrl = new URL(window.location.href);[m
+[32m+         monitorUrl.searchParams.set('monitor', 'vetting');[m
+[32m+         window.open([m
+[32m+           monitorUrl.toString(),[m
+[32m+           'vetting-monitor',[m
+[32m+           'width=1280,height=800,noopener'[m
+[32m+         );[m
+[32m+       }[m
+  [m
+        // Update workflow stage to 'Vetting in Progress'[m
+[31m -      const actor = currentUser?.name ?? 'Unknown';[m
+[31m -      pushWorkflowEvent([m
+[32m +    const actor = currentUser?.name ?? 'Unknown';[m
+[32m +    pushWorkflowEvent([m
+          `Chief Examiner started vetting session with a ${duration}-minute secure window. Vetters can now join by clicking "Start Session" and enabling their camera.`,[m
+[31m -        actor,[m
+[31m -        { stage: 'Vetting in Progress' }[m
+[31m -      );[m
+[32m +      actor,[m
+[32m +      { stage: 'Vetting in Progress' }[m
+[32m +    );[m
+        [m
+        setWorkflow((prev) => ({[m
+          ...prev,[m
+[36m@@@ -5222,137 -4422,24 +5445,104 @@@[m
+            vetterMonitoring={vetterMonitoring}[m
+            logVetterWarning={logVetterWarning}[m
+            checklistComments={checklistComments}[m
+[31m -          onChecklistCommentChange={(key, comment) => {[m
+[31m -            const newComments = new Map(checklistComments);[m
+[31m -            if (comment) {[m
+[31m -              newComments.set(key, {[m
+[31m -                comment,[m
+[31m -                vetterName: currentUser?.name || 'Unknown',[m
+[31m -                timestamp: Date.now(),[m
+[31m -                color: '#3B82F6', // Blue color for vetter co
