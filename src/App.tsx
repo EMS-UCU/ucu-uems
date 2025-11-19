@@ -29,6 +29,7 @@ import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 import { supabase } from './lib/supabase';
 import { elevateToChiefExaminer, appointRole } from './lib/privilegeElevation';
 import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead } from './lib/examServices/notificationService';
+import ucuLogo from './assets/ucu-logo.png';
 
 type BaseRole = 'Admin' | 'Lecturer';
 type Role =
@@ -294,7 +295,7 @@ const CHECKLIST_COMMENTS_STORAGE_KEY = 'ucu-vetting-checklist-comments';
 const CHECKLIST_COMMENTS_CHANNEL = 'ucu-vetting-checklist-sync';
 const CHECKLIST_TYPING_TTL_MS = 6000;
 
-const defaultLecturerModules = [
+const _defaultLecturerModules = [
   'Lecturer Dashboard',
   'My Classes',
   'Scheduling',
@@ -424,7 +425,7 @@ const rolePrivileges: Record<Role, RolePrivilegeSet> = {
   },
 };
 
-const roleToPanelIdMap: Partial<Record<Role, string>> = {
+const _roleToPanelIdMap: Partial<Record<Role, string>> = {
   'Admin': 'admin-add-lecturer',
   Lecturer: 'lecturer-dashboard',
   'Chief Examiner': 'chief-examiner-console',
@@ -594,7 +595,7 @@ ET
     `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>`,
     `<< /Length ${textStream.length} >>\nstream\n${textStream}endstream\n`,
     `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>`,
-  ].map((content, index) => `${index + 1} 0 obj\n${content}\nendobj\n`);
+  ].map((content, _index) => `${_index + 1} 0 obj\n${content}\nendobj\n`);
 
   const header = '%PDF-1.4\n';
   const offsets = [0];
@@ -1198,11 +1199,11 @@ function App() {
   const [users, setUsers] = useState<User[]>(loadPersistedUsers);
   const [authUserId, setAuthUserId] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
+  const [_isLoadingUsers, setIsLoadingUsers] = useState(false);
   const [chiefExaminerRoleEnabled, setChiefExaminerRoleEnabled] =
     useState(loadPersistedChiefExaminerEnabled);
   const [deadlinesActive, setDeadlinesActive] = useState(false);
-  const [deadlineStartTime, setDeadlineStartTime] = useState<number | null>(null);
+  const [_deadlineStartTime, setDeadlineStartTime] = useState<number | null>(null);
   const [deadlineDuration, setDeadlineDuration] = useState<{
     days: number;
     hours: number;
@@ -1249,6 +1250,7 @@ function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   useEffect(() => {
     if (!activeToast) {
@@ -1356,7 +1358,7 @@ function App() {
   };
   
   // Function to clear all vetting records
-  const clearVettingRecords = () => {
+  const _clearVettingRecords = () => {
     localStorage.removeItem('ucu-vetting-records');
     setVettingSessionRecords([]);
     console.log('✅ All vetting session records cleared');
@@ -1374,7 +1376,7 @@ function App() {
       return [];
     }
   };
-  const [archivedPapers, setArchivedPapers] = useState<SubmittedPaper[]>(loadArchivedPapers());
+  const [_archivedPapers, setArchivedPapers] = useState<SubmittedPaper[]>(loadArchivedPapers());
   const mainContentRef = useRef<HTMLDivElement | null>(null);
 
   const currentUser = useMemo(
@@ -2673,7 +2675,7 @@ function App() {
           const base = stripDemoPaper(prev);
           const updated = base.map(paper =>
             paper.status === 'in-vetting'
-              ? { ...paper, status: 'vetted' }
+              ? { ...paper, status: 'vetted' as const }
               : paper
           );
           return ensureDemoPaper(updated);
@@ -2857,7 +2859,7 @@ function App() {
     });
   };
 
-  const handleAddUser = (name: string, baseRole: BaseRole) => {
+  const _handleAddUser = (name: string, baseRole: BaseRole) => {
     const trimmedName = name.trim();
     if (!trimmedName) {
       return;
@@ -2874,7 +2876,7 @@ function App() {
     setUsers((prev) => [...prev, newUser]);
   };
 
-  const handleEnableChiefExaminerRole = () => {
+  const _handleEnableChiefExaminerRole = () => {
     if (chiefExaminerRoleEnabled) {
       return;
     }
@@ -2886,7 +2888,7 @@ function App() {
     );
   };
 
-  const addLecturerAccount = async (name: string, category?: 'Undergraduate' | 'Postgraduate', email?: string) => {
+  const _addLecturerAccount = async (name: string, category?: 'Undergraduate' | 'Postgraduate', email?: string) => {
     const trimmedName = name.trim();
     if (!trimmedName) {
       return;
@@ -2980,7 +2982,7 @@ function App() {
     }
   };
 
-  const handlePromoteToChiefExaminer = async (userId: string) => {
+  const _handlePromoteToChiefExaminer = async (userId: string) => {
     if (!chiefExaminerRoleEnabled) {
       return;
     }
@@ -3034,7 +3036,7 @@ function App() {
     }
   };
 
-  const handleUnassignChiefExaminer = (userId: string) => {
+  const _handleUnassignChiefExaminer = (userId: string) => {
     const actor = currentUser?.name ?? 'Unknown';
     setUsers((prev) => {
       const updated = prev.map((user) =>
@@ -3342,7 +3344,7 @@ function App() {
       actor,
       {
         stage: 'Submitted to Team Lead',
-        mutate: (prev) => ({
+        mutate: (_prev) => ({
           portalOpen: false,
           awaitingRecycle: false,
           lastDecision: undefined,
@@ -3614,7 +3616,7 @@ function App() {
       const base = stripDemoPaper(prev);
       const updated = base.map(paper =>
         paper.submittedBy === actor && paper.status === 'submitted'
-          ? { ...paper, status: 'in-vetting' }
+          ? { ...paper, status: 'in-vetting' as const }
           : paper
       );
       return ensureDemoPaper(updated);
@@ -3917,7 +3919,7 @@ function App() {
     if (isWordDoc) {
       // For Word documents, we'll create an editable HTML version
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = (_event) => {
         // Store the file info - we'll display an editable Word-like interface
         setCustomChecklist(null);
         setCustomChecklistPdf({ url: '', name: file.name, isWordDoc: true });
@@ -4121,7 +4123,7 @@ function App() {
       const base = stripDemoPaper(prev);
       const updated = base.map(paper =>
         paper.status === 'in-vetting'
-          ? { ...paper, status: 'vetted' }
+          ? { ...paper, status: 'vetted' as const }
           : paper
       );
       return ensureDemoPaper(updated);
@@ -4373,7 +4375,7 @@ function App() {
         const base = stripDemoPaper(prev);
         const updated = base.map(paper =>
           paper.status === 'in-vetting'
-            ? { ...paper, status: 'vetted' }
+            ? { ...paper, status: 'vetted' as const }
             : paper
         );
         return ensureDemoPaper(updated);
@@ -4607,7 +4609,7 @@ function App() {
       const base = stripDemoPaper(prev);
       const updated = base.map(paper =>
         paper.status === 'vetted'
-          ? { ...paper, status: 'approved' }
+          ? { ...paper, status: 'approved' as const }
           : paper
       );
       return ensureDemoPaper(updated);
@@ -4713,7 +4715,7 @@ function App() {
         const base = stripDemoPaper(prev);
         const updated = base.map(paper =>
           paper.status === 'vetted'
-            ? { ...paper, status: 'submitted' }
+            ? { ...paper, status: 'submitted' as const }
             : paper
         );
         return ensureDemoPaper(updated);
@@ -5853,7 +5855,7 @@ function App() {
     });
   }
 
-  if (isAuthenticated && showWorkflowInterfaces && !currentUserHasRole('Team Lead') && !currentUserHasRole('Setter')) {
+  if (isAuthenticated && showWorkflowInterfaces && !isPureLecturer && !currentUserHasRole('Team Lead') && !currentUserHasRole('Setter')) {
     roleSpecificPanels.push({
       id: 'workflow-execution',
       label: 'Workflow Execution',
@@ -5881,7 +5883,7 @@ function App() {
     });
   }
 
-  if (isAuthenticated && showVettingInterfaces) {
+  if (isAuthenticated && showVettingInterfaces && !isPureLecturer) {
     roleSpecificPanels.push({
       id: 'vetting-suite',
       label: 'Vetting & Annotations',
@@ -6015,7 +6017,7 @@ function App() {
                 const base = stripDemoPaper(prev);
                 const updated = base.map(paper =>
                   paper.status === 'in-vetting'
-                    ? { ...paper, status: 'vetted' }
+                    ? { ...paper, status: 'vetted' as const }
                     : paper
                 );
                 return ensureDemoPaper(updated);
@@ -6113,6 +6115,25 @@ function App() {
         }
       : null;
 
+  // Filter out workflow-related panels for pure lecturers
+  const filteredRoleSpecificPanels = isPureLecturer
+    ? roleSpecificPanels.filter(panel => {
+        // Exclude any workflow-related panels
+        const workflowPanelIds = [
+          'workflow-execution',
+          'vetting-suite',
+          'chief-examiner-console',
+          'chief-examiner-dashboard',
+          'chief-examiner-track-paper',
+          'repository-papers',
+          'team-lead-panel',
+          'team-lead-dashboard',
+          'setter-panel',
+        ];
+        return !workflowPanelIds.includes(panel.id);
+      })
+    : roleSpecificPanels;
+
   const panelConfigs: PanelConfig[] = [
     ...(overviewPanel ? [overviewPanel] : []),
     // Only add lecturerRoleDashboard if it's different from overviewPanel (for non-pure lecturers)
@@ -6121,7 +6142,7 @@ function App() {
     ...(chiefExaminerPrivilegePanel ? [chiefExaminerPrivilegePanel] : []),
     // Show lecturer panels to anyone with Lecturer role or baseRole (including Chief Examiners)
     ...(isLecturer ? lecturerPanels : []),
-    ...roleSpecificPanels,
+    ...filteredRoleSpecificPanels,
   ];
 
   useEffect(() => {
@@ -6152,13 +6173,13 @@ function App() {
     );
   }
 
-  const headingTitle = isPureLecturer
+  const _headingTitle = isPureLecturer
     ? 'Uganda Christian University'
     : isAdmin
     ? 'Admin Control Centre'
     : 'Control Centre';
 
-  const headingSubtitle =
+  const _headingSubtitle =
     isPureLecturer
       ? 'Faculty of Computing & Informatics'
       : isAdmin
@@ -6170,21 +6191,72 @@ function App() {
 
   return (
     <div className={`min-h-screen bg-white text-slate-900 flex ${isVetterActive ? 'fullscreen-vetter-mode' : ''}`}>
+      {/* Overlay for mobile when sidebar is open */}
+      {!isVetterActive && sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+      
       {/* Hide sidebar when vetter has joined - fullscreen vetting mode */}
       {!isVetterActive && (
-      <aside className="hidden w-72 flex-col border-r border-blue-300 bg-gradient-to-b from-blue-600 to-blue-700 lg:flex shadow-lg fixed left-0 top-0 h-screen">
-        <div className="px-6 py-8">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-100">
+      <aside className={`${sidebarOpen ? 'translate-x-0 lg:w-72' : '-translate-x-full lg:translate-x-0 lg:w-20'} flex-col border-r border-blue-300 bg-[#2160F3] shadow-lg fixed left-0 top-0 h-screen z-50 transition-all duration-300 ease-in-out flex`}>
+        <div className={`px-3 py-6 ${sidebarOpen ? '' : 'lg:px-2 lg:py-4'}`}>
+          {/* Close button for mobile */}
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="lg:hidden absolute top-4 right-4 p-2 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-colors"
+            aria-label="Close menu"
+          >
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="2"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+          
+          {/* Logo - Centered */}
+          <div className={`mb-4 flex justify-center ${sidebarOpen ? '' : 'lg:hidden'}`}>
+            <div className="bg-white rounded-lg p-2">
+              <img
+                src={ucuLogo}
+                alt="UCU Logo"
+                className="h-16 w-auto object-contain"
+              />
+            </div>
+          </div>
+          
+          {/* Small logo for collapsed state */}
+          <div className={`mb-4 hidden lg:flex justify-center ${sidebarOpen ? 'lg:hidden' : ''}`}>
+            <div className="bg-white rounded-lg p-1">
+              <img
+                src={ucuLogo}
+                alt="UCU Logo"
+                className="h-8 w-auto object-contain"
+              />
+            </div>
+          </div>
+          
+          {/* Main Title - Centered under logo */}
+          <h1 className={`text-lg font-bold text-white mb-2 text-center ${sidebarOpen ? '' : 'lg:hidden'}`}>
+            UCU E-Exam Manager
+          </h1>
+          
+          {/* Subtitle */}
+          <p className={`text-sm text-white/80 text-center ${sidebarOpen ? '' : 'lg:hidden'}`}>
             {currentUserHasRole('Lecturer') && !isAdmin
               ? 'Lecturer Portal'
               : isAdmin ? 'Admin Portal' : 'Digital Moderation'}
           </p>
-          <h1 className="mt-3 text-2xl font-semibold text-white">
-            {headingTitle}
-          </h1>
-          <p className="mt-2 text-xs text-blue-100">{headingSubtitle}</p>
         </div>
-        <nav className="flex-1 space-y-1 overflow-y-auto px-4 pb-6">
+        <nav className={`flex-1 space-y-1 overflow-y-auto pb-6 ${sidebarOpen ? 'px-4' : 'lg:px-2'}`}>
           {(() => {
             // Separate panels into categories
             // Include both 'overview' and 'lecturer-role-dashboard' for Dashboard button
@@ -6232,25 +6304,25 @@ function App() {
                     {setterPanels.map((panel) => {
                       const isActive = panel.id === activePanelId;
                       // Split "Submit Paper Draft" to animate "Submit" and "Paper" separately
-                      const labelParts = panel.label.split(' ');
+                      const _labelParts = panel.label.split(' ');
                       return (
                         <button
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`flex w-full items-center justify-between rounded-xl border-2 px-4 py-3 text-left text-sm font-semibold transition-all shadow-lg mb-2 ${
+                          className={`flex w-full items-center ${sidebarOpen ? 'justify-between' : 'lg:justify-center'} rounded-xl border-2 ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-3 text-left text-sm font-semibold transition-all shadow-lg mb-2 ${
                             isActive
                               ? 'border-pink-500/60 bg-gradient-to-r from-pink-500/20 via-rose-500/20 to-pink-500/20 text-pink-200 shadow-pink-500/30'
                               : 'border-pink-500/40 bg-gradient-to-r from-pink-500/10 via-rose-500/10 to-pink-500/10 text-pink-300 hover:border-pink-500/60 hover:bg-gradient-to-r hover:from-pink-500/20 hover:via-rose-500/20 hover:to-pink-500/20 hover:shadow-pink-500/40 hover:text-pink-200'
                           }`}
                         >
-                          <span className="flex items-center gap-1.5">
+                          <span className={`flex items-center gap-1.5 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                             <span className="inline-flex items-center gap-1">
                               <span className="animate-heartbeat text-pink-400 font-bold" style={{ animationDelay: '0s' }}>Submit</span>
                               <span className="animate-heartbeat text-pink-400 font-bold" style={{ animationDelay: '0.15s' }}>Draft</span>
                             </span>
                           </span>
-                          <span className={`text-xs ${isActive ? 'text-pink-400' : 'text-pink-500/60'}`}>{isActive ? '•' : '↗'}</span>
+                          <span className={`text-xs ${isActive ? 'text-pink-400' : 'text-pink-500/60'} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                         </button>
                       );
                     })}
@@ -6272,7 +6344,7 @@ function App() {
                       key={panel.id}
                       type="button"
                       onClick={() => handlePanelSelect(panel.id)}
-                      className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left text-sm font-medium transition-all ${
+                      className={`flex w-full items-center ${sidebarOpen ? 'gap-3' : 'lg:justify-center lg:gap-0'} rounded-xl border ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-3 text-left text-sm font-medium transition-all ${
                         isActive
                           ? 'border-blue-300 bg-blue-500 text-white shadow-md'
                           : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white hover:shadow-sm'
@@ -6283,8 +6355,8 @@ function App() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
                         </svg>
                       </span>
-                      <span className="flex-1">{panel.label}</span>
-                      <span className={`text-xs flex-shrink-0 ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
+                      <span className={`flex-1 ${sidebarOpen ? '' : 'lg:hidden'}`}>{panel.label}</span>
+                      <span className={`text-xs flex-shrink-0 ${isActive ? 'text-white' : 'text-blue-200'} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                     </button>
                   );
                 })}
@@ -6302,20 +6374,20 @@ function App() {
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`flex w-full items-center justify-between rounded-xl border-2 px-4 py-3 text-left text-sm font-semibold transition-all shadow-lg ${
+                          className={`flex w-full items-center ${sidebarOpen ? 'justify-between' : 'lg:justify-center'} rounded-xl border-2 ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-3 text-left text-sm font-semibold transition-all shadow-lg ${
                             isActive
                               ? 'border-violet-500/60 bg-gradient-to-r from-violet-500/20 via-purple-500/20 to-violet-500/20 text-violet-200 shadow-violet-500/30'
                               : 'border-violet-500/40 bg-gradient-to-r from-violet-500/10 via-purple-500/10 to-violet-500/10 text-violet-300 hover:border-violet-500/60 hover:bg-gradient-to-r hover:from-violet-500/20 hover:via-purple-500/20 hover:to-violet-500/20 hover:shadow-violet-500/40 hover:text-violet-200'
                           }`}
                         >
-                          <span className="flex items-center gap-1.5">
+                          <span className={`flex items-center gap-1.5 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                             <span className="inline-flex items-center gap-1">
                               <span className="animate-heartbeat text-violet-400 font-bold" style={{ animationDelay: '0s' }}>Team</span>
                               <span className="animate-heartbeat text-violet-400 font-bold" style={{ animationDelay: '0.15s' }}>Lead</span>
                             </span>
                             {submissionText && <span className="text-violet-300/90 ml-1">{submissionText}</span>}
                           </span>
-                          <span className={`text-xs ${isActive ? 'text-violet-400' : 'text-violet-500/60'}`}>{isActive ? '•' : '↗'}</span>
+                          <span className={`text-xs ${isActive ? 'text-violet-400' : 'text-violet-500/60'} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                         </button>
                       );
                     })}
@@ -6325,7 +6397,7 @@ function App() {
                 {/* Chief Examiner / Workflow Panels */}
                 {filteredChiefExaminerPanels.length > 0 && (
                   <>
-                    <div className="mt-4 mb-2 px-2">
+                    <div className={`mt-4 mb-2 px-2 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                       <p className="text-xs font-semibold uppercase tracking-wider text-white drop-shadow-sm">
                         Chief Examiner
                       </p>
@@ -6366,13 +6438,13 @@ function App() {
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`flex w-full items-center justify-between rounded-xl border-2 px-4 py-3 text-left text-sm font-semibold transition-all shadow-lg mb-2 ${
+                          className={`flex w-full items-center ${sidebarOpen ? 'justify-between' : 'lg:justify-center'} rounded-xl border-2 ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-3 text-left text-sm font-semibold transition-all shadow-lg mb-2 ${
                             isActive
                               ? panelStyles.active
                               : panelStyles.inactive
                           }`}
                         >
-                          <span className="flex items-center gap-1.5">
+                          <span className={`flex items-center gap-1.5 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                             {panel.id === 'chief-examiner-console' && (
                               <span className="inline-flex items-center gap-1 tracking-wide">
                                 <span
@@ -6431,10 +6503,10 @@ function App() {
                               </span>
                             )}
                             {!['chief-examiner-console', 'vetting-suite', 'destruction-log'].includes(panel.id) && (
-                              <span>{panel.label}</span>
+                              <span className={sidebarOpen ? '' : 'lg:hidden'}>{panel.label}</span>
                             )}
                           </span>
-                          <span className={`text-xs ${isActive ? panelStyles.textColor : panelStyles.iconColor}`}>{isActive ? '•' : '↗'}</span>
+                          <span className={`text-xs ${isActive ? panelStyles.textColor : panelStyles.iconColor} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                         </button>
                       );
                     })}
@@ -6444,12 +6516,12 @@ function App() {
                 {/* Lecturer Panels */}
                 {lecturerPanelsList.length > 0 && (
                   <>
-                    <div className="mt-4 mb-2 px-2">
+                    <div className={`mt-4 mb-2 px-2 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                       <p className="text-xs font-semibold uppercase tracking-wider text-blue-100">
                         Teaching & Classes
                       </p>
                     </div>
-                    {lecturerPanelsList.map((panel, index) => {
+                    {lecturerPanelsList.map((panel, _index) => {
                       const isActive = panel.id === activePanelId;
                       
                       // Define icons for each panel
@@ -6502,7 +6574,7 @@ function App() {
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`group relative flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs font-semibold shadow-sm transition-all duration-200 ${
+                          className={`group relative flex w-full items-center ${sidebarOpen ? 'gap-2' : 'lg:justify-center lg:gap-0'} rounded-xl border ${sidebarOpen ? 'px-3' : 'lg:px-2'} py-2 text-left text-xs font-semibold shadow-sm transition-all duration-200 ${
                             isActive
                               ? 'border-emerald-400 bg-gradient-to-r from-emerald-500/20 via-sky-500/20 to-indigo-500/20 text-emerald-50 shadow-emerald-500/40'
                               : 'border-transparent bg-blue-900/10 text-blue-100 hover:border-emerald-300 hover:bg-gradient-to-r hover:from-emerald-500/15 hover:via-sky-500/15 hover:to-indigo-500/15 hover:text-emerald-50 hover:shadow-lg'
@@ -6518,20 +6590,12 @@ function App() {
                           <span className={`relative flex-shrink-0 flex h-7 w-7 items-center justify-center rounded-lg border ${isActive ? 'border-emerald-300 bg-emerald-500/20 text-emerald-50' : 'border-blue-300/40 bg-blue-500/10 text-blue-200 group-hover:border-emerald-300 group-hover:text-emerald-50'}`}>
                             {getIcon()}
                           </span>
-                          <span className="relative flex-1">
+                          <span className={`relative flex-1 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                             <span className="block text-[0.8rem]">
                               {panel.label}
                             </span>
-                            <span className="mt-0.5 block text-[0.65rem] text-blue-200/80 group-hover:text-emerald-100/90">
-                              {index === 0 && 'Quickly capture marks for your enrolled classes.'}
-                              {index === 1 && 'Search and inspect individual student records.'}
-                              {index === 2 && 'Generate rich monthly teaching and grading reports.'}
-                              {index === 3 && 'Review your AI-organised timetable for the semester.'}
-                              {index === 4 && 'See all the classes you are currently teaching.'}
-                              {index === 5 && 'Adjust your profile and notification preferences.'}
-                            </span>
                           </span>
-                          <span className={`relative text-xs flex-shrink-0 ${isActive ? 'text-emerald-100' : 'text-blue-200/80 group-hover:text-emerald-100'}`}>
+                          <span className={`relative text-xs flex-shrink-0 ${isActive ? 'text-emerald-100' : 'text-blue-200/80 group-hover:text-emerald-100'} ${sidebarOpen ? '' : 'lg:hidden'}`}>
                             {isActive ? 'Active' : 'Explore'}
                           </span>
                         </button>
@@ -6543,7 +6607,7 @@ function App() {
                 {/* Admin Panels */}
                 {adminPanelsList.length > 0 && (
                   <>
-                    <div className="mt-4 mb-2 px-2">
+                    <div className={`mt-4 mb-2 px-2 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                       <p className="text-xs font-semibold uppercase tracking-wider text-blue-100">
                         Administration
                       </p>
@@ -6555,14 +6619,14 @@ function App() {
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`flex w-full items-center justify-between rounded-xl border px-4 py-2 text-left text-sm font-medium transition ${
+                          className={`flex w-full items-center ${sidebarOpen ? 'justify-between' : 'lg:justify-center'} rounded-xl border ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-2 text-left text-sm font-medium transition ${
                             isActive
                               ? 'border-blue-300 bg-blue-500 text-white shadow-md'
                               : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white'
                           }`}
                         >
-                          <span>{panel.label}</span>
-                          <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
+                          <span className={sidebarOpen ? '' : 'lg:hidden'}>{panel.label}</span>
+                          <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                         </button>
                       );
                     })}
@@ -6577,14 +6641,14 @@ function App() {
                       key={panel.id}
                       type="button"
                       onClick={() => handlePanelSelect(panel.id)}
-                      className={`flex w-full items-center justify-between rounded-xl border px-4 py-2 text-left text-sm font-medium transition ${
+                      className={`flex w-full items-center ${sidebarOpen ? 'justify-between' : 'lg:justify-center'} rounded-xl border ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-2 text-left text-sm font-medium transition ${
                         isActive
                           ? 'border-blue-300 bg-blue-500 text-white shadow-md'
                           : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white'
                       }`}
                     >
-                      <span>{panel.label}</span>
-                      <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
+                      <span className={sidebarOpen ? '' : 'lg:hidden'}>{panel.label}</span>
+                      <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                     </button>
                   );
                 })}
@@ -6595,10 +6659,60 @@ function App() {
       </aside>
       )}
 
-      <div className={`flex-1 flex flex-col ${isVetterActive ? 'w-full' : 'lg:ml-72'}`}>
+      <div className={`flex-1 flex flex-col ${isVetterActive ? 'w-full' : sidebarOpen ? 'lg:ml-72' : 'lg:ml-20'}`}>
         <header className="relative border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div>
+            {/* Hamburger Menu Button - Mobile */}
+            {!isVetterActive && (
+              <button
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="lg:hidden fixed top-4 left-4 z-50 p-2 rounded-lg bg-white shadow-md border border-slate-200 hover:bg-slate-50 transition-colors"
+                aria-label="Toggle menu"
+              >
+                <svg
+                  className="w-6 h-6 text-slate-700"
+                  fill="none"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  {sidebarOpen ? (
+                    <path d="M6 18L18 6M6 6l12 12" />
+                  ) : (
+                    <path d="M4 6h16M4 12h16M4 18h16" />
+                  )}
+                </svg>
+              </button>
+            )}
+            
+            {/* Hamburger Menu Button - Desktop */}
+            {!isVetterActive && (
+              <button
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="hidden lg:flex items-center justify-center p-2 rounded-lg bg-slate-100 hover:bg-slate-200 transition-colors mr-4"
+                aria-label="Toggle menu"
+              >
+                <svg
+                  className="w-6 h-6 text-slate-700"
+                  fill="none"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  {sidebarOpen ? (
+                    <path d="M6 18L18 6M6 6l12 12" />
+                  ) : (
+                    <path d="M4 6h16M4 12h16M4 18h16" />
+                  )}
+                </svg>
+              </button>
+            )}
+            
+            <div className={!isVetterActive && sidebarOpen ? 'lg:ml-0' : ''}>
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-600">
                 {isAdmin
                   ? 'Admin Dashboard'
@@ -6618,13 +6732,13 @@ function App() {
                 {isAdmin
                   ? 'System Administration'
                   : isChiefExaminer
-                  ? 'Your currently assigned Chief Examiner role'
+                  ? 'Chief Examiner'
                   : isTeamLead
-                  ? 'Your currently assigned Team Lead role'
+                  ? 'Team Lead'
                   : isVetter
-                  ? 'Your currently assigned Vetting role'
+                  ? 'Vetting'
                   : isSetter
-                  ? 'Your currently assigned Setter role'
+                  ? 'Setter'
                   : isPureLecturer
                   ? 'Teaching & Student Engagement'
                   : workflow.stage.replace(/-/g, ' ')}
@@ -6633,15 +6747,15 @@ function App() {
                 {isAdmin
                   ? 'Manage staff accounts and system configuration'
                   : isChiefExaminer
-                  ? 'You now have privileges to assign and manage the exam process.'
+                  ? 'Assign and manage the exam process'
                   : isTeamLead
-                  ? 'You now have privileges to coordinate setters, vetters and manage team submissions.'
+                  ? 'Coordinate setters and manage submissions'
                   : isVetter
-                  ? 'You now have privileges to review and vet exam papers.'
+                  ? 'Review and vet exam papers'
                   : isSetter
-                  ? 'You now have privileges to prepare and submit exam papers for moderation.'
+                  ? 'Prepare and submit exam papers'
                   : isPureLecturer
-                  ? 'Use the dashboard below to manage your classes, students and reports.'
+                  ? 'Manage classes, students and reports'
                   : outstandingAction}
               </p>
             </div>
@@ -7266,7 +7380,7 @@ function AdminViewLecturersPanel({
   const postgraduateLecturers = lecturers.filter(l => l.lecturerCategory === 'Postgraduate');
   const uncategorizedLecturers = lecturers.filter(l => !l.lecturerCategory);
 
-  const displayedLecturers = filterCategory === 'All' 
+  const _displayedLecturers = filterCategory === 'All' 
     ? lecturers 
     : lecturers.filter(lecturer => lecturer.lecturerCategory === filterCategory);
   
@@ -7803,7 +7917,7 @@ function AdminViewLecturersPanel({
   );
 }
 
-function AdminAddLecturerPanel({
+function _AdminAddLecturerPanel({
   onAddLecturer,
 }: AdminAddLecturerPanelProps) {
   const [lecturerName, setLecturerName] = useState('');
@@ -8106,7 +8220,7 @@ interface SuperUserChiefExaminerPanelProps {
   onUnassignChiefExaminer: (userId: string) => void;
 }
 
-function SuperUserChiefExaminerPanel({
+function _SuperUserChiefExaminerPanel({
   users,
   chiefExaminerRoleEnabled,
   onEnableChiefExaminerRole,
@@ -8451,7 +8565,7 @@ interface SuperUserAccountsPanelProps {
   users: User[];
 }
 
-function SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
+function _SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [showPrivileges, setShowPrivileges] = useState(false);
 
@@ -8907,7 +9021,7 @@ interface SuperUserManageUsersPanelProps {
   setUsers: React.Dispatch<React.SetStateAction<User[]>>;
 }
 
-function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPanelProps) {
+function _SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPanelProps) {
   const [selectedUserId, setSelectedUserId] = useState<string>('');
   const [action, setAction] = useState<'view' | 'edit' | 'delete'>('view');
 
@@ -9201,7 +9315,7 @@ interface AdminAuditLogPanelProps {
   workflow: WorkflowState;
 }
 
-function AdminAuditLogPanel({ workflow }: AdminAuditLogPanelProps) {
+function _AdminAuditLogPanel({ workflow }: AdminAuditLogPanelProps) {
   return (
     <SectionCard
       title="Audit Log"
@@ -9247,7 +9361,7 @@ interface AdminStaffManagementPanelProps {
   setUsers: React.Dispatch<React.SetStateAction<User[]>>;
 }
 
-function AdminStaffManagementPanel({ users, setUsers }: AdminStaffManagementPanelProps) {
+function _AdminStaffManagementPanel({ users, setUsers }: AdminStaffManagementPanelProps) {
   const [selectedUser, setSelectedUser] = useState<string>('');
   const [searchTerm, setSearchTerm] = useState('');
 
@@ -9587,10 +9701,10 @@ function ChiefExaminerConsole({
   currentUser,
   onAssignRole,
   onUnassignRole,
-  deadlinesActive,
+  deadlinesActive: _deadlinesActive,
   deadlineDuration,
   repositoriesActive,
-  onToggleDeadlines,
+  onToggleDeadlines: _onToggleDeadlines,
   onSetDeadlineDuration,
   onToggleRepositories,
   lastModerationDownload,
@@ -9612,8 +9726,8 @@ function ChiefExaminerConsole({
   const [awardUserId, setAwardUserId] = useState('');
   const [selectedCourseUnit, setSelectedCourseUnit] = useState('');
   const [awardRole, setAwardRole] = useState<Role>('Team Lead');
-  const [showDurationSettings, setShowDurationSettings] = useState(false);
-  const [durationForm, setDurationForm] = useState(deadlineDuration);
+  const [_showDurationSettings, setShowDurationSettings] = useState(false);
+  const [durationForm, _setDurationForm] = useState(deadlineDuration);
   const [showSetterDurationSettings, setShowSetterDurationSettings] = useState(false);
   const [setterDurationForm, setSetterDurationForm] = useState(setterDeadlineDuration);
   const [showTeamLeadDurationSettings, setShowTeamLeadDurationSettings] = useState(false);
@@ -9696,14 +9810,14 @@ function ChiefExaminerConsole({
     }
   };
 
-  const handleDurationSubmit = (e: FormEvent) => {
+  const _handleDurationSubmit = (e: FormEvent) => {
     e.preventDefault();
     onSetDeadlineDuration(durationForm);
     setShowDurationSettings(false);
     alert(`Deadline duration set to ${durationForm.days} days, ${durationForm.hours} hours, ${durationForm.minutes} minutes`);
   };
 
-  const formatDuration = () => {
+  const _formatDuration = () => {
     const parts = [];
     if (deadlineDuration.days > 0) parts.push(`${deadlineDuration.days} day${deadlineDuration.days !== 1 ? 's' : ''}`);
     if (deadlineDuration.hours > 0) parts.push(`${deadlineDuration.hours} hour${deadlineDuration.hours !== 1 ? 's' : ''}`);
@@ -11008,10 +11122,10 @@ function TeamLeadPanel({
   deadlineStartTime,
   deadlineDuration,
   repositoriesActive,
-  onTeamLeadCompile,
+  onTeamLeadCompile: _onTeamLeadCompile,
   submittedPapers,
   setterSubmissions,
-  workflowStage,
+  workflowStage: _workflowStage,
   onSubmitPDF,
   vettingSessionRecords = [],
   customChecklistPdf,
@@ -11791,7 +11905,7 @@ function TeamLeadDashboardPanel({
   }, [submittedPapers, users]);
   
   // Helper functions for paper cards
-  const getStatusColor = (status: string) => {
+  const _getStatusColor = (status: string) => {
     switch (status) {
       case 'submitted':
         return 'text-violet-400 bg-violet-500/10 border-violet-500/30';
@@ -11806,7 +11920,7 @@ function TeamLeadDashboardPanel({
     }
   };
 
-  const getStatusLabel = (status: string) => {
+  const _getStatusLabel = (status: string) => {
     switch (status) {
       case 'submitted':
         return 'Submitted';
@@ -11821,7 +11935,7 @@ function TeamLeadDashboardPanel({
     }
   };
 
-  const getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
+  const _getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
     // If paper is submitted by Team Lead, it's a submission TO Chief Examiner
     if (paper.submittedRole === 'Team Lead' && paper.status === 'submitted') {
       return 'Submitted to Chief Examiner';
@@ -12141,7 +12255,7 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
   const [scanCompleted, setScanCompleted] = useState(false);
 
   // Helper functions for paper cards
-  const getStatusColor = (status: string) => {
+  const _getStatusColor = (status: string) => {
     switch (status) {
       case 'submitted':
         return 'text-violet-400 bg-violet-500/10 border-violet-500/30';
@@ -12156,7 +12270,7 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
     }
   };
 
-  const getStatusLabel = (status: string) => {
+  const _getStatusLabel = (status: string) => {
     switch (status) {
       case 'submitted':
         return 'Submitted';
@@ -12171,7 +12285,7 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
     }
   };
 
-  const getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
+  const _getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
     // If paper is submitted by Team Lead, it's a submission TO Chief Examiner
     if (paper.submittedRole === 'Team Lead' && paper.status === 'submitted') {
       return 'Submitted to Chief Examiner';
@@ -12191,7 +12305,7 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
     }
   };
 
-  const getSubmitterName = (paper: SubmittedPaper): string => {
+  const _getSubmitterName = (paper: SubmittedPaper): string => {
     return paper.submittedBy || 'Unknown';
   };
 
@@ -12768,7 +12882,7 @@ interface LecturerDashboardPanelProps {
   isPureLecturer: boolean;
 }
 
-function LecturerDashboardPanel({
+function _LecturerDashboardPanel({
   user,
   deadlinesActive,
   repositoriesActive,
@@ -13511,7 +13625,7 @@ function ChiefExaminerDashboardPanel({
 
   // Lead submissions: count all papers submitted by Team Lead (regardless of status)
   // This separates Team Lead submissions from Setter submissions
-  const totalLeadSubmissions = submittedPapers.filter(
+  const _totalLeadSubmissions = submittedPapers.filter(
     (p) => p.submittedRole === 'Team Lead'
   ).length;
   const totalAnnotations = annotations.length;
@@ -14660,7 +14774,7 @@ interface LoginPortalProps {
   showAdminOnly?: boolean;
 }
 
-function LoginPortal({
+function _LoginPortal({
   admins,
   lecturers,
   onLogin,
@@ -15012,7 +15126,7 @@ function WorkflowOrchestration({
   workflow,
   annotations,
   versionHistory,
-  currentUser,
+  currentUser: _currentUser,
   userHasRole,
   onSetterSubmit,
   onTeamLeadCompile,
@@ -15393,8 +15507,8 @@ function VettingAndAnnotations({
   workflowStage,
   workflow,
   vettingSession,
-  annotations,
-  safeBrowserPolicies,
+  annotations: _annotations,
+  safeBrowserPolicies: _safeBrowserPolicies,
   checklist,
   customChecklistPdf,
   vettingCountdown,
@@ -15411,7 +15525,7 @@ function VettingAndAnnotations({
           currentUserId,
           joinedVetters = new Set(),
           vetterMonitoring,
-          logVetterWarning,
+          logVetterWarning: _logVetterWarning,
           checklistComments = new Map(),
           onChecklistCommentChange,
           typingIndicators = new Map(),
@@ -15470,7 +15584,7 @@ function VettingAndAnnotations({
     return `${names[0]}, ${names[1]} +${names.length - 2} more are typing…`;
   };
 
-  const SectionCommentArea = ({
+  const _SectionCommentArea = ({
     sectionKey,
     label,
     accentColor,
@@ -15753,7 +15867,7 @@ function VettingAndAnnotations({
   // Editable Checklist Item Component - Simple working textarea
   const EditableChecklistItem = ({ 
     item, 
-    category, 
+    category: _category, 
     bulletColor, 
     commentKey 
   }: { 
@@ -15891,7 +16005,7 @@ function VettingAndAnnotations({
   };
 
   // Helper component to render checklist item with individual comment functionality
-  const ChecklistItem = ({ item, category, bulletColor }: { item: string; category: string; bulletColor: string }) => {
+  const _ChecklistItem = ({ item, category, bulletColor }: { item: string; category: string; bulletColor: string }) => {
     const commentKey = `${category}-${item}`;
     const comment = checklistComments?.get(commentKey);
     const [itemDraft, setItemDraft] = useState(comment?.comment ?? '');
@@ -16069,7 +16183,7 @@ function VettingAndAnnotations({
     }
   }, [moderationSchedule, workflowStage, vettingSession.active, isScheduledTimeReached, moderationStartCountdown, canStartSession, userHasRole]);
 
-  const canCompleteSession =
+  const _canCompleteSession =
     userHasRole('Vetter') &&
     vettingSession.active &&
     workflowStage === 'Vetting in Progress';
@@ -16096,7 +16210,7 @@ function VettingAndAnnotations({
     },
   ];
 
-  const handleAnnotationSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const _handleAnnotationSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     onAddAnnotation(annotationDraft);
     setAnnotationDraft('');
@@ -16168,7 +16282,7 @@ function VettingAndAnnotations({
               <div className="space-y-3">
                 {isVetter && vetterPapers.length > 0 ? (
                   <div className={`grid gap-3 ${vetterPapers.length === 2 ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                    {vetterPapers.map((paper, index) => {
+                    {vetterPapers.map((paper, _index) => {
                       const paperUrl = getPaperUrl(paper);
                       if (!paperUrl) return null;
                       return (
@@ -16271,8 +16385,8 @@ function VettingAndAnnotations({
   );
 
   // Simple comment box state
-  const [simpleComment, setSimpleComment] = useState('');
-  const [simpleCommentKey, setSimpleCommentKey] = useState('');
+  const [_simpleComment, setSimpleComment] = useState('');
+  const [_simpleCommentKey, setSimpleCommentKey] = useState('');
 
   // Load existing quick comment on mount
   useEffect(() => {
@@ -16404,7 +16518,7 @@ function VettingAndAnnotations({
                   }}
                   onInput={(e) => {
                     // Auto-save content as user types
-                    const content = e.currentTarget.innerHTML;
+                    const _content = e.currentTarget.innerHTML;
                     // You can save this to localStorage or state if needed
                   }}
                 >
