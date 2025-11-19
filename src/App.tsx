@@ -1517,10 +1517,9 @@ function App() {
             id: paper.id,
             fileName: paper.file_name || paper.course_name || 'Exam Paper',
             submittedBy:
-              paper.submitted_by_name ||
-              paper.submitted_by ||
               paper.team_lead_id ||
               paper.setter_id ||
+              paper.chief_examiner_id ||
               'Unknown',
             submittedAt: paper.submitted_at || paper.created_at,
             fileSize: paper.file_size || undefined,
@@ -1642,8 +1641,6 @@ function App() {
         setter_id: params.submittedRole === 'Setter' ? params.submittedById : null,
         team_lead_id: params.submittedRole === 'Team Lead' ? params.submittedById : null,
         chief_examiner_id: params.submittedRole === 'Chief Examiner' ? params.submittedById : null,
-        submitted_by: params.submittedByName || params.submittedById || 'Unknown',
-        submitted_by_name: params.submittedByName || 'Unknown',
         status,
         version_number: 1,
         file_url: storageData.path,
@@ -3243,10 +3240,9 @@ function App() {
             id: paper.id,
             fileName: paper.file_name || paper.course_name || 'Exam Paper',
             submittedBy:
-              paper.submitted_by_name ||
-              paper.submitted_by ||
               paper.team_lead_id ||
               paper.setter_id ||
+              paper.chief_examiner_id ||
               'Unknown',
             submittedAt: paper.submitted_at || paper.created_at,
             fileSize: paper.file_size || undefined,
