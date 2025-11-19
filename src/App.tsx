@@ -1329,6 +1329,19 @@ function App() {
   const [vettingSession, setVettingSession] = useState<VettingSessionState>(loadPersistedVettingSession());
   // Track which vetters have joined the session (enabled camera and started their individual session)
   const [joinedVetters, setJoinedVetters] = useState<Set<string>>(new Set());
+  // Track restricted vetters (violated rules - cannot rejoin until reactivated by Chief Examiner)
+  const loadRestrictedVetters = (): Set<string> => {
+    try {
+      const saved = localStorage.getItem('ucu-restricted-vetters');
+      if (!saved) return new Set();
+      const parsed = JSON.parse(saved) as string[];
+      return new Set(parsed);
+    } catch (error) {
+      console.error('Error loading restricted vetters:', error);
+      return new Set();
+    }
+  };
+  const [restrictedVetters, setRestrictedVetters] = useState<Set<string>>(loadRestrictedVetters);
   // Track monitoring data for each vetter (camera feeds, warnings, violations)
   const [vetterMonitoring, setVetterMonitoring] = useState<Map<string, VetterMonitoring>>(new Map());
   // Store camera stream references for Chief Examiner monitoring
@@ -1999,6 +2012,29 @@ function App() {
           type: n.type,
         }));
         setNotifications(mapped);
+        
+        // Check for unread role assignment notifications and show toast
+        const roleAssignmentNotifications = mapped.filter(
+          (n) => 
+            !n.read && 
+            n.type === 'success' && 
+            (n.title?.includes('Role Assigned') || n.title?.includes('Chief Examiner'))
+        );
+        
+        if (roleAssignmentNotifications.length > 0) {
+          // Show the most recent role assignment notification
+          const mostRecent = roleAssignmentNotifications.sort(
+            (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+          )[0];
+          
+          setActiveToast(mostRecent);
+          // Auto-hide toast after 8 seconds for role assignments
+          setTimeout(() => {
+            setActiveToast((current) =>
+              current && current.id === mostRecent.id ? null : current
+            );
+          }, 8000);
+        }
       } catch (error) {
         console.error('Error loading user notifications:', error);
       }
@@ -2182,8 +2218,9 @@ function App() {
         ) {
           e.preventDefault();
           e.stopPropagation();
-          if (e.key === 'PrintScreen' || (e.metaKey && e.shiftKey && ['3', '4', '5'].includes(e.key))) {
-            alert('Screenshots are disabled during the vetting session.');
+          // Immediately restrict the vetter if they attempt screenshot
+          if (currentUser?.id && joinedVetters.has(currentUser.id)) {
+            restrictVetter(currentUser.id, 'screenshot_attempt');
           }
           return false;
         }
@@ -2249,30 +2286,12 @@ function App() {
           // Try to bring focus back
           window.focus();
           
-          // If still not focused after warning, terminate the session
+          // If still not focused after warning, restrict the vetter
           setTimeout(() => {
             if (document.hidden || !document.hasFocus()) {
-              logVetterWarning(
-                currentUser.id!,
-                'tab_switch',
-                'Session terminated: Vetter did not return after tab switch warning.',
-                'critical'
-              );
-              
-              alert('Session terminated due to tab switching. You must rejoin the session.');
-              // Terminate this vetter's session
+              // Immediately restrict the vetter if they continue leaving the window
               if (currentUser.id && joinedVetters.has(currentUser.id)) {
-                setJoinedVetters(prev => {
-                  const newSet = new Set(prev);
-                  newSet.delete(currentUser.id!);
-                  return newSet;
-                });
-                // Clean up camera stream
-                const stream = vetterCameraStreams.current.get(currentUser.id!);
-                if (stream) {
-                  stream.getTracks().forEach(track => track.stop());
-                  vetterCameraStreams.current.delete(currentUser.id!);
-                }
+                restrictVetter(currentUser.id, 'window_leave');
               }
             }
           }, 3000);
@@ -2335,28 +2354,11 @@ function App() {
                 if (!document.hasFocus()) {
                   window.clearInterval(refocusInterval);
                   
-                logVetterWarning(
-                    vetterId,
-                  'window_leave',
-                    'Session terminated automatically: vetter continued leaving the window.',
-                  'critical'
-                );
-                
-                  alert('Session terminated: the vetting window lost focus. Please rejoin to continue.');
-                  
+                  // Immediately restrict the vetter if they continue leaving the window
                   if (vetterId && joinedVetters.has(vetterId)) {
-                  setJoinedVetters(prev => {
-                    const newSet = new Set(prev);
-                      newSet.delete(vetterId);
-                    return newSet;
-                  });
-                    const stream = vetterCameraStreams.current.get(vetterId);
-                  if (stream) {
-                    stream.getTracks().forEach(track => track.stop());
-                      vetterCameraStreams.current.delete(vetterId);
+                    restrictVetter(vetterId, 'window_leave');
                   }
                 }
-              }
               }, 2000);
             }
           }, 250);
@@ -3108,27 +3110,22 @@ function App() {
 
       pushWorkflowEvent(message, actor);
 
+      // Create a notification for the Chief Examiner (current user) to see in their bell
       const notification: AppNotification = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         message,
         timestamp: new Date().toISOString(),
         read: false,
-        title: 'New Operational Role Assigned',
+        title: 'Role Assignment Successful',
         type: 'success',
       };
 
-    // Show toast + local bell update for the current user (Chief Examiner)
+      // Show toast + local bell update for the current user (Chief Examiner)
       setNotifications((prev) => [notification, ...prev].slice(0, 20));
       setActiveToast(notification);
 
-    // Also persist notification to DB for the appointed lecturer,
-    // so they see it next time they sign in.
-    void createNotification({
-      user_id: targetUser.id,
-      title: 'New Operational Role Assigned',
-      message,
-      type: 'success',
-    });
+      // Note: Notification for the target user is created in privilegeElevation.ts
+      // (appointRole/elevateToChiefExaminer functions)
 
       // Auto-hide toast after a few seconds
       setTimeout(() => {
@@ -3780,6 +3777,58 @@ function App() {
         vetterName: actor,
       });
     }
+  };
+
+  // Function to restrict a vetter (sign out, add to restricted list, persist)
+  const restrictVetter = (vetterId: string, violationType: 'screenshot_attempt' | 'window_leave') => {
+    if (!vetterId) return;
+    
+    // Sign out the vetter immediately
+    setJoinedVetters(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(vetterId);
+      return newSet;
+    });
+    
+    // Clean up camera stream
+    const stream = vetterCameraStreams.current.get(vetterId);
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      vetterCameraStreams.current.delete(vetterId);
+    }
+    
+    // Remove from monitoring
+    setVetterMonitoring(prev => {
+      const newMap = new Map(prev);
+      newMap.delete(vetterId);
+      return newMap;
+    });
+    
+    // Add to restricted list
+    setRestrictedVetters(prev => {
+      const newSet = new Set(prev);
+      newSet.add(vetterId);
+      // Persist to localStorage
+      localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(newSet)));
+      return newSet;
+    });
+    
+    // Log the violation
+    logVetterWarning(
+      vetterId,
+      violationType,
+      `VIOLATION: ${violationType === 'screenshot_attempt' ? 'Screenshot attempt detected' : 'Window leave detected'}. Session terminated and access restricted.`,
+      'critical'
+    );
+    
+    // Show violation message to the vetter
+    const violationMessage = violationType === 'screenshot_attempt' 
+      ? 'VIOLATION: Screenshot attempt detected. Your session has been terminated and your access has been restricted. Please contact the Chief Examiner to regain access.'
+      : 'VIOLATION: Leaving the window is not allowed. Your session has been terminated and your access has been restricted. Please contact the Chief Examiner to regain access.';
+    
+    alert(violationMessage);
+    
+    // Note: User will need to manually log out or refresh - we've already restricted their access
   };
 
   // Helper function to log warnings/violations for vetter monitoring
@@ -5738,6 +5787,15 @@ function App() {
           teamLeadDeadlineActive={teamLeadDeadlineActive}
           teamLeadDeadlineDuration={teamLeadDeadlineDuration}
           teamLeadDeadlineStartTime={teamLeadDeadlineStartTime}
+          restrictedVetters={restrictedVetters}
+          onReactivateVetter={(vetterId) => {
+            setRestrictedVetters(prev => {
+              const newSet = new Set(prev);
+              newSet.delete(vetterId);
+              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(newSet)));
+              return newSet;
+            });
+          }}
           onSetSetterDeadline={(active: boolean, duration: { days: number; hours: number; minutes: number }) => {
             setSetterDeadlineActive(active);
             if (active) {
@@ -5909,8 +5967,18 @@ function App() {
           moderationEndCountdown={moderationEndCountdown}
           currentUserId={currentUser?.id}
           joinedVetters={joinedVetters}
+          restrictedVetters={restrictedVetters}
           vetterMonitoring={vetterMonitoring}
           logVetterWarning={logVetterWarning}
+          users={users}
+          onReactivateVetter={(vetterId) => {
+            setRestrictedVetters(prev => {
+              const newSet = new Set(prev);
+              newSet.delete(vetterId);
+              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(newSet)));
+              return newSet;
+            });
+          }}
           checklistComments={checklistComments}
           typingIndicators={checklistTypingIndicators}
           checklistDraftText={checklistDraftText}
@@ -9650,6 +9718,8 @@ interface ChiefExaminerConsoleProps {
   }>;
   submittedPapers: SubmittedPaper[];
   setSubmittedPapers: React.Dispatch<React.SetStateAction<SubmittedPaper[]>>;
+  restrictedVetters?: Set<string>;
+  onReactivateVetter?: (vetterId: string) => void;
   sectionId?: string;
 }
 
@@ -9721,6 +9791,8 @@ function ChiefExaminerConsole({
   repositoryPapers,
   submittedPapers,
   setSubmittedPapers,
+  restrictedVetters = new Set(),
+  onReactivateVetter,
   sectionId,
 }: ChiefExaminerConsoleProps) {
   const [awardUserId, setAwardUserId] = useState('');
@@ -10212,6 +10284,74 @@ function ChiefExaminerConsole({
             );
           })()}
             </div>
+          </div>
+
+          {/* Restricted Vetters Section - Always visible */}
+          <div className="mt-6 rounded-xl border-2 border-red-300 bg-red-50/50 p-5">
+            <div className="mb-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-red-500 to-rose-600 text-white shadow-lg">
+                  <span className="text-xl">🚫</span>
+                </div>
+                <div>
+                  <h4 className="text-base font-bold text-red-800">
+                    Restricted Vetters
+                  </h4>
+                  <p className="text-sm text-red-700 mt-1">
+                    Vetters with restricted access due to violations
+                  </p>
+                </div>
+              </div>
+              <span className="rounded-full bg-red-100 px-4 py-2 text-xs font-bold text-red-700 border-2 border-red-200 shadow-sm">
+                {restrictedVetters ? restrictedVetters.size : 0} Restricted
+              </span>
+            </div>
+            {restrictedVetters && restrictedVetters.size > 0 ? (
+              <div className="space-y-3">
+                {Array.from(restrictedVetters).map((vetterId) => {
+                  const vetter = users.find((u: User) => u.id === vetterId);
+                  if (!vetter) return null;
+                  return (
+                    <div key={vetterId} className="flex items-center justify-between rounded-lg border-2 border-red-200 bg-white p-4 shadow-sm">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-red-100 text-red-600">
+                          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold text-slate-900">{vetter.name}</p>
+                          <p className="text-xs text-red-600">Access restricted due to violation</p>
+                        </div>
+                      </div>
+                      {onReactivateVetter && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (confirm(`Reactivate ${vetter.name}? They will be able to join vetting sessions again.`)) {
+                              onReactivateVetter(vetterId);
+                            }
+                          }}
+                          className="rounded-lg bg-green-500 px-4 py-2 text-xs font-bold text-white shadow hover:bg-green-600 transition"
+                        >
+                          Reactivate
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="rounded-lg border-2 border-dashed border-red-200 bg-white/50 p-8 text-center">
+                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-red-100 mb-4">
+                  <svg className="h-8 w-8 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                  </svg>
+                </div>
+                <p className="text-base font-semibold text-red-700">No Restricted Vetters</p>
+                <p className="text-sm text-red-600 mt-2">All vetters currently have full access to vetting sessions.</p>
+              </div>
+            )}
           </div>
         </div>
       </SectionCard>
@@ -15439,8 +15579,11 @@ interface VettingAndAnnotationsProps {
   sectionId?: string;
   currentUserId?: string;
   joinedVetters?: Set<string>;
+  restrictedVetters?: Set<string>;
   vetterMonitoring?: Map<string, VetterMonitoring>;
   logVetterWarning?: (vetterId: string, type: VetterWarning['type'], message: string, severity?: 'warning' | 'critical') => void;
+  onReactivateVetter?: (vetterId: string) => void;
+  users?: User[];
   checklistComments?: Map<string, { comment: string; vetterName: string; timestamp: number; color: string }>;
   onChecklistCommentChange?: (key: string, comment: string | null, color?: string) => void;
   typingIndicators?: Map<string, string[]>;
@@ -15524,8 +15667,11 @@ function VettingAndAnnotations({
   sectionId,
           currentUserId,
           joinedVetters = new Set(),
+          restrictedVetters = new Set(),
           vetterMonitoring,
           logVetterWarning: _logVetterWarning,
+          onReactivateVetter,
+          users = [],
           checklistComments = new Map(),
           onChecklistCommentChange,
           typingIndicators = new Map(),
@@ -15556,6 +15702,7 @@ function VettingAndAnnotations({
   const isChiefExaminer = userHasRole('Chief Examiner');
   const isVetter = userHasRole('Vetter');
   const vetterHasJoined = currentUserId ? joinedVetters.has(currentUserId) : false;
+  const isVetterRestricted = currentUserId ? restrictedVetters.has(currentUserId) : false;
   const showVetterFocusedLayout = isVetter && !isChiefExaminer;
   
   // Simple color selection for text comments (like Word document text color)
@@ -17214,7 +17361,17 @@ function VettingAndAnnotations({
 
   const vetterSessionPanel = showVetterFocusedLayout ? (
     <div className="rounded-2xl border-2 border-blue-200/70 bg-white/90 p-4 shadow-lg">
-      {!vetterHasJoined ? (
+      {isVetterRestricted ? (
+        <div className="space-y-3">
+          <div className="rounded-lg border-2 border-red-300 bg-red-50 p-4 text-center">
+            <div className="text-2xl mb-2">🚫</div>
+            <h3 className="text-sm font-bold text-red-800 mb-1">Restricted Access</h3>
+            <p className="text-xs text-red-700">
+              Your access has been restricted due to a violation. Please contact the Chief Examiner to regain access.
+            </p>
+          </div>
+        </div>
+      ) : !vetterHasJoined ? (
         <button
           type="button"
           onClick={() => onStartVetting(customDuration)}
@@ -17271,6 +17428,36 @@ function VettingAndAnnotations({
       }
     >
       <div className="space-y-5">
+        {/* Circular video preview for vetter - shows their recorded face */}
+        {isVetter && vetterHasJoined && vettingSession.cameraOn && currentUserId && (() => {
+          // Get camera stream from monitoring data or global stream
+          const monitoring = vetterMonitoring?.get(currentUserId);
+          const cameraStream = monitoring?.cameraStream || (window as any).__vettingCameraStream;
+          if (!cameraStream) return null;
+          
+          return (
+            <div className="fixed bottom-6 right-6 z-50">
+              <div className="relative w-32 h-32 rounded-full border-4 border-green-500 bg-slate-900 overflow-hidden shadow-2xl">
+                <video
+                  ref={(video) => {
+                    if (video && cameraStream) {
+                      video.srcObject = cameraStream;
+                      video.play().catch(err => console.error('Circular preview playback error:', err));
+                    }
+                  }}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-cover scale-x-[-1]"
+                />
+                <div className="absolute top-2 left-2 bg-green-600 text-white text-[0.6rem] px-1.5 py-0.5 rounded font-bold flex items-center gap-1">
+                  <span className="h-1 w-1 rounded-full bg-white animate-pulse"></span>
+                  LIVE
+                </div>
+              </div>
+            </div>
+          );
+        })()}
         {showVetterFocusedLayout && vetterSessionPanel}
         {paperChecklistColumns}
 
@@ -17721,6 +17908,42 @@ function VettingAndAnnotations({
                 {/* Clear Records Button - Only show when session is not active and records exist */}
                 {/* Note: This button would need clearVettingRecords passed as prop - removed for now to fix error */}
               </div>
+
+              {/* Restricted Vetters Section */}
+              {restrictedVetters && restrictedVetters.size > 0 && (
+                <div className="mb-4 rounded-lg border-2 border-red-300 bg-red-50/50 p-4">
+                  <h4 className="text-xs font-bold text-red-800 mb-3 flex items-center gap-2">
+                    🚫 Restricted Vetters ({restrictedVetters.size})
+                  </h4>
+                  <div className="space-y-2">
+                    {Array.from(restrictedVetters).map((vetterId) => {
+                      const vetter = users.find((u: User) => u.id === vetterId);
+                      if (!vetter) return null;
+                      return (
+                        <div key={vetterId} className="flex items-center justify-between rounded-lg border border-red-200 bg-white p-2">
+                          <div>
+                            <p className="text-xs font-semibold text-slate-800">{vetter.name}</p>
+                            <p className="text-[0.65rem] text-red-600">Access restricted due to violation</p>
+                          </div>
+                          {onReactivateVetter && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (confirm(`Reactivate ${vetter.name}? They will be able to join vetting sessions again.`)) {
+                                  onReactivateVetter(vetterId);
+                                }
+                              }}
+                              className="rounded-lg bg-green-500 px-3 py-1.5 text-xs font-bold text-white shadow hover:bg-green-600 transition"
+                            >
+                              Reactivate
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* Show message if no vetters have joined yet */}
               {!vetterMonitoring || vetterMonitoring.size === 0 ? (

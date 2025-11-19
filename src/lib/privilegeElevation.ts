@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import type { PrivilegeElevation } from './supabase';
+import { createNotification } from './examServices/notificationService';
 
 // Elevate a lecturer to Chief Examiner (Super Admin only)
 export async function elevateToChiefExaminer(
@@ -68,6 +69,17 @@ export async function elevateToChiefExaminer(
       return { success: false, error: insertError.message };
     }
 
+    // Create notification for the user about their new role
+    const metadataText = assignmentDetails
+      ? ` for ${assignmentDetails.category} - ${assignmentDetails.faculty}, ${assignmentDetails.department}`
+      : '';
+    await createNotification({
+      user_id: lecturerId,
+      title: 'Chief Examiner Role Assigned',
+      message: `You have been assigned the Chief Examiner role${metadataText}. You can now manage exam workflows and assign roles to other lecturers.`,
+      type: 'success',
+    });
+
     return { success: true };
   } catch (error: any) {
     return { success: false, error: error.message };
@@ -119,6 +131,20 @@ export async function appointRole(
         role_granted: role,
         is_active: true,
       });
+
+    // Create notification for the user about their new role
+    const roleMessages: Record<string, string> = {
+      'Setter': 'You have been assigned the Setter role. You can now submit exam drafts within the deadline window.',
+      'Vetter': 'You have been assigned the Vetter role. You can now join vetting sessions to review exam papers.',
+      'Team Lead': 'You have been assigned the Team Lead role. You can now compile and integrate exam drafts from setters.',
+    };
+
+    await createNotification({
+      user_id: userId,
+      title: `${role} Role Assigned`,
+      message: roleMessages[role] || `You have been assigned the ${role} role.`,
+      type: 'success',
+    });
 
     return { success: true };
   } catch (error: any) {
