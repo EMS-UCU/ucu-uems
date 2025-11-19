@@ -55,27 +55,6 @@ export default function LecturerDashboard({
 
   return (
     <div className="space-y-6 bg-gradient-to-br from-slate-50 to-blue-50 p-6 min-h-screen">
-      {/* Dashboard Header */}
-      <motion.div
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="flex items-center justify-between rounded-2xl border-2 border-blue-200 bg-gradient-to-r from-blue-50 via-white to-blue-50 p-6 shadow-lg"
-      >
-        <div className="flex items-center gap-4">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-blue-700 text-white shadow-md">
-            <svg className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-            </svg>
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold text-blue-900">Lecturer Dashboard</h1>
-            <p className="text-sm text-blue-600">Teaching & Student Management</p>
-          </div>
-        </div>
-        <div className="rounded-full bg-gradient-to-r from-blue-600 to-blue-700 px-4 py-2 text-xs font-bold text-white shadow-md">
-          LECTURER
-        </div>
-      </motion.div>
 
       {/* Quick Stats Cards */}
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">

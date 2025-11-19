@@ -28,6 +28,7 @@ import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 import { supabase } from './lib/supabase';
 import { elevateToChiefExaminer, appointRole } from './lib/privilegeElevation';
 import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead } from './lib/examServices/notificationService';
+import ucuLogo from './assets/ucu-logo.png';
 
 type BaseRole = 'Admin' | 'Lecturer';
 type Role =
@@ -108,6 +109,8 @@ interface AppNotification {
   message: string;
   timestamp: string;
   read: boolean;
+  title?: string;
+  type?: 'info' | 'warning' | 'error' | 'success' | 'deadline';
 }
 
 interface TimelineEvent {
@@ -289,7 +292,7 @@ const CHECKLIST_COMMENTS_STORAGE_KEY = 'ucu-vetting-checklist-comments';
 const CHECKLIST_COMMENTS_CHANNEL = 'ucu-vetting-checklist-sync';
 const CHECKLIST_TYPING_TTL_MS = 6000;
 
-const defaultLecturerModules = [
+const _defaultLecturerModules = [
   'Lecturer Dashboard',
   'My Classes',
   'Scheduling',
@@ -419,7 +422,7 @@ const rolePrivileges: Record<Role, RolePrivilegeSet> = {
   },
 };
 
-const roleToPanelIdMap: Partial<Record<Role, string>> = {
+const _roleToPanelIdMap: Partial<Record<Role, string>> = {
   'Admin': 'admin-add-lecturer',
   Lecturer: 'lecturer-dashboard',
   'Chief Examiner': 'chief-examiner-console',
@@ -589,7 +592,7 @@ ET
     `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>`,
     `<< /Length ${textStream.length} >>\nstream\n${textStream}endstream\n`,
     `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>`,
-  ].map((content, index) => `${index + 1} 0 obj\n${content}\nendobj\n`);
+  ].map((content, _index) => `${_index + 1} 0 obj\n${content}\nendobj\n`);
 
   const header = '%PDF-1.4\n';
   const offsets = [0];
@@ -960,11 +963,11 @@ function App() {
   const [users, setUsers] = useState<User[]>(loadPersistedUsers);
   const [authUserId, setAuthUserId] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
+  const [_isLoadingUsers, setIsLoadingUsers] = useState(false);
   const [chiefExaminerRoleEnabled, setChiefExaminerRoleEnabled] =
     useState(loadPersistedChiefExaminerEnabled);
   const [deadlinesActive, setDeadlinesActive] = useState(false);
-  const [deadlineStartTime, setDeadlineStartTime] = useState<number | null>(null);
+  const [_deadlineStartTime, setDeadlineStartTime] = useState<number | null>(null);
   const [deadlineDuration, setDeadlineDuration] = useState<{
     days: number;
     hours: number;
@@ -1002,6 +1005,7 @@ function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   useEffect(() => {
     if (!activeToast) {
@@ -1010,7 +1014,7 @@ function App() {
 
     const timeoutId = window.setTimeout(() => {
       setActiveToast(null);
-    }, 3000);
+    }, 5000); // Match the progress bar duration
 
     return () => {
       window.clearTimeout(timeoutId);
@@ -1109,7 +1113,7 @@ function App() {
   };
   
   // Function to clear all vetting records
-  const clearVettingRecords = () => {
+  const _clearVettingRecords = () => {
     localStorage.removeItem('ucu-vetting-records');
     setVettingSessionRecords([]);
     console.log('✅ All vetting session records cleared');
@@ -1127,7 +1131,7 @@ function App() {
       return [];
     }
   };
-  const [archivedPapers, setArchivedPapers] = useState<SubmittedPaper[]>(loadArchivedPapers());
+  const [_archivedPapers, setArchivedPapers] = useState<SubmittedPaper[]>(loadArchivedPapers());
   const mainContentRef = useRef<HTMLDivElement | null>(null);
 
   const currentUser = useMemo(
@@ -1731,11 +1735,11 @@ function App() {
         const dbNotifications = await getUserNotifications(currentUser.id);
         const mapped: AppNotification[] = dbNotifications.map((n) => ({
           id: n.id,
-          message: n.title 
-            ? `${n.title}: ${n.message}`
-            : n.message,
+          message: n.message,
+          title: n.title,
           timestamp: n.created_at,
           read: n.is_read,
+          type: n.type,
         }));
         setNotifications(mapped);
       } catch (error) {
@@ -1767,14 +1771,15 @@ function App() {
                 created_at: string;
                 is_read: boolean;
                 title?: string;
+                type?: 'info' | 'warning' | 'error' | 'success' | 'deadline';
               };
               const mapped: AppNotification = {
                 id: newNotification.id,
-                message: newNotification.title 
-                  ? `${newNotification.title}: ${newNotification.message}`
-                  : newNotification.message,
+                message: newNotification.message,
+                title: newNotification.title,
                 timestamp: newNotification.created_at,
                 read: newNotification.is_read,
+                type: newNotification.type || 'info',
               };
               setNotifications((prev) => [mapped, ...prev].slice(0, 50));
               // Show toast for new notification
@@ -2413,7 +2418,7 @@ function App() {
           const base = stripDemoPaper(prev);
           const updated = base.map(paper =>
             paper.status === 'in-vetting'
-              ? { ...paper, status: 'vetted' }
+              ? { ...paper, status: 'vetted' as const }
               : paper
           );
           return ensureDemoPaper(updated);
@@ -2471,6 +2476,8 @@ function App() {
         message: 'Moderation Session Ended: Session time expired. All vetter records have been saved and cameras stopped.',
         timestamp: new Date().toISOString(),
         read: false,
+        title: 'Session Expired',
+        type: 'warning',
       };
       setNotifications((prev) => [notification, ...prev]);
       setActiveToast(notification);
@@ -2595,7 +2602,7 @@ function App() {
     });
   };
 
-  const handleAddUser = (name: string, baseRole: BaseRole) => {
+  const _handleAddUser = (name: string, baseRole: BaseRole) => {
     const trimmedName = name.trim();
     if (!trimmedName) {
       return;
@@ -2612,7 +2619,7 @@ function App() {
     setUsers((prev) => [...prev, newUser]);
   };
 
-  const handleEnableChiefExaminerRole = () => {
+  const _handleEnableChiefExaminerRole = () => {
     if (chiefExaminerRoleEnabled) {
       return;
     }
@@ -2624,7 +2631,7 @@ function App() {
     );
   };
 
-  const addLecturerAccount = async (name: string, category?: 'Undergraduate' | 'Postgraduate', email?: string) => {
+  const _addLecturerAccount = async (name: string, category?: 'Undergraduate' | 'Postgraduate', email?: string) => {
     const trimmedName = name.trim();
     if (!trimmedName) {
       return;
@@ -2718,7 +2725,7 @@ function App() {
     }
   };
 
-  const handlePromoteToChiefExaminer = async (userId: string) => {
+  const _handlePromoteToChiefExaminer = async (userId: string) => {
     if (!chiefExaminerRoleEnabled) {
       return;
     }
@@ -2772,7 +2779,7 @@ function App() {
     }
   };
 
-  const handleUnassignChiefExaminer = (userId: string) => {
+  const _handleUnassignChiefExaminer = (userId: string) => {
     const actor = currentUser?.name ?? 'Unknown';
     setUsers((prev) => {
       const updated = prev.map((user) =>
@@ -2849,6 +2856,8 @@ function App() {
         message,
         timestamp: new Date().toISOString(),
         read: false,
+        title: 'New Operational Role Assigned',
+        type: 'success',
       };
 
     // Show toast + local bell update for the current user (Chief Examiner)
@@ -3076,7 +3085,7 @@ function App() {
       actor,
       {
         stage: 'Submitted to Team Lead',
-        mutate: (prev) => ({
+        mutate: (_prev) => ({
           portalOpen: false,
           awaitingRecycle: false,
           lastDecision: undefined,
@@ -3095,6 +3104,8 @@ function App() {
       message,
       timestamp: new Date().toISOString(),
       read: false,
+      title: 'New Setter Draft Submitted',
+      type: 'info',
     };
 
     // Show toast locally if the current user has Team Lead role (e.g. multi-role account)
@@ -3288,6 +3299,8 @@ function App() {
       message: notificationMessage,
       timestamp: new Date().toISOString(),
       read: false,
+      title: 'Team Lead Submission Received',
+      type: 'info',
     };
 
     // If the current user also has Chief Examiner role (multi‑role account),
@@ -3343,7 +3356,7 @@ function App() {
       const base = stripDemoPaper(prev);
       const updated = base.map(paper =>
         paper.submittedBy === actor && paper.status === 'submitted'
-          ? { ...paper, status: 'in-vetting' }
+          ? { ...paper, status: 'in-vetting' as const }
           : paper
       );
       return ensureDemoPaper(updated);
@@ -3646,7 +3659,7 @@ function App() {
     if (isWordDoc) {
       // For Word documents, we'll create an editable HTML version
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = (_event) => {
         // Store the file info - we'll display an editable Word-like interface
         setCustomChecklist(null);
         setCustomChecklistPdf({ url: '', name: file.name, isWordDoc: true });
@@ -3850,7 +3863,7 @@ function App() {
       const base = stripDemoPaper(prev);
       const updated = base.map(paper =>
         paper.status === 'in-vetting'
-          ? { ...paper, status: 'vetted' }
+          ? { ...paper, status: 'vetted' as const }
           : paper
       );
       return ensureDemoPaper(updated);
@@ -3972,6 +3985,8 @@ function App() {
         message: 'Forwarded vetting feedback packet to Team Lead with all comment cards.',
         timestamp: new Date().toISOString(),
         read: false,
+        title: 'Vetting Feedback Sent',
+        type: 'success',
       };
       setNotifications((prev) => [toast, ...prev].slice(0, 20));
       setActiveToast(toast);
@@ -4067,7 +4082,7 @@ function App() {
         const base = stripDemoPaper(prev);
         const updated = base.map(paper =>
           paper.status === 'in-vetting'
-            ? { ...paper, status: 'vetted' }
+            ? { ...paper, status: 'vetted' as const }
             : paper
         );
         return ensureDemoPaper(updated);
@@ -4120,6 +4135,8 @@ function App() {
       message: 'Vetting Session Expired: Session time finished. All vetter records have been saved and cameras stopped.',
       timestamp: new Date().toISOString(),
       read: false,
+      title: 'Session Expired',
+      type: 'warning',
     };
     setNotifications((prev) => [notification, ...prev]);
     setActiveToast(notification);
@@ -4299,7 +4316,7 @@ function App() {
       const base = stripDemoPaper(prev);
       const updated = base.map(paper =>
         paper.status === 'vetted'
-          ? { ...paper, status: 'approved' }
+          ? { ...paper, status: 'approved' as const }
           : paper
       );
       return ensureDemoPaper(updated);
@@ -4406,7 +4423,7 @@ function App() {
         const base = stripDemoPaper(prev);
         const updated = base.map(paper =>
           paper.status === 'vetted'
-            ? { ...paper, status: 'submitted' }
+            ? { ...paper, status: 'submitted' as const }
             : paper
         );
         return ensureDemoPaper(updated);
@@ -5371,7 +5388,7 @@ function App() {
       label: 'Repository Papers',
       visible: true,
       render: () => (
-        <RepositoryPapersPanel repositoryPapers={repositoryPapers} />
+        <RepositoryPapersPanel repositoryPapers={repositoryPapers} users={users} />
       ),
     });
   }
@@ -5412,6 +5429,7 @@ function App() {
           // Show all setter submissions relevant to this workflow so the Team Lead
           // can see the true count of drafts coming in from Setters.
           setterSubmissions={setterSubmissions}
+          users={users}
         />
       ),
     });
@@ -5440,7 +5458,7 @@ function App() {
     });
   }
 
-  if (isAuthenticated && showWorkflowInterfaces && !currentUserHasRole('Team Lead') && !currentUserHasRole('Setter')) {
+  if (isAuthenticated && showWorkflowInterfaces && !isPureLecturer && !currentUserHasRole('Team Lead') && !currentUserHasRole('Setter')) {
     roleSpecificPanels.push({
       id: 'workflow-execution',
       label: 'Workflow Execution',
@@ -5468,7 +5486,7 @@ function App() {
     });
   }
 
-  if (isAuthenticated && showVettingInterfaces) {
+  if (isAuthenticated && showVettingInterfaces && !isPureLecturer) {
     roleSpecificPanels.push({
       id: 'vetting-suite',
       label: 'Vetting & Annotations',
@@ -5601,7 +5619,7 @@ function App() {
                 const base = stripDemoPaper(prev);
                 const updated = base.map(paper =>
                   paper.status === 'in-vetting'
-                    ? { ...paper, status: 'vetted' }
+                    ? { ...paper, status: 'vetted' as const }
                     : paper
                 );
                 return ensureDemoPaper(updated);
@@ -5699,6 +5717,25 @@ function App() {
         }
       : null;
 
+  // Filter out workflow-related panels for pure lecturers
+  const filteredRoleSpecificPanels = isPureLecturer
+    ? roleSpecificPanels.filter(panel => {
+        // Exclude any workflow-related panels
+        const workflowPanelIds = [
+          'workflow-execution',
+          'vetting-suite',
+          'chief-examiner-console',
+          'chief-examiner-dashboard',
+          'chief-examiner-track-paper',
+          'repository-papers',
+          'team-lead-panel',
+          'team-lead-dashboard',
+          'setter-panel',
+        ];
+        return !workflowPanelIds.includes(panel.id);
+      })
+    : roleSpecificPanels;
+
   const panelConfigs: PanelConfig[] = [
     ...(overviewPanel ? [overviewPanel] : []),
     // Only add lecturerRoleDashboard if it's different from overviewPanel (for non-pure lecturers)
@@ -5707,7 +5744,7 @@ function App() {
     ...(chiefExaminerPrivilegePanel ? [chiefExaminerPrivilegePanel] : []),
     // Show lecturer panels to anyone with Lecturer role or baseRole (including Chief Examiners)
     ...(isLecturer ? lecturerPanels : []),
-    ...roleSpecificPanels,
+    ...filteredRoleSpecificPanels,
   ];
 
   useEffect(() => {
@@ -5738,13 +5775,13 @@ function App() {
     );
   }
 
-  const headingTitle = isPureLecturer
+  const _headingTitle = isPureLecturer
     ? 'Uganda Christian University'
     : isAdmin
     ? 'Admin Control Centre'
     : 'Control Centre';
 
-  const headingSubtitle =
+  const _headingSubtitle =
     isPureLecturer
       ? 'Faculty of Computing & Informatics'
       : isAdmin
@@ -5756,21 +5793,72 @@ function App() {
 
   return (
     <div className={`min-h-screen bg-white text-slate-900 flex ${isVetterActive ? 'fullscreen-vetter-mode' : ''}`}>
+      {/* Overlay for mobile when sidebar is open */}
+      {!isVetterActive && sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+      
       {/* Hide sidebar when vetter has joined - fullscreen vetting mode */}
       {!isVetterActive && (
-      <aside className="hidden w-72 flex-col border-r border-blue-300 bg-gradient-to-b from-blue-600 to-blue-700 lg:flex shadow-lg fixed left-0 top-0 h-screen">
-        <div className="px-6 py-8">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-100">
+      <aside className={`${sidebarOpen ? 'translate-x-0 lg:w-72' : '-translate-x-full lg:translate-x-0 lg:w-20'} flex-col border-r border-blue-300 bg-[#2160F3] shadow-lg fixed left-0 top-0 h-screen z-50 transition-all duration-300 ease-in-out flex`}>
+        <div className={`px-3 py-6 ${sidebarOpen ? '' : 'lg:px-2 lg:py-4'}`}>
+          {/* Close button for mobile */}
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="lg:hidden absolute top-4 right-4 p-2 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-colors"
+            aria-label="Close menu"
+          >
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="2"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+          
+          {/* Logo - Centered */}
+          <div className={`mb-4 flex justify-center ${sidebarOpen ? '' : 'lg:hidden'}`}>
+            <div className="bg-white rounded-lg p-2">
+              <img
+                src={ucuLogo}
+                alt="UCU Logo"
+                className="h-16 w-auto object-contain"
+              />
+            </div>
+          </div>
+          
+          {/* Small logo for collapsed state */}
+          <div className={`mb-4 hidden lg:flex justify-center ${sidebarOpen ? 'lg:hidden' : ''}`}>
+            <div className="bg-white rounded-lg p-1">
+              <img
+                src={ucuLogo}
+                alt="UCU Logo"
+                className="h-8 w-auto object-contain"
+              />
+            </div>
+          </div>
+          
+          {/* Main Title - Centered under logo */}
+          <h1 className={`text-lg font-bold text-white mb-2 text-center ${sidebarOpen ? '' : 'lg:hidden'}`}>
+            UCU E-Exam Manager
+          </h1>
+          
+          {/* Subtitle */}
+          <p className={`text-sm text-white/80 text-center ${sidebarOpen ? '' : 'lg:hidden'}`}>
             {currentUserHasRole('Lecturer') && !isAdmin
               ? 'Lecturer Portal'
               : isAdmin ? 'Admin Portal' : 'Digital Moderation'}
           </p>
-          <h1 className="mt-3 text-2xl font-semibold text-white">
-            {headingTitle}
-          </h1>
-          <p className="mt-2 text-xs text-blue-100">{headingSubtitle}</p>
         </div>
-        <nav className="flex-1 space-y-1 overflow-y-auto px-4 pb-6">
+        <nav className={`flex-1 space-y-1 overflow-y-auto pb-6 ${sidebarOpen ? 'px-4' : 'lg:px-2'}`}>
           {(() => {
             // Separate panels into categories
             // Include both 'overview' and 'lecturer-role-dashboard' for Dashboard button
@@ -5818,25 +5906,25 @@ function App() {
                     {setterPanels.map((panel) => {
                       const isActive = panel.id === activePanelId;
                       // Split "Submit Paper Draft" to animate "Submit" and "Paper" separately
-                      const labelParts = panel.label.split(' ');
+                      const _labelParts = panel.label.split(' ');
                       return (
                         <button
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`flex w-full items-center justify-between rounded-xl border-2 px-4 py-3 text-left text-sm font-semibold transition-all shadow-lg mb-2 ${
+                          className={`flex w-full items-center ${sidebarOpen ? 'justify-between' : 'lg:justify-center'} rounded-xl border-2 ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-3 text-left text-sm font-semibold transition-all shadow-lg mb-2 ${
                             isActive
                               ? 'border-pink-500/60 bg-gradient-to-r from-pink-500/20 via-rose-500/20 to-pink-500/20 text-pink-200 shadow-pink-500/30'
                               : 'border-pink-500/40 bg-gradient-to-r from-pink-500/10 via-rose-500/10 to-pink-500/10 text-pink-300 hover:border-pink-500/60 hover:bg-gradient-to-r hover:from-pink-500/20 hover:via-rose-500/20 hover:to-pink-500/20 hover:shadow-pink-500/40 hover:text-pink-200'
                           }`}
                         >
-                          <span className="flex items-center gap-1.5">
+                          <span className={`flex items-center gap-1.5 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                             <span className="inline-flex items-center gap-1">
                               <span className="animate-heartbeat text-pink-400 font-bold" style={{ animationDelay: '0s' }}>Submit</span>
                               <span className="animate-heartbeat text-pink-400 font-bold" style={{ animationDelay: '0.15s' }}>Draft</span>
                             </span>
                           </span>
-                          <span className={`text-xs ${isActive ? 'text-pink-400' : 'text-pink-500/60'}`}>{isActive ? '•' : '↗'}</span>
+                          <span className={`text-xs ${isActive ? 'text-pink-400' : 'text-pink-500/60'} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                         </button>
                       );
                     })}
@@ -5858,7 +5946,7 @@ function App() {
                       key={panel.id}
                       type="button"
                       onClick={() => handlePanelSelect(panel.id)}
-                      className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left text-sm font-medium transition-all ${
+                      className={`flex w-full items-center ${sidebarOpen ? 'gap-3' : 'lg:justify-center lg:gap-0'} rounded-xl border ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-3 text-left text-sm font-medium transition-all ${
                         isActive
                           ? 'border-blue-300 bg-blue-500 text-white shadow-md'
                           : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white hover:shadow-sm'
@@ -5869,8 +5957,8 @@ function App() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
                         </svg>
                       </span>
-                      <span className="flex-1">{panel.label}</span>
-                      <span className={`text-xs flex-shrink-0 ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
+                      <span className={`flex-1 ${sidebarOpen ? '' : 'lg:hidden'}`}>{panel.label}</span>
+                      <span className={`text-xs flex-shrink-0 ${isActive ? 'text-white' : 'text-blue-200'} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                     </button>
                   );
                 })}
@@ -5888,20 +5976,20 @@ function App() {
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`flex w-full items-center justify-between rounded-xl border-2 px-4 py-3 text-left text-sm font-semibold transition-all shadow-lg ${
+                          className={`flex w-full items-center ${sidebarOpen ? 'justify-between' : 'lg:justify-center'} rounded-xl border-2 ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-3 text-left text-sm font-semibold transition-all shadow-lg ${
                             isActive
                               ? 'border-violet-500/60 bg-gradient-to-r from-violet-500/20 via-purple-500/20 to-violet-500/20 text-violet-200 shadow-violet-500/30'
                               : 'border-violet-500/40 bg-gradient-to-r from-violet-500/10 via-purple-500/10 to-violet-500/10 text-violet-300 hover:border-violet-500/60 hover:bg-gradient-to-r hover:from-violet-500/20 hover:via-purple-500/20 hover:to-violet-500/20 hover:shadow-violet-500/40 hover:text-violet-200'
                           }`}
                         >
-                          <span className="flex items-center gap-1.5">
+                          <span className={`flex items-center gap-1.5 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                             <span className="inline-flex items-center gap-1">
                               <span className="animate-heartbeat text-violet-400 font-bold" style={{ animationDelay: '0s' }}>Team</span>
                               <span className="animate-heartbeat text-violet-400 font-bold" style={{ animationDelay: '0.15s' }}>Lead</span>
                             </span>
                             {submissionText && <span className="text-violet-300/90 ml-1">{submissionText}</span>}
                           </span>
-                          <span className={`text-xs ${isActive ? 'text-violet-400' : 'text-violet-500/60'}`}>{isActive ? '•' : '↗'}</span>
+                          <span className={`text-xs ${isActive ? 'text-violet-400' : 'text-violet-500/60'} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                         </button>
                       );
                     })}
@@ -5911,7 +5999,7 @@ function App() {
                 {/* Chief Examiner / Workflow Panels */}
                 {filteredChiefExaminerPanels.length > 0 && (
                   <>
-                    <div className="mt-4 mb-2 px-2">
+                    <div className={`mt-4 mb-2 px-2 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                       <p className="text-xs font-semibold uppercase tracking-wider text-white drop-shadow-sm">
                         Chief Examiner
                       </p>
@@ -5952,13 +6040,13 @@ function App() {
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`flex w-full items-center justify-between rounded-xl border-2 px-4 py-3 text-left text-sm font-semibold transition-all shadow-lg mb-2 ${
+                          className={`flex w-full items-center ${sidebarOpen ? 'justify-between' : 'lg:justify-center'} rounded-xl border-2 ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-3 text-left text-sm font-semibold transition-all shadow-lg mb-2 ${
                             isActive
                               ? panelStyles.active
                               : panelStyles.inactive
                           }`}
                         >
-                          <span className="flex items-center gap-1.5">
+                          <span className={`flex items-center gap-1.5 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                             {panel.id === 'chief-examiner-console' && (
                               <span className="inline-flex items-center gap-1 tracking-wide">
                                 <span
@@ -6017,10 +6105,10 @@ function App() {
                               </span>
                             )}
                             {!['chief-examiner-console', 'vetting-suite', 'destruction-log'].includes(panel.id) && (
-                              <span>{panel.label}</span>
+                              <span className={sidebarOpen ? '' : 'lg:hidden'}>{panel.label}</span>
                             )}
                           </span>
-                          <span className={`text-xs ${isActive ? panelStyles.textColor : panelStyles.iconColor}`}>{isActive ? '•' : '↗'}</span>
+                          <span className={`text-xs ${isActive ? panelStyles.textColor : panelStyles.iconColor} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                         </button>
                       );
                     })}
@@ -6030,12 +6118,12 @@ function App() {
                 {/* Lecturer Panels */}
                 {lecturerPanelsList.length > 0 && (
                   <>
-                    <div className="mt-4 mb-2 px-2">
+                    <div className={`mt-4 mb-2 px-2 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                       <p className="text-xs font-semibold uppercase tracking-wider text-blue-100">
                         Teaching & Classes
                       </p>
                     </div>
-                    {lecturerPanelsList.map((panel, index) => {
+                    {lecturerPanelsList.map((panel, _index) => {
                       const isActive = panel.id === activePanelId;
                       
                       // Define icons for each panel
@@ -6088,7 +6176,7 @@ function App() {
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`group relative flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs font-semibold shadow-sm transition-all duration-200 ${
+                          className={`group relative flex w-full items-center ${sidebarOpen ? 'gap-2' : 'lg:justify-center lg:gap-0'} rounded-xl border ${sidebarOpen ? 'px-3' : 'lg:px-2'} py-2 text-left text-xs font-semibold shadow-sm transition-all duration-200 ${
                             isActive
                               ? 'border-emerald-400 bg-gradient-to-r from-emerald-500/20 via-sky-500/20 to-indigo-500/20 text-emerald-50 shadow-emerald-500/40'
                               : 'border-transparent bg-blue-900/10 text-blue-100 hover:border-emerald-300 hover:bg-gradient-to-r hover:from-emerald-500/15 hover:via-sky-500/15 hover:to-indigo-500/15 hover:text-emerald-50 hover:shadow-lg'
@@ -6104,20 +6192,12 @@ function App() {
                           <span className={`relative flex-shrink-0 flex h-7 w-7 items-center justify-center rounded-lg border ${isActive ? 'border-emerald-300 bg-emerald-500/20 text-emerald-50' : 'border-blue-300/40 bg-blue-500/10 text-blue-200 group-hover:border-emerald-300 group-hover:text-emerald-50'}`}>
                             {getIcon()}
                           </span>
-                          <span className="relative flex-1">
+                          <span className={`relative flex-1 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                             <span className="block text-[0.8rem]">
                               {panel.label}
                             </span>
-                            <span className="mt-0.5 block text-[0.65rem] text-blue-200/80 group-hover:text-emerald-100/90">
-                              {index === 0 && 'Quickly capture marks for your enrolled classes.'}
-                              {index === 1 && 'Search and inspect individual student records.'}
-                              {index === 2 && 'Generate rich monthly teaching and grading reports.'}
-                              {index === 3 && 'Review your AI-organised timetable for the semester.'}
-                              {index === 4 && 'See all the classes you are currently teaching.'}
-                              {index === 5 && 'Adjust your profile and notification preferences.'}
-                            </span>
                           </span>
-                          <span className={`relative text-xs flex-shrink-0 ${isActive ? 'text-emerald-100' : 'text-blue-200/80 group-hover:text-emerald-100'}`}>
+                          <span className={`relative text-xs flex-shrink-0 ${isActive ? 'text-emerald-100' : 'text-blue-200/80 group-hover:text-emerald-100'} ${sidebarOpen ? '' : 'lg:hidden'}`}>
                             {isActive ? 'Active' : 'Explore'}
                           </span>
                         </button>
@@ -6129,7 +6209,7 @@ function App() {
                 {/* Admin Panels */}
                 {adminPanelsList.length > 0 && (
                   <>
-                    <div className="mt-4 mb-2 px-2">
+                    <div className={`mt-4 mb-2 px-2 ${sidebarOpen ? '' : 'lg:hidden'}`}>
                       <p className="text-xs font-semibold uppercase tracking-wider text-blue-100">
                         Administration
                       </p>
@@ -6141,14 +6221,14 @@ function App() {
                           key={panel.id}
                           type="button"
                           onClick={() => handlePanelSelect(panel.id)}
-                          className={`flex w-full items-center justify-between rounded-xl border px-4 py-2 text-left text-sm font-medium transition ${
+                          className={`flex w-full items-center ${sidebarOpen ? 'justify-between' : 'lg:justify-center'} rounded-xl border ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-2 text-left text-sm font-medium transition ${
                             isActive
                               ? 'border-blue-300 bg-blue-500 text-white shadow-md'
                               : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white'
                           }`}
                         >
-                          <span>{panel.label}</span>
-                          <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
+                          <span className={sidebarOpen ? '' : 'lg:hidden'}>{panel.label}</span>
+                          <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                         </button>
                       );
                     })}
@@ -6163,14 +6243,14 @@ function App() {
                       key={panel.id}
                       type="button"
                       onClick={() => handlePanelSelect(panel.id)}
-                      className={`flex w-full items-center justify-between rounded-xl border px-4 py-2 text-left text-sm font-medium transition ${
+                      className={`flex w-full items-center ${sidebarOpen ? 'justify-between' : 'lg:justify-center'} rounded-xl border ${sidebarOpen ? 'px-4' : 'lg:px-2'} py-2 text-left text-sm font-medium transition ${
                         isActive
                           ? 'border-blue-300 bg-blue-500 text-white shadow-md'
                           : 'border-transparent text-blue-100 hover:border-blue-300 hover:bg-blue-500/50 hover:text-white'
                       }`}
                     >
-                      <span>{panel.label}</span>
-                      <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'}`}>{isActive ? '•' : '↗'}</span>
+                      <span className={sidebarOpen ? '' : 'lg:hidden'}>{panel.label}</span>
+                      <span className={`text-xs ${isActive ? 'text-white' : 'text-blue-200'} ${sidebarOpen ? '' : 'lg:hidden'}`}>{isActive ? '•' : '↗'}</span>
                     </button>
                   );
                 })}
@@ -6181,10 +6261,60 @@ function App() {
       </aside>
       )}
 
-      <div className={`flex-1 flex flex-col ${isVetterActive ? 'w-full' : 'lg:ml-72'}`}>
+      <div className={`flex-1 flex flex-col ${isVetterActive ? 'w-full' : sidebarOpen ? 'lg:ml-72' : 'lg:ml-20'}`}>
         <header className="relative border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div>
+            {/* Hamburger Menu Button - Mobile */}
+            {!isVetterActive && (
+              <button
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="lg:hidden fixed top-4 left-4 z-50 p-2 rounded-lg bg-white shadow-md border border-slate-200 hover:bg-slate-50 transition-colors"
+                aria-label="Toggle menu"
+              >
+                <svg
+                  className="w-6 h-6 text-slate-700"
+                  fill="none"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  {sidebarOpen ? (
+                    <path d="M6 18L18 6M6 6l12 12" />
+                  ) : (
+                    <path d="M4 6h16M4 12h16M4 18h16" />
+                  )}
+                </svg>
+              </button>
+            )}
+            
+            {/* Hamburger Menu Button - Desktop */}
+            {!isVetterActive && (
+              <button
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="hidden lg:flex items-center justify-center p-2 rounded-lg bg-slate-100 hover:bg-slate-200 transition-colors mr-4"
+                aria-label="Toggle menu"
+              >
+                <svg
+                  className="w-6 h-6 text-slate-700"
+                  fill="none"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  {sidebarOpen ? (
+                    <path d="M6 18L18 6M6 6l12 12" />
+                  ) : (
+                    <path d="M4 6h16M4 12h16M4 18h16" />
+                  )}
+                </svg>
+              </button>
+            )}
+            
+            <div className={!isVetterActive && sidebarOpen ? 'lg:ml-0' : ''}>
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-600">
                 {isAdmin
                   ? 'Admin Dashboard'
@@ -6204,13 +6334,13 @@ function App() {
                 {isAdmin
                   ? 'System Administration'
                   : isChiefExaminer
-                  ? 'Your currently assigned Chief Examiner role'
+                  ? 'Chief Examiner'
                   : isTeamLead
-                  ? 'Your currently assigned Team Lead role'
+                  ? 'Team Lead'
                   : isVetter
-                  ? 'Your currently assigned Vetting role'
+                  ? 'Vetting'
                   : isSetter
-                  ? 'Your currently assigned Setter role'
+                  ? 'Setter'
                   : isPureLecturer
                   ? 'Teaching & Student Engagement'
                   : workflow.stage.replace(/-/g, ' ')}
@@ -6219,15 +6349,15 @@ function App() {
                 {isAdmin
                   ? 'Manage staff accounts and system configuration'
                   : isChiefExaminer
-                  ? 'You now have privileges to assign and manage the exam process.'
+                  ? 'Assign and manage the exam process'
                   : isTeamLead
-                  ? 'You now have privileges to coordinate setters, vetters and manage team submissions.'
+                  ? 'Coordinate setters and manage submissions'
                   : isVetter
-                  ? 'You now have privileges to review and vet exam papers.'
+                  ? 'Review and vet exam papers'
                   : isSetter
-                  ? 'You now have privileges to prepare and submit exam papers for moderation.'
+                  ? 'Prepare and submit exam papers'
                   : isPureLecturer
-                  ? 'Use the dashboard below to manage your classes, students and reports.'
+                  ? 'Manage classes, students and reports'
                   : outstandingAction}
               </p>
             </div>
@@ -6435,33 +6565,163 @@ function App() {
           </div>
         </header>
 
-        {/* Toast notification for latest action */}
+        {/* Phone-style Toast Notification */}
         {activeToast && (
-          <div className="fixed top-20 right-4 z-50 max-w-sm rounded-2xl border border-blue-200 bg-white/98 px-4 py-3 shadow-xl backdrop-blur-sm">
-            <div className="flex items-start gap-3">
-              <div className="mt-0.5 h-6 w-6 flex items-center justify-center rounded-full bg-blue-500 text-white">
-                <svg
-                  className="h-4 w-4"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M13 16h-1v-4h-1m1-4h.01M12 2a10 10 0 100 20 10 10 0 000-20z"
-                  />
-                </svg>
+          <motion.div
+            initial={{ opacity: 0, y: -50, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -20, scale: 0.95 }}
+            transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+            className="fixed top-4 right-4 z-[9999] w-full max-w-sm"
+          >
+            <div
+              className={`
+                relative overflow-hidden rounded-2xl border-2 shadow-2xl backdrop-blur-md
+                ${
+                  activeToast.type === 'error'
+                    ? 'border-red-500/50 bg-gradient-to-br from-red-50 via-red-50/95 to-red-100/90'
+                    : activeToast.type === 'warning'
+                    ? 'border-amber-500/50 bg-gradient-to-br from-amber-50 via-amber-50/95 to-amber-100/90'
+                    : activeToast.type === 'success'
+                    ? 'border-emerald-500/50 bg-gradient-to-br from-emerald-50 via-emerald-50/95 to-emerald-100/90'
+                    : activeToast.type === 'deadline'
+                    ? 'border-orange-500/50 bg-gradient-to-br from-orange-50 via-orange-50/95 to-orange-100/90'
+                    : 'border-blue-500/50 bg-gradient-to-br from-blue-50 via-white/95 to-indigo-50/90'
+                }
+              `}
+            >
+              {/* Animated background glow */}
+              <div
+                className={`
+                  absolute -right-10 -top-10 h-32 w-32 rounded-full blur-3xl opacity-40
+                  ${
+                    activeToast.type === 'error'
+                      ? 'bg-red-400'
+                      : activeToast.type === 'warning'
+                      ? 'bg-amber-400'
+                      : activeToast.type === 'success'
+                      ? 'bg-emerald-400'
+                      : activeToast.type === 'deadline'
+                      ? 'bg-orange-400'
+                      : 'bg-blue-400'
+                  }
+                `}
+              />
+              
+              {/* Content */}
+              <div className="relative px-5 py-4">
+                <div className="flex items-start gap-4">
+                  {/* Icon */}
+                  <div
+                    className={`
+                      mt-0.5 flex h-12 w-12 shrink-0 items-center justify-center rounded-xl shadow-lg
+                      ${
+                        activeToast.type === 'error'
+                          ? 'bg-gradient-to-br from-red-500 to-red-600 text-white'
+                          : activeToast.type === 'warning'
+                          ? 'bg-gradient-to-br from-amber-500 to-amber-600 text-white'
+                          : activeToast.type === 'success'
+                          ? 'bg-gradient-to-br from-emerald-500 to-emerald-600 text-white'
+                          : activeToast.type === 'deadline'
+                          ? 'bg-gradient-to-br from-orange-500 to-orange-600 text-white'
+                          : 'bg-gradient-to-br from-blue-500 to-indigo-600 text-white'
+                      }
+                    `}
+                  >
+                    {activeToast.type === 'error' ? (
+                      <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                      </svg>
+                    ) : activeToast.type === 'warning' ? (
+                      <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                      </svg>
+                    ) : activeToast.type === 'success' ? (
+                      <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    ) : activeToast.type === 'deadline' ? (
+                      <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    ) : (
+                      <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    )}
+                  </div>
+
+                  {/* Text Content */}
+                  <div className="flex-1 min-w-0">
+                    {/* App Name / Title */}
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <p
+                        className={`
+                          text-xs font-bold uppercase tracking-wider
+                          ${
+                            activeToast.type === 'error'
+                              ? 'text-red-700'
+                              : activeToast.type === 'warning'
+                              ? 'text-amber-700'
+                              : activeToast.type === 'success'
+                              ? 'text-emerald-700'
+                              : activeToast.type === 'deadline'
+                              ? 'text-orange-700'
+                              : 'text-blue-700'
+                          }
+                        `}
+                      >
+                        {activeToast.title || 'UCU Exam System'}
+                      </p>
+                      <button
+                        onClick={() => setActiveToast(null)}
+                        className="text-slate-400 hover:text-slate-600 transition-colors"
+                        aria-label="Close notification"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+
+                    {/* Message */}
+                    <p className="text-sm font-medium text-slate-900 leading-relaxed">
+                      {activeToast.message}
+                    </p>
+
+                    {/* Timestamp */}
+                    <p className="mt-1.5 text-[0.65rem] font-medium text-slate-500">
+                      {new Date(activeToast.timestamp).toLocaleTimeString('en-US', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </p>
+                  </div>
+                </div>
               </div>
-              <div className="flex-1">
-                <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
-                  Role Assigned
-                </p>
-                <p className="mt-1 text-sm text-slate-800">{activeToast.message}</p>
-              </div>
+
+              {/* Progress bar for auto-dismiss */}
+              <motion.div
+                className={`
+                  h-1
+                  ${
+                    activeToast.type === 'error'
+                      ? 'bg-red-500'
+                      : activeToast.type === 'warning'
+                      ? 'bg-amber-500'
+                      : activeToast.type === 'success'
+                      ? 'bg-emerald-500'
+                      : activeToast.type === 'deadline'
+                      ? 'bg-orange-500'
+                      : 'bg-blue-500'
+                  }
+                `}
+                initial={{ width: '100%' }}
+                animate={{ width: '0%' }}
+                transition={{ duration: 5, ease: 'linear' }}
+              />
             </div>
-          </div>
+          </motion.div>
         )}
 
         <main
@@ -6722,7 +6982,7 @@ function AdminViewLecturersPanel({
   const postgraduateLecturers = lecturers.filter(l => l.lecturerCategory === 'Postgraduate');
   const uncategorizedLecturers = lecturers.filter(l => !l.lecturerCategory);
 
-  const displayedLecturers = filterCategory === 'All' 
+  const _displayedLecturers = filterCategory === 'All' 
     ? lecturers 
     : lecturers.filter(lecturer => lecturer.lecturerCategory === filterCategory);
   
@@ -7259,7 +7519,7 @@ function AdminViewLecturersPanel({
   );
 }
 
-function AdminAddLecturerPanel({
+function _AdminAddLecturerPanel({
   onAddLecturer,
 }: AdminAddLecturerPanelProps) {
   const [lecturerName, setLecturerName] = useState('');
@@ -7562,7 +7822,7 @@ interface SuperUserChiefExaminerPanelProps {
   onUnassignChiefExaminer: (userId: string) => void;
 }
 
-function SuperUserChiefExaminerPanel({
+function _SuperUserChiefExaminerPanel({
   users,
   chiefExaminerRoleEnabled,
   onEnableChiefExaminerRole,
@@ -7907,7 +8167,7 @@ interface SuperUserAccountsPanelProps {
   users: User[];
 }
 
-function SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
+function _SuperUserAccountsPanel({ users }: SuperUserAccountsPanelProps) {
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [showPrivileges, setShowPrivileges] = useState(false);
 
@@ -8363,7 +8623,7 @@ interface SuperUserManageUsersPanelProps {
   setUsers: React.Dispatch<React.SetStateAction<User[]>>;
 }
 
-function SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPanelProps) {
+function _SuperUserManageUsersPanel({ users, setUsers }: SuperUserManageUsersPanelProps) {
   const [selectedUserId, setSelectedUserId] = useState<string>('');
   const [action, setAction] = useState<'view' | 'edit' | 'delete'>('view');
 
@@ -8657,7 +8917,7 @@ interface AdminAuditLogPanelProps {
   workflow: WorkflowState;
 }
 
-function AdminAuditLogPanel({ workflow }: AdminAuditLogPanelProps) {
+function _AdminAuditLogPanel({ workflow }: AdminAuditLogPanelProps) {
   return (
     <SectionCard
       title="Audit Log"
@@ -8703,7 +8963,7 @@ interface AdminStaffManagementPanelProps {
   setUsers: React.Dispatch<React.SetStateAction<User[]>>;
 }
 
-function AdminStaffManagementPanel({ users, setUsers }: AdminStaffManagementPanelProps) {
+function _AdminStaffManagementPanel({ users, setUsers }: AdminStaffManagementPanelProps) {
   const [selectedUser, setSelectedUser] = useState<string>('');
   const [searchTerm, setSearchTerm] = useState('');
 
@@ -9043,10 +9303,10 @@ function ChiefExaminerConsole({
   currentUser,
   onAssignRole,
   onUnassignRole,
-  deadlinesActive,
+  deadlinesActive: _deadlinesActive,
   deadlineDuration,
   repositoriesActive,
-  onToggleDeadlines,
+  onToggleDeadlines: _onToggleDeadlines,
   onSetDeadlineDuration,
   onToggleRepositories,
   lastModerationDownload,
@@ -9068,8 +9328,8 @@ function ChiefExaminerConsole({
   const [awardUserId, setAwardUserId] = useState('');
   const [selectedCourseUnit, setSelectedCourseUnit] = useState('');
   const [awardRole, setAwardRole] = useState<Role>('Team Lead');
-  const [showDurationSettings, setShowDurationSettings] = useState(false);
-  const [durationForm, setDurationForm] = useState(deadlineDuration);
+  const [_showDurationSettings, setShowDurationSettings] = useState(false);
+  const [durationForm, _setDurationForm] = useState(deadlineDuration);
   const [showSetterDurationSettings, setShowSetterDurationSettings] = useState(false);
   const [setterDurationForm, setSetterDurationForm] = useState(setterDeadlineDuration);
   const [showTeamLeadDurationSettings, setShowTeamLeadDurationSettings] = useState(false);
@@ -9127,14 +9387,14 @@ function ChiefExaminerConsole({
     }
   };
 
-  const handleDurationSubmit = (e: FormEvent) => {
+  const _handleDurationSubmit = (e: FormEvent) => {
     e.preventDefault();
     onSetDeadlineDuration(durationForm);
     setShowDurationSettings(false);
     alert(`Deadline duration set to ${durationForm.days} days, ${durationForm.hours} hours, ${durationForm.minutes} minutes`);
   };
 
-  const formatDuration = () => {
+  const _formatDuration = () => {
     const parts = [];
     if (deadlineDuration.days > 0) parts.push(`${deadlineDuration.days} day${deadlineDuration.days !== 1 ? 's' : ''}`);
     if (deadlineDuration.hours > 0) parts.push(`${deadlineDuration.hours} hour${deadlineDuration.hours !== 1 ? 's' : ''}`);
@@ -10437,10 +10697,10 @@ function TeamLeadPanel({
   deadlineStartTime,
   deadlineDuration,
   repositoriesActive,
-  onTeamLeadCompile,
+  onTeamLeadCompile: _onTeamLeadCompile,
   submittedPapers,
   setterSubmissions,
-  workflowStage,
+  workflowStage: _workflowStage,
   onSubmitPDF,
   vettingSessionRecords = [],
   customChecklistPdf,
@@ -10451,6 +10711,89 @@ function TeamLeadPanel({
   const [courseCode, setCourseCode] = useState('');
   const [semester, setSemester] = useState('');
   const [year, setYear] = useState('');
+  const [cacheVersion, setCacheVersion] = useState(0); // Version counter to force re-renders
+  
+  // Cache for user names fetched from database (using object for React state updates)
+  const [userNameCache, setUserNameCache] = useState<Record<string, string>>({});
+  const userNameCacheRef = useRef<Record<string, string>>({});
+  const fetchedUserIdsRef = useRef<Set<string>>(new Set());
+  
+  // Sync ref with state
+  useEffect(() => {
+    userNameCacheRef.current = userNameCache;
+  }, [userNameCache]);
+  
+  // Fetch user names for all UUIDs in submitted papers
+  useEffect(() => {
+    const fetchUserNames = async () => {
+      // Collect all UUIDs from submitted papers that we haven't fetched yet
+      const userIds = new Set<string>();
+      submittedPapers.forEach(paper => {
+        // Check if submittedBy looks like a UUID
+        const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(paper.submittedBy);
+        if (isUUID) {
+          // Check if we've already fetched this UUID
+          const alreadyFetched = fetchedUserIdsRef.current.has(paper.submittedBy);
+          // Check if we have it in cache (using ref to avoid stale closure)
+          const hasCached = userNameCacheRef.current[paper.submittedBy];
+          
+          if (!alreadyFetched && !hasCached) {
+            userIds.add(paper.submittedBy);
+          }
+        }
+      });
+      
+      if (userIds.size === 0) return;
+      
+      console.log('🔍 Fetching user names for UUIDs:', Array.from(userIds));
+      
+      // Mark these UUIDs as being fetched
+      userIds.forEach(id => fetchedUserIdsRef.current.add(id));
+      
+      // Fetch user names from database
+      try {
+        const { data: profiles, error } = await supabase
+          .from('user_profiles')
+          .select('id, name')
+          .in('id', Array.from(userIds));
+        
+        if (error) {
+          console.error('❌ Error fetching user names:', error);
+          // Remove from fetched set on error so we can retry
+          userIds.forEach(id => fetchedUserIdsRef.current.delete(id));
+          return;
+        }
+        
+        if (profiles && profiles.length > 0) {
+          console.log('✅ Fetched user names:', profiles.map(p => ({ id: p.id, name: p.name })));
+          setUserNameCache(prev => {
+            // Always create a new object to ensure React detects the change
+            const updated = { ...prev };
+            let hasNewNames = false;
+            profiles.forEach(profile => {
+              if (profile.name && updated[profile.id] !== profile.name) {
+                updated[profile.id] = profile.name;
+                hasNewNames = true;
+              }
+            });
+            // Always return a new object reference to trigger re-render
+            if (hasNewNames) {
+              setCacheVersion(v => v + 1); // Increment version to force re-render
+            }
+            return { ...updated };
+          });
+        } else {
+          console.warn('⚠️ No user profiles found for UUIDs:', Array.from(userIds));
+        }
+      } catch (error) {
+        console.error('❌ Exception fetching user names from database:', error);
+        // Remove from fetched set on error so we can retry
+        userIds.forEach(id => fetchedUserIdsRef.current.delete(id));
+      }
+    };
+    
+    fetchUserNames();
+  }, [submittedPapers]);
 
   useEffect(() => {
     if (deadlinesActive && deadlineStartTime) {
@@ -10591,9 +10934,31 @@ function TeamLeadPanel({
     }
   };
 
-  const getSubmitterName = (paper: SubmittedPaper): string => {
+  const getSubmitterName = useCallback((paper: SubmittedPaper): string => {
+    // Check if submittedBy looks like a UUID (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(paper.submittedBy);
+    
+    // If it's a UUID, try to find the user in cache
+    if (isUUID) {
+      // Check cache
+      const cachedName = userNameCache[paper.submittedBy];
+      if (cachedName) {
+        return cachedName;
+      }
+      
+      // Check if we're currently fetching this user
+      const isFetching = fetchedUserIdsRef.current.has(paper.submittedBy);
+      if (isFetching) {
+        return 'Loading...'; // Show loading state while fetching
+      }
+      
+      // Name not found yet and not being fetched
+      return 'Unknown User';
+    }
+    
+    // If it's not a UUID, return the submittedBy value (might already be a name)
     return paper.submittedBy || 'Unknown';
-  };
+  }, [userNameCache]);
 
   const handleDownloadModerationChecklist = () => {
     // Find the most recent vetting session record that matches the current course
@@ -10971,6 +11336,7 @@ function TeamLeadPanel({
           description="View all drafts lodged by setters and follow their journey through the vetting workflow."
         >
           <CompactPaperCards 
+            key={`setter-papers-${cacheVersion}`}
             papers={submittedPapers.filter((p) => p.submittedRole === 'Setter' || !p.submittedRole || p.submittedRole === 'Unknown')}
             getSubmitterName={getSubmitterName}
             getStatusLabel={getStatusLabel}
@@ -10989,6 +11355,7 @@ function TeamLeadPanel({
           description="View all papers compiled and submitted by Team Lead. These papers are ready for Chief Examiner AI similarity analysis before vetting."
         >
           <CompactPaperCards 
+            key={`teamlead-papers-${cacheVersion}`}
             papers={submittedPapers.filter((p) => p.submittedRole === 'Team Lead')}
             getSubmitterName={getSubmitterName}
             getStatusLabel={getStatusLabel}
@@ -11006,15 +11373,102 @@ interface TeamLeadDashboardPanelProps {
   workflow: WorkflowState;
   submittedPapers: SubmittedPaper[];
   setterSubmissions: SetterSubmission[];
+  users?: User[];
 }
 
 function TeamLeadDashboardPanel({
   workflow,
   submittedPapers,
   setterSubmissions,
+  users = [],
 }: TeamLeadDashboardPanelProps) {
+  // Cache for user names fetched from database (using object for React state updates)
+  const [userNameCache, setUserNameCache] = useState<Record<string, string>>({});
+  const [_cacheVersion, setCacheVersion] = useState(0); // Version counter to force re-renders
+  const userNameCacheRef = useRef<Record<string, string>>({});
+  const fetchedUserIdsRef = useRef<Set<string>>(new Set());
+  
+  // Sync ref with state
+  useEffect(() => {
+    userNameCacheRef.current = userNameCache;
+  }, [userNameCache]);
+  
+  // Fetch user names for all UUIDs in submitted papers
+  useEffect(() => {
+    const fetchUserNames = async () => {
+      // Collect all UUIDs from submitted papers that we haven't fetched yet
+      const userIds = new Set<string>();
+      submittedPapers.forEach(paper => {
+        // Check if submittedBy looks like a UUID
+        const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(paper.submittedBy);
+        if (isUUID) {
+          // Check if we already have this user in local array
+          const hasUser = users.find(u => u.id === paper.submittedBy && u.name);
+          // Check if we've already fetched this UUID
+          const alreadyFetched = fetchedUserIdsRef.current.has(paper.submittedBy);
+          // Check if we have it in cache (using ref to avoid stale closure)
+          const hasCached = userNameCacheRef.current[paper.submittedBy];
+          
+          if (!hasUser && !alreadyFetched && !hasCached) {
+            userIds.add(paper.submittedBy);
+          }
+        }
+      });
+      
+      if (userIds.size === 0) return;
+      
+      console.log('🔍 Fetching user names for UUIDs:', Array.from(userIds));
+      
+      // Mark these UUIDs as being fetched
+      userIds.forEach(id => fetchedUserIdsRef.current.add(id));
+      
+      // Fetch user names from database
+      try {
+        const { data: profiles, error } = await supabase
+          .from('user_profiles')
+          .select('id, name')
+          .in('id', Array.from(userIds));
+        
+        if (error) {
+          console.error('❌ Error fetching user names:', error);
+          // Remove from fetched set on error so we can retry
+          userIds.forEach(id => fetchedUserIdsRef.current.delete(id));
+          return;
+        }
+        
+        if (profiles && profiles.length > 0) {
+          console.log('✅ Fetched user names:', profiles.map(p => ({ id: p.id, name: p.name })));
+          setUserNameCache(prev => {
+            // Always create a new object to ensure React detects the change
+            const updated = { ...prev };
+            let hasNewNames = false;
+            profiles.forEach(profile => {
+              if (profile.name && updated[profile.id] !== profile.name) {
+                updated[profile.id] = profile.name;
+                hasNewNames = true;
+              }
+            });
+            // Always return a new object reference to trigger re-render
+            if (hasNewNames) {
+              setCacheVersion(v => v + 1); // Increment version to force re-render
+            }
+            return { ...updated };
+          });
+        } else {
+          console.warn('⚠️ No user profiles found for UUIDs:', Array.from(userIds));
+        }
+      } catch (error) {
+        console.error('❌ Exception fetching user names from database:', error);
+        // Remove from fetched set on error so we can retry
+        userIds.forEach(id => fetchedUserIdsRef.current.delete(id));
+      }
+    };
+    
+    fetchUserNames();
+  }, [submittedPapers, users]);
+  
   // Helper functions for paper cards
-  const getStatusColor = (status: string) => {
+  const _getStatusColor = (status: string) => {
     switch (status) {
       case 'submitted':
         return 'text-violet-400 bg-violet-500/10 border-violet-500/30';
@@ -11029,7 +11483,7 @@ function TeamLeadDashboardPanel({
     }
   };
 
-  const getStatusLabel = (status: string) => {
+  const _getStatusLabel = (status: string) => {
     switch (status) {
       case 'submitted':
         return 'Submitted';
@@ -11044,7 +11498,7 @@ function TeamLeadDashboardPanel({
     }
   };
 
-  const getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
+  const _getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
     // If paper is submitted by Team Lead, it's a submission TO Chief Examiner
     if (paper.submittedRole === 'Team Lead' && paper.status === 'submitted') {
       return 'Submitted to Chief Examiner';
@@ -11064,9 +11518,37 @@ function TeamLeadDashboardPanel({
     }
   };
 
-  const getSubmitterName = (paper: SubmittedPaper): string => {
+  const _getSubmitterName = useCallback((paper: SubmittedPaper): string => {
+    // Check if submittedBy looks like a UUID (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(paper.submittedBy);
+    
+    // If it's a UUID, try to find the user
+    if (isUUID) {
+      // First check local users array
+      const user = users.find(u => u.id === paper.submittedBy);
+      if (user && user.name) {
+        return user.name;
+      }
+      
+      // Then check cache
+      const cachedName = userNameCache[paper.submittedBy];
+      if (cachedName) {
+        return cachedName;
+      }
+      
+      // Check if we're currently fetching this user
+      const isFetching = fetchedUserIdsRef.current.has(paper.submittedBy);
+      if (isFetching) {
+        return 'Loading...'; // Show loading state while fetching
+      }
+      
+      // Name not found yet and not being fetched
+      return 'Unknown User';
+    }
+    
+    // If it's not a UUID, return the submittedBy value (might already be a name)
     return paper.submittedBy || 'Unknown';
-  };
+  }, [users, userNameCache]);
 
   // Derive effective metrics from both in-memory submissions and persisted papers
   const dbSetterDrafts = useMemo(
@@ -11239,7 +11721,7 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
   const [scanCompleted, setScanCompleted] = useState(false);
 
   // Helper functions for paper cards
-  const getStatusColor = (status: string) => {
+  const _getStatusColor = (status: string) => {
     switch (status) {
       case 'submitted':
         return 'text-violet-400 bg-violet-500/10 border-violet-500/30';
@@ -11254,7 +11736,7 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
     }
   };
 
-  const getStatusLabel = (status: string) => {
+  const _getStatusLabel = (status: string) => {
     switch (status) {
       case 'submitted':
         return 'Submitted';
@@ -11269,7 +11751,7 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
     }
   };
 
-  const getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
+  const _getWorkflowStageForPaper = (paper: SubmittedPaper): string => {
     // If paper is submitted by Team Lead, it's a submission TO Chief Examiner
     if (paper.submittedRole === 'Team Lead' && paper.status === 'submitted') {
       return 'Submitted to Chief Examiner';
@@ -11289,7 +11771,7 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
     }
   };
 
-  const getSubmitterName = (paper: SubmittedPaper): string => {
+  const _getSubmitterName = (paper: SubmittedPaper): string => {
     return paper.submittedBy || 'Unknown';
   };
 
@@ -11857,7 +12339,7 @@ interface LecturerDashboardPanelProps {
   isPureLecturer: boolean;
 }
 
-function LecturerDashboardPanel({
+function _LecturerDashboardPanel({
   user,
   deadlinesActive,
   repositoriesActive,
@@ -11972,84 +12454,193 @@ function LecturerDashboardPanel({
 
 interface RepositoryPapersPanelProps {
   repositoryPapers: RepositoryPaper[];
+  users: User[];
 }
 
-function RepositoryPapersPanel({ repositoryPapers }: RepositoryPapersPanelProps) {
+function RepositoryPapersPanel({ repositoryPapers, users }: RepositoryPapersPanelProps) {
+  const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
+  const [userNameCache, setUserNameCache] = useState<Record<string, string>>({});
+  const fetchedUserIdsRef = useRef<Set<string>>(new Set());
+
+  // Helper function to get submitter name from UUID or name
+  const getSubmitterName = useCallback((submittedBy: string): string => {
+    // Check if submittedBy looks like a UUID (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(submittedBy);
+    
+    // If it's a UUID, try to find the user
+    if (isUUID) {
+      // First check local users array
+      const user = users.find(u => u.id === submittedBy);
+      if (user && user.name) {
+        return user.name;
+      }
+      
+      // Then check cache
+      const cachedName = userNameCache[submittedBy];
+      if (cachedName) {
+        return cachedName;
+      }
+      
+      // If not found, fetch from Supabase
+      if (!fetchedUserIdsRef.current.has(submittedBy)) {
+        fetchedUserIdsRef.current.add(submittedBy);
+        
+        (async () => {
+          try {
+            const { data, error } = await supabase
+              .from('user_profiles')
+              .select('id, name')
+              .eq('id', submittedBy)
+              .single();
+            
+            if (!error && data && data.name) {
+              setUserNameCache(prev => ({ ...prev, [submittedBy]: data.name }));
+            }
+          } catch (err: unknown) {
+            console.error('Error fetching user name:', err);
+          } finally {
+            fetchedUserIdsRef.current.delete(submittedBy);
+          }
+        })();
+      }
+      
+      return 'Loading...';
+    }
+    
+    // If it's not a UUID, return the submittedBy value (might already be a name)
+    return submittedBy || 'Unknown';
+  }, [users, userNameCache]);
+
+  const toggleCard = (paperId: string) => {
+    setExpandedCards(prev => {
+      const next = new Set(prev);
+      if (next.has(paperId)) {
+        next.delete(paperId);
+      } else {
+        next.add(paperId);
+      }
+      return next;
+    });
+  };
+
   return (
     <SectionCard
       title="Repository Papers"
       kicker="Central Exam Repository"
-      description="Browse and manage all papers that have been deposited into the secure repository."
+      description="View all papers compiled and submitted by Team Lead. These papers are ready for Chief Examiner AI similarity analysis before vetting."
     >
       {repositoryPapers.length === 0 ? (
         <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
           No papers are currently in the repository for this semester.
         </div>
       ) : (
-        <div className="rounded-xl border border-slate-200 bg-white p-6">
-          <div className="mb-4">
-            <h3 className="text-base font-semibold text-slate-800">
-              Repository Papers
-            </h3>
-            <p className="text-sm text-slate-600 mt-1">
-              View and manage papers in the repository.
-            </p>
-          </div>
-
-          <div className="space-y-3 max-h-[480px] overflow-y-auto">
-            {repositoryPapers.map((paper) => (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {repositoryPapers.map((paper) => {
+            const isExpanded = expandedCards.has(paper.id);
+            const submitterName = getSubmitterName(paper.submittedBy);
+            return (
               <div
                 key={paper.id}
-                className="rounded-lg border border-slate-200 bg-white p-4"
+                className={`relative overflow-hidden rounded-xl border border-purple-200/50 bg-gradient-to-br from-purple-50 via-indigo-50 to-pink-50 p-4 transition-all duration-300 cursor-pointer hover:shadow-lg ${
+                  isExpanded ? 'shadow-lg ring-2 ring-purple-300' : 'shadow-sm'
+                }`}
+                onClick={() => toggleCard(paper.id)}
               >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-2">
-                      <h4 className="text-sm font-semibold text-slate-800">
-                        {paper.fileName}
-                      </h4>
-                      <span className="px-2 py-0.5 rounded-lg text-xs font-medium border bg-cyan-500/10 text-cyan-700 border-cyan-500/40">
-                        {paper.courseCode}
-                      </span>
-                    </div>
-                    <div className="space-y-1 text-xs text-slate-600">
-                      <p>
-                        Course:{' '}
-                        <span className="text-slate-700">{paper.courseUnit}</span>
-                      </p>
-                      <p>
-                        Submitted by:{' '}
-                        <span className="text-slate-700">{paper.submittedBy}</span>
-                      </p>
-                      <p>
-                        Semester:{' '}
-                        <span className="text-slate-700">
-                          {paper.semester} {paper.year}
-                        </span>
-                      </p>
-                      <p>Added: {new Date(paper.submittedAt).toLocaleString()}</p>
-                    </div>
-                  </div>
-                  <div className="flex flex-col gap-2 ml-4">
-                    <button
-                      type="button"
-                      className="px-3 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-xs font-medium text-cyan-700 border border-cyan-500/40 transition"
-                      onClick={() => {
-                        const blob = new Blob([paper.content], {
-                          type: 'application/pdf',
-                        });
-                        const url = URL.createObjectURL(blob);
-                        window.open(url, '_blank');
-                        setTimeout(() => URL.revokeObjectURL(url), 100);
-                      }}
-                    >
-                      View
-                    </button>
+                {/* Document Icon */}
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-purple-100 text-purple-600 flex-shrink-0">
+                      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    </span>
+                    <h4 className="text-sm font-bold text-slate-800 truncate">{paper.fileName}</h4>
                   </div>
                 </div>
+
+                {/* Status Tags */}
+                <div className="flex flex-wrap items-center gap-1.5 mb-3">
+                  <span className="px-2 py-0.5 rounded-md text-xs font-medium bg-purple-100 text-purple-700 border border-purple-200">
+                    Repository
+                  </span>
+                  {paper.courseCode && (
+                    <span className="px-2 py-0.5 rounded-md text-xs font-semibold bg-purple-200 text-purple-800 border border-purple-300">
+                      {paper.courseCode}
+                    </span>
+                  )}
+                </div>
+
+                {/* Author */}
+                <p className="text-xs text-slate-600 mb-3">
+                  <span className="font-medium">By:</span> {submitterName}
+                </p>
+
+                {/* Dropdown Chevron */}
+                <div className="absolute bottom-3 right-3">
+                  <svg
+                    className={`h-5 w-5 text-purple-600 transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </div>
+
+                {/* Expanded Details */}
+                {isExpanded && (
+                  <div className="mt-4 pt-4 border-t border-purple-200/50 space-y-2.5 animate-in fade-in slide-in-from-top-2" onClick={(e) => e.stopPropagation()}>
+                    <div className="space-y-1.5 text-xs">
+                      <p className="flex items-center gap-1.5 text-slate-700">
+                        <span className="text-indigo-500">📚</span>
+                        <span className="font-medium">Course:</span>
+                        <span>{paper.courseUnit}</span>
+                      </p>
+                      <p className="flex items-center gap-1.5 text-slate-700">
+                        <span className="text-emerald-500">👤</span>
+                        <span className="font-medium">Submitted by:</span>
+                        <span>{submitterName}</span>
+                      </p>
+                      <p className="flex items-center gap-1.5 text-slate-700">
+                        <span className="text-blue-500">📅</span>
+                        <span className="font-medium">Semester:</span>
+                        <span>{paper.semester} {paper.year}</span>
+                      </p>
+                      <p className="flex items-center gap-1.5 text-slate-700">
+                        <span className="text-violet-500">🕒</span>
+                        <span className="font-medium">Added:</span>
+                        <span>{new Date(paper.submittedAt).toLocaleString()}</span>
+                      </p>
+                      {paper.fileSize && (
+                        <p className="flex items-center gap-1.5 text-slate-700">
+                          <span className="text-amber-500">💾</span>
+                          <span className="font-medium">Size:</span>
+                          <span>{(paper.fileSize / 1024).toFixed(2)} KB</span>
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex gap-2 pt-2">
+                      <button
+                        type="button"
+                        className="flex-1 px-3 py-2 rounded-lg bg-purple-500 hover:bg-purple-600 text-xs font-medium text-white transition"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const blob = new Blob([paper.content], {
+                            type: 'application/pdf',
+                          });
+                          const url = URL.createObjectURL(blob);
+                          window.open(url, '_blank');
+                          setTimeout(() => URL.revokeObjectURL(url), 100);
+                        }}
+                      >
+                        View PDF
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
-            ))}
-          </div>
+            );
+          })}
         </div>
       )}
     </SectionCard>
@@ -12235,16 +12826,123 @@ function ChiefExaminerDashboardPanel({
 }: ChiefExaminerDashboardPanelProps) {
   const effectiveStage = getEffectiveWorkflowStage(submittedPapers, workflow.stage);
   
+  // Cache for user names fetched from database (using object for React state updates)
+  const [userNameCache, setUserNameCache] = useState<Record<string, string>>({});
+  const [_cacheVersion, setCacheVersion] = useState(0); // Version counter to force re-renders
+  const userNameCacheRef = useRef<Record<string, string>>({});
+  const fetchedUserIdsRef = useRef<Set<string>>(new Set());
+  
+  // Sync ref with state
+  useEffect(() => {
+    userNameCacheRef.current = userNameCache;
+  }, [userNameCache]);
+  
+  // Fetch user names for all UUIDs in submitted papers
+  useEffect(() => {
+    const fetchUserNames = async () => {
+      // Collect all UUIDs from submitted papers that we haven't fetched yet
+      const userIds = new Set<string>();
+      submittedPapers.forEach(paper => {
+        // Check if submittedBy looks like a UUID
+        const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(paper.submittedBy);
+        if (isUUID) {
+          // Check if we already have this user in local array
+          const hasUser = users.find(u => u.id === paper.submittedBy && u.name);
+          // Check if we've already fetched this UUID
+          const alreadyFetched = fetchedUserIdsRef.current.has(paper.submittedBy);
+          // Check if we have it in cache (using ref to avoid stale closure)
+          const hasCached = userNameCacheRef.current[paper.submittedBy];
+          
+          if (!hasUser && !alreadyFetched && !hasCached) {
+            userIds.add(paper.submittedBy);
+          }
+        }
+      });
+      
+      if (userIds.size === 0) return;
+      
+      console.log('🔍 Fetching user names for UUIDs:', Array.from(userIds));
+      
+      // Mark these UUIDs as being fetched
+      userIds.forEach(id => fetchedUserIdsRef.current.add(id));
+      
+      // Fetch user names from database
+      try {
+        const { data: profiles, error } = await supabase
+          .from('user_profiles')
+          .select('id, name')
+          .in('id', Array.from(userIds));
+        
+        if (error) {
+          console.error('❌ Error fetching user names:', error);
+          // Remove from fetched set on error so we can retry
+          userIds.forEach(id => fetchedUserIdsRef.current.delete(id));
+          return;
+        }
+        
+        if (profiles && profiles.length > 0) {
+          console.log('✅ Fetched user names:', profiles.map(p => ({ id: p.id, name: p.name })));
+          setUserNameCache(prev => {
+            // Always create a new object to ensure React detects the change
+            const updated = { ...prev };
+            let hasNewNames = false;
+            profiles.forEach(profile => {
+              if (profile.name && updated[profile.id] !== profile.name) {
+                updated[profile.id] = profile.name;
+                hasNewNames = true;
+              }
+            });
+            // Always return a new object reference to trigger re-render
+            if (hasNewNames) {
+              setCacheVersion(v => v + 1); // Increment version to force re-render
+            }
+            return { ...updated };
+          });
+        } else {
+          console.warn('⚠️ No user profiles found for UUIDs:', Array.from(userIds));
+        }
+      } catch (error) {
+        console.error('❌ Exception fetching user names from database:', error);
+        // Remove from fetched set on error so we can retry
+        userIds.forEach(id => fetchedUserIdsRef.current.delete(id));
+      }
+    };
+    
+    fetchUserNames();
+  }, [submittedPapers, users]);
+  
   // Helper to get user name from ID or submittedBy field
-  const getSubmitterName = (paper: SubmittedPaper): string => {
-    // First try to find user by ID if submittedBy looks like an ID
-    if (paper.submittedBy && paper.submittedBy.length > 20) {
+  const getSubmitterName = useCallback((paper: SubmittedPaper): string => {
+    // Check if submittedBy looks like a UUID (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(paper.submittedBy);
+    
+    // If it's a UUID, try to find the user
+    if (isUUID) {
+      // First check local users array
       const user = users.find(u => u.id === paper.submittedBy);
-      if (user) return user.name;
+      if (user && user.name) {
+        return user.name;
+      }
+      
+      // Then check cache
+      const cachedName = userNameCache[paper.submittedBy];
+      if (cachedName) {
+        return cachedName;
+      }
+      
+      // Check if we're currently fetching this user
+      const isFetching = fetchedUserIdsRef.current.has(paper.submittedBy);
+      if (isFetching) {
+        return 'Loading...'; // Show loading state while fetching
+      }
+      
+      // Name not found yet and not being fetched
+      return 'Unknown User';
     }
-    // Otherwise return the submittedBy value (might already be a name)
+    
+    // If it's not a UUID, return the submittedBy value (might already be a name)
     return paper.submittedBy || 'Unknown';
-  };
+  }, [users, userNameCache]);
 
   // Helper functions for displaying paper status
   const getStatusColor = (status: string) => {
@@ -12373,7 +13071,7 @@ function ChiefExaminerDashboardPanel({
 
   // Lead submissions: count all papers submitted by Team Lead (regardless of status)
   // This separates Team Lead submissions from Setter submissions
-  const totalLeadSubmissions = submittedPapers.filter(
+  const _totalLeadSubmissions = submittedPapers.filter(
     (p) => p.submittedRole === 'Team Lead'
   ).length;
   const totalAnnotations = annotations.length;
@@ -13522,7 +14220,7 @@ interface LoginPortalProps {
   showAdminOnly?: boolean;
 }
 
-function LoginPortal({
+function _LoginPortal({
   admins,
   lecturers,
   onLogin,
@@ -13874,7 +14572,7 @@ function WorkflowOrchestration({
   workflow,
   annotations,
   versionHistory,
-  currentUser,
+  currentUser: _currentUser,
   userHasRole,
   onSetterSubmit,
   onTeamLeadCompile,
@@ -14277,8 +14975,8 @@ const ChecklistPreviewContent = ({
 function VettingAndAnnotations({
   workflowStage,
   vettingSession,
-  annotations,
-  safeBrowserPolicies,
+  annotations: _annotations,
+  safeBrowserPolicies: _safeBrowserPolicies,
   checklist,
   customChecklistPdf,
   vettingCountdown,
@@ -14295,7 +14993,7 @@ function VettingAndAnnotations({
           currentUserId,
           joinedVetters = new Set(),
           vetterMonitoring,
-          logVetterWarning,
+          logVetterWarning: _logVetterWarning,
           checklistComments = new Map(),
           onChecklistCommentChange,
           typingIndicators = new Map(),
@@ -14347,7 +15045,7 @@ function VettingAndAnnotations({
     return `${names[0]}, ${names[1]} +${names.length - 2} more are typing…`;
   };
 
-  const SectionCommentArea = ({
+  const _SectionCommentArea = ({
     sectionKey,
     label,
     accentColor,
@@ -14630,7 +15328,7 @@ function VettingAndAnnotations({
   // Editable Checklist Item Component - Simple working textarea
   const EditableChecklistItem = ({ 
     item, 
-    category, 
+    category: _category, 
     bulletColor, 
     commentKey 
   }: { 
@@ -14768,7 +15466,7 @@ function VettingAndAnnotations({
   };
 
   // Helper component to render checklist item with individual comment functionality
-  const ChecklistItem = ({ item, category, bulletColor }: { item: string; category: string; bulletColor: string }) => {
+  const _ChecklistItem = ({ item, category, bulletColor }: { item: string; category: string; bulletColor: string }) => {
     const commentKey = `${category}-${item}`;
     const comment = checklistComments?.get(commentKey);
     const [itemDraft, setItemDraft] = useState(comment?.comment ?? '');
@@ -14946,7 +15644,7 @@ function VettingAndAnnotations({
     }
   }, [moderationSchedule, workflowStage, vettingSession.active, isScheduledTimeReached, moderationStartCountdown, canStartSession, userHasRole]);
 
-  const canCompleteSession =
+  const _canCompleteSession =
     userHasRole('Vetter') &&
     vettingSession.active &&
     workflowStage === 'Vetting in Progress';
@@ -14973,7 +15671,7 @@ function VettingAndAnnotations({
     },
   ];
 
-  const handleAnnotationSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const _handleAnnotationSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     onAddAnnotation(annotationDraft);
     setAnnotationDraft('');
@@ -14990,36 +15688,34 @@ function VettingAndAnnotations({
   const canVetterStartSession = isVetter && vettingSession.active && !vetterHasJoined;
 
   const examWindow = (
-    <div className="group relative overflow-hidden rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50 via-indigo-50 to-cyan-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
-      <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-        <div className="absolute inset-0 bg-gradient-to-br from-blue-400/10 via-indigo-400/10 to-cyan-400/10"></div>
-        <div className="absolute top-0 left-0 w-32 h-32 bg-gradient-to-br from-blue-300/20 to-cyan-300/20 rounded-full blur-3xl transform -translate-x-1/2 -translate-y-1/2"></div>
-      </div>
-      <div className="relative z-10">
-        <div className="mb-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-md">
-              <span className="text-white text-sm">📄</span>
-            </div>
-            <h3 className="text-xs font-bold text-slate-800">Exam Paper</h3>
+    <div className="rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50/90 via-indigo-50/90 to-cyan-50/90 p-4 shadow-md">
+      <div className="mb-4 flex items-center justify-between border-b border-blue-200/50 pb-3">
+        <div className="flex items-center gap-2">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-sm">
+            <span className="text-white text-sm">📄</span>
           </div>
-          {papersToDisplay.length > 1 && (
-            <select
-              value={selectedPaper?.id || ''}
-              onChange={(e) => {
-                const paper = papersToDisplay.find((p) => p.id === e.target.value);
-                setSelectedPaper(paper || null);
-              }}
-              className="rounded-lg border-2 border-blue-200 bg-white px-2 py-1 text-[0.65rem] text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 shadow-sm hover:shadow-md transition-all"
-            >
-              {papersToDisplay.map((paper) => (
-                <option key={paper.id} value={paper.id}>
-                  {paper.fileName}
-                </option>
-              ))}
-            </select>
-          )}
+          <div>
+            <h3 className="text-xs font-bold text-slate-800">Exam Paper</h3>
+            <p className="text-[0.65rem] text-slate-600">Secure document viewer</p>
+          </div>
         </div>
+        {papersToDisplay.length > 1 && (
+          <select
+            value={selectedPaper?.id || ''}
+            onChange={(e) => {
+              const paper = papersToDisplay.find((p) => p.id === e.target.value);
+              setSelectedPaper(paper || null);
+            }}
+            className="rounded-lg border-2 border-blue-200 bg-white px-2 py-1 text-[0.65rem] text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 shadow-sm"
+          >
+            {papersToDisplay.map((paper) => (
+              <option key={paper.id} value={paper.id}>
+                {paper.fileName}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
         {selectedPaper ? (
           <div className="space-y-2.5">
             {isChiefExaminer && (
@@ -15047,7 +15743,7 @@ function VettingAndAnnotations({
               <div className="space-y-3">
                 {isVetter && vetterPapers.length > 0 ? (
                   <div className={`grid gap-3 ${vetterPapers.length === 2 ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                    {vetterPapers.map((paper, index) => {
+                    {vetterPapers.map((paper, _index) => {
                       const paperUrl = getPaperUrl(paper);
                       if (!paperUrl) return null;
                       return (
@@ -15082,22 +15778,22 @@ function VettingAndAnnotations({
                   </div>
                 ) : (
                   inlinePaperUrl && (
-                    <div className="rounded-xl border-2 border-blue-300/70 bg-white/90 p-3 shadow-inner flex flex-col">
-                      <div className="flex items-center justify-between gap-3">
+                    <div className="rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md">
+                      <div className="mb-3 flex items-center justify-between border-b border-blue-100 pb-2">
                         <div className="flex items-center gap-2">
-                          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow">
-                            <span className="text-white text-sm">🪟</span>
+                          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow-sm">
+                            <span className="text-white text-xs">🪟</span>
                           </div>
                           <div>
                             <p className="text-xs font-bold text-slate-800">Secure In-Window Viewer</p>
-                            <p className="text-[0.6rem] text-slate-500">Document stays inside the Safe Browser — no new tabs are required.</p>
+                            <p className="text-[0.65rem] text-slate-600">Document stays inside the Safe Browser</p>
                           </div>
                         </div>
-                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.6rem] font-semibold text-emerald-700">
+                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.65rem] font-semibold text-emerald-700">
                           Live Preview
                         </span>
                       </div>
-                      <div className="mt-3 aspect-[210/297] overflow-hidden rounded-lg border border-slate-200 bg-slate-900/5">
+                      <div className="mt-3 aspect-[210/297] overflow-hidden rounded-lg border-2 border-slate-200 bg-slate-50 shadow-inner">
                         <iframe
                           key={inlinePaperUrl}
                           src={`${inlinePaperUrl}#toolbar=0&navpanes=0`}
@@ -15106,7 +15802,7 @@ function VettingAndAnnotations({
                           loading="lazy"
                         />
                       </div>
-                      <p className="mt-2 text-[0.6rem] text-slate-500">Zoom, scroll, and annotate from here while Safe Browser keeps other tabs locked.</p>
+                      <p className="mt-2 text-[0.65rem] text-slate-500 text-center">Zoom, scroll, and annotate from here while Safe Browser keeps other tabs locked.</p>
                     </div>
                   )
                 )}
@@ -15158,13 +15854,12 @@ function VettingAndAnnotations({
         ) : (
           <p className="text-xs text-slate-500">No paper selected</p>
         )}
-      </div>
     </div>
   );
 
   // Simple comment box state
-  const [simpleComment, setSimpleComment] = useState('');
-  const [simpleCommentKey, setSimpleCommentKey] = useState('');
+  const [_simpleComment, setSimpleComment] = useState('');
+  const [_simpleCommentKey, setSimpleCommentKey] = useState('');
 
   // Load existing quick comment on mount
   useEffect(() => {
@@ -15180,10 +15875,10 @@ function VettingAndAnnotations({
     }
   }, [checklistComments]);
 
-  const defaultChecklistWindows = (
+  const defaultChecklistWindows = selectedPaper ? (
     <div className="space-y-4">
       {/* Editable Checklist - Click to type directly on items */}
-      {((isVetter && vetterHasJoined) || isChiefExaminer) && !hasCustomChecklistPdf && (
+      {(isVetter && vetterHasJoined) && !hasCustomChecklistPdf && (
         <div className="rounded-xl border-2 border-blue-200 bg-white p-4 shadow-lg">
           <div className="mb-4">
             <h3 className="text-sm font-bold text-slate-800 mb-2">Moderation Checklist - Click any item to write on it</h3>
@@ -15296,7 +15991,7 @@ function VettingAndAnnotations({
                   }}
                   onInput={(e) => {
                     // Auto-save content as user types
-                    const content = e.currentTarget.innerHTML;
+                    const _content = e.currentTarget.innerHTML;
                     // You can save this to localStorage or state if needed
                   }}
                 >
@@ -15428,7 +16123,7 @@ function VettingAndAnnotations({
           </div>
         </div>
       )}
-      {isChiefExaminer && checklistComments && checklistComments.size > 0 && onDownloadChecklistPacket && (
+      {selectedPaper && isChiefExaminer && checklistComments && checklistComments.size > 0 && onDownloadChecklistPacket && (
         <div className="flex justify-end gap-2">
           <button
             onClick={() => setShowChecklistPreview(true)}
@@ -15444,7 +16139,7 @@ function VettingAndAnnotations({
           </button>
         </div>
       )}
-      {isChiefExaminer && (
+      {selectedPaper && isChiefExaminer && (
         <div className="rounded-xl border-2 border-slate-200 bg-white p-4 shadow-lg space-y-3">
           <div>
             <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wide">Forward Checklist to Team Lead</h3>
@@ -15532,19 +16227,33 @@ function VettingAndAnnotations({
         </div>
       )}
     </div>
-  );
+  ) : null;
 
   const structuredChecklistCommentSections = hasCustomChecklistPdf
     ? pdfChecklistSectionConfigs
     : defaultChecklistSectionConfigs;
 
   const paperChecklistColumns = (() => {
-    if (canViewPaperAndChecklist) {
+    if (canViewPaperAndChecklist && selectedPaper) {
       // Both vetters and Chief Examiners see paper and checklist side by side
       return (
-        <div className="grid gap-5 grid-cols-2">
-          <div className="space-y-4">{examWindow}</div>
-          <div className="space-y-4">{defaultChecklistWindows}</div>
+        <div className="grid gap-6 lg:grid-cols-2">
+          {/* Exam Paper Column */}
+          <div className="flex flex-col space-y-4">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="h-1 w-1 rounded-full bg-blue-500"></div>
+              <h3 className="text-sm font-bold text-slate-700 uppercase tracking-wide">Exam Paper</h3>
+            </div>
+            {examWindow}
+          </div>
+          {/* Checklist Column */}
+          <div className="flex flex-col space-y-4">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="h-1 w-1 rounded-full bg-indigo-500"></div>
+              <h3 className="text-sm font-bold text-slate-700 uppercase tracking-wide">Moderation Checklist</h3>
+            </div>
+            {defaultChecklistWindows}
+          </div>
         </div>
       );
     }
@@ -15623,46 +16332,48 @@ function VettingAndAnnotations({
         {paperChecklistColumns}
 
         {/* Editing Tool and Comments Section - After Preview Windows */}
-        {canViewPaperAndChecklist && ((isVetter && vetterHasJoined) || isChiefExaminer) && (
+        {selectedPaper && canViewPaperAndChecklist && ((isVetter && vetterHasJoined) || isChiefExaminer) && (
           <div className="space-y-4">
-            {/* Color Selection Tool */}
-            <div className="rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50 via-indigo-50 to-cyan-50 p-4 shadow-lg">
-              <div className="mb-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-md">
-                    <span className="text-white text-sm">🎨</span>
-                  </div>
-                  <div>
-                    <h3 className="text-xs font-bold text-slate-800">Text Color Selection</h3>
-                    <p className="text-[0.65rem] text-slate-600">Choose a color for your comments</p>
-                  </div>
-                </div>
-                <div className="rounded-lg border border-blue-200 bg-white/90 p-3">
+            {/* Color Selection Tool - Only for Vetters */}
+            {isVetter && vetterHasJoined && (
+              <div className="rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50 via-indigo-50 to-cyan-50 p-4 shadow-lg">
+                <div className="mb-3">
                   <div className="flex items-center gap-2 mb-2">
-                    <span className="text-[0.65rem] font-semibold text-slate-700">Text Color:</span>
-                    <div className="flex flex-wrap gap-1">
-                      {textColors.map((color) => (
-                        <button
-                          key={color.value}
-                          type="button"
-                          onClick={() => setSelectedColor(color.value)}
-                          className={`h-6 w-6 rounded border-2 transition ${
-                            selectedColor === color.value
-                              ? 'border-slate-800 scale-110 shadow'
-                              : 'border-slate-300 hover:border-slate-500'
-                          }`}
-                          style={{ backgroundColor: color.value }}
-                          title={color.name}
-                        />
-                      ))}
+                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-md">
+                      <span className="text-white text-sm">🎨</span>
+                    </div>
+                    <div>
+                      <h3 className="text-xs font-bold text-slate-800">Text Color Selection</h3>
+                      <p className="text-[0.65rem] text-slate-600">Choose a color for your comments</p>
                     </div>
                   </div>
-                  <p className="text-[0.6rem] text-slate-500">
-                    Select a color, then add your comments in the sections below
-                  </p>
+                  <div className="rounded-lg border border-blue-200 bg-white/90 p-3">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-[0.65rem] font-semibold text-slate-700">Text Color:</span>
+                      <div className="flex flex-wrap gap-1">
+                        {textColors.map((color) => (
+                          <button
+                            key={color.value}
+                            type="button"
+                            onClick={() => setSelectedColor(color.value)}
+                            className={`h-6 w-6 rounded border-2 transition ${
+                              selectedColor === color.value
+                                ? 'border-slate-800 scale-110 shadow'
+                                : 'border-slate-300 hover:border-slate-500'
+                            }`}
+                            style={{ backgroundColor: color.value }}
+                            title={color.name}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <p className="text-[0.6rem] text-slate-500">
+                      Select a color, then add your comments in the sections below
+                    </p>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
 
             {/* Glass Styled Checklist Commentary */}
             <div className="rounded-2xl bg-gradient-to-br from-slate-50 via-blue-50/30 to-indigo-50/20 p-6 shadow-xl">
@@ -15836,276 +16547,214 @@ function VettingAndAnnotations({
         )}
 
         {isChiefExaminer && !showVetterFocusedLayout && (
-          <>
-            {/* Moderation Scheduling - Chief Examiner Only */}
-            {isChiefExaminer && onScheduleModeration && (
-              <div className="group relative overflow-hidden rounded-xl border-2 border-purple-300/50 bg-gradient-to-br from-purple-50 via-indigo-50 to-pink-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
-                <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-                  <div className="absolute inset-0 bg-gradient-to-br from-purple-400/10 via-indigo-400/10 to-pink-400/10"></div>
-                  <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-purple-300/20 to-pink-300/20 rounded-full blur-3xl transform translate-x-1/2 -translate-y-1/2"></div>
+          <div className="space-y-6">
+            {/* Session Management Section - Grouped together */}
+            <div className="rounded-2xl border-2 border-slate-200 bg-gradient-to-br from-slate-50 to-blue-50/30 p-5 shadow-lg">
+              <div className="mb-4 flex items-center gap-3 border-b border-slate-200 pb-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 shadow-md">
+                  <span className="text-white text-lg">⚙️</span>
                 </div>
-                <div className="relative z-10">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-800">Session Management</h3>
+                  <p className="text-[0.7rem] text-slate-600">Configure and control vetting sessions</p>
+                </div>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                {/* Moderation Scheduling */}
+                {isChiefExaminer && onScheduleModeration && (
+                  <div className="rounded-xl border-2 border-purple-200/50 bg-gradient-to-br from-purple-50/80 via-indigo-50/80 to-pink-50/80 p-4 shadow-md">
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 shadow-sm">
+                        <span className="text-white text-xs">📅</span>
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-slate-800">Schedule Moderation</h4>
+                        <p className="text-[0.65rem] text-slate-600">Set start date & time</p>
+                      </div>
+                    </div>
+                    <div className="space-y-2.5">
+                      <div>
+                        <label className="block text-[0.65rem] font-semibold text-slate-700 mb-1.5">Start Date & Time</label>
+                        <input
+                          type="datetime-local"
+                          value={startDateTime}
+                          onChange={(e) => setStartDateTime(e.target.value)}
+                          className="w-full rounded-lg border-2 border-purple-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40 shadow-sm"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onScheduleModeration(startDateTime)}
+                        className="w-full rounded-lg bg-gradient-to-r from-purple-500 via-indigo-500 to-pink-500 px-3 py-2 text-xs font-bold text-white shadow-md hover:shadow-lg hover:scale-[1.02] transition-all"
+                      >
+                        ✓ Schedule Session
+                      </button>
+                      {moderationSchedule?.scheduled && moderationSchedule.startDateTime && (
+                        <div className="rounded-lg border-2 border-green-300 bg-gradient-to-r from-green-50 to-emerald-50 p-2">
+                          <p className="text-[0.65rem] font-bold text-green-700 flex items-center gap-1">
+                            <span>✓</span>
+                            <span>Scheduled</span>
+                          </p>
+                          <p className="text-[0.6rem] text-green-600 mt-1">Starts: {new Date(moderationSchedule.startDateTime).toLocaleString()}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Safe Browser Controls */}
+                <div className="rounded-xl border-2 border-emerald-200/50 bg-gradient-to-br from-emerald-50/80 via-teal-50/80 to-cyan-50/80 p-4 shadow-md">
                   <div className="flex items-center gap-2 mb-3">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 shadow-md">
-                      <span className="text-white text-sm">📅</span>
+                    <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 shadow-sm">
+                      <span className="text-white text-xs">🔒</span>
                     </div>
                     <div>
-                      <h3 className="text-xs font-bold text-slate-800">Schedule Moderation</h3>
-                      <p className="text-[0.65rem] text-slate-600">Set start date & time</p>
+                      <h4 className="text-xs font-bold text-slate-800">Safe Browser Controls</h4>
+                      <p className="text-[0.65rem] text-slate-600">Secure vetting environment</p>
                     </div>
                   </div>
-                  <div className="space-y-3">
-                    <div className="relative">
-                      <label className="block text-[0.65rem] font-bold uppercase tracking-wide text-slate-700 mb-1.5">Start Date & Time</label>
-                      <input
-                        type="datetime-local"
-                        value={startDateTime}
-                        onChange={(e) => setStartDateTime(e.target.value)}
-                        className="w-full rounded-lg border-2 border-purple-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40 shadow-sm hover:shadow-md transition-all"
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => onScheduleModeration(startDateTime)}
-                      className="w-full rounded-lg bg-gradient-to-r from-purple-500 via-indigo-500 to-pink-500 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
-                    >
-                      <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                      <span className="relative z-10 flex items-center justify-center gap-1.5">
-                        <span>✓</span>
-                        <span>Schedule Session</span>
-                      </span>
-                    </button>
-                    {moderationSchedule?.scheduled && moderationSchedule.startDateTime && (
-                      <div className="rounded-lg border-2 border-green-300 bg-gradient-to-r from-green-50 to-emerald-50 p-2.5">
-                        <p className="text-[0.65rem] font-bold text-green-700 flex items-center gap-1">
-                          <span>✓</span>
-                          <span>Scheduled</span>
-                        </p>
-                        <p className="text-[0.6rem] text-green-600 mt-1">Starts: {new Date(moderationSchedule.startDateTime).toLocaleString()}</p>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div className="group relative overflow-hidden rounded-xl border-2 border-emerald-200/50 bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
-              <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-                <div className="absolute inset-0 bg-gradient-to-br from-emerald-400/10 via-teal-400/10 to-cyan-400/10"></div>
-                <div className="absolute bottom-0 right-0 w-32 h-32 bg-gradient-to-br from-emerald-300/20 to-cyan-300/20 rounded-full blur-3xl transform translate-x-1/2 translate-y-1/2"></div>
-              </div>
-              <div className="relative z-10">
-                <div className="flex items-center gap-2 mb-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 shadow-md">
-                    <span className="text-white text-sm">🔒</span>
-                  </div>
-                  <div>
-                    <h3 className="text-xs font-bold text-slate-800">Safe Browser Controls</h3>
-                    <p className="text-[0.65rem] text-slate-600">Secure vetting environment</p>
-                  </div>
-                </div>
-                <div className="mb-3 flex flex-wrap gap-1.5">
-                  {safeBrowserStatus.map((item) => (
-                    <div
-                      key={item.label}
-                      className={`rounded-lg px-2 py-1 text-[0.65rem] font-semibold border-2 transition-all ${
-                        item.active ? 'bg-blue-100 border-blue-300 text-blue-700 shadow-sm' : 'bg-amber-100 border-amber-300 text-amber-700 shadow-sm'
-                      }`}
-                    >
-                      {item.label}
-                    </div>
-                  ))}
-                </div>
-                {isChiefExaminer && (
-                  <>
-                    <input
-                      ref={checklistUploadInputRef}
-                      type="file"
-                      accept=".json,.txt,.pdf,.docx,.doc,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
-                      className="hidden"
-                      onChange={(event) => {
-                        const file = event.target.files?.[0];
-                        if (file && onUploadChecklist) {
-                          onUploadChecklist(file);
-                        }
-                        if (event.target) {
-                          event.target.value = '';
-                        }
-                      }}
-                    />
-                    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-white/80 p-3">
-                      <button
-                        type="button"
-                        onClick={() => checklistUploadInputRef.current?.click()}
-                        className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-1.5 text-[0.65rem] font-bold text-white shadow hover:shadow-md"
+                  <div className="mb-3 flex flex-wrap gap-1.5">
+                    {safeBrowserStatus.map((item) => (
+                      <div
+                        key={item.label}
+                        className={`rounded-lg px-2 py-1 text-[0.65rem] font-semibold border-2 transition-all ${
+                          item.active ? 'bg-blue-100 border-blue-300 text-blue-700' : 'bg-amber-100 border-amber-300 text-amber-700'
+                        }`}
                       >
-                        Upload Vetting Checklist
-                      </button>
-                      {hasCustomChecklistPdf && onRemoveChecklist && (
+                        {item.label}
+                      </div>
+                    ))}
+                  </div>
+                  {isChiefExaminer && (
+                    <>
+                      <input
+                        ref={checklistUploadInputRef}
+                        type="file"
+                        accept=".json,.txt,.pdf,.docx,.doc,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
+                        className="hidden"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          if (file && onUploadChecklist) {
+                            onUploadChecklist(file);
+                          }
+                          if (event.target) {
+                            event.target.value = '';
+                          }
+                        }}
+                      />
+                      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-white/90 p-2.5">
                         <button
                           type="button"
-                          onClick={onRemoveChecklist}
-                          className="rounded-lg bg-gradient-to-r from-red-500 to-rose-600 px-3 py-1.5 text-[0.65rem] font-bold text-white shadow hover:shadow-md"
+                          onClick={() => checklistUploadInputRef.current?.click()}
+                          className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-2.5 py-1.5 text-[0.65rem] font-bold text-white shadow hover:shadow-md"
                         >
-                          Remove Checklist
+                          Upload Checklist
                         </button>
-                      )}
-                      <span className="text-[0.6rem] font-semibold text-blue-700">
-                        {hasCustomChecklist ? 'Custom template active' : hasCustomChecklistPdf ? 'Custom PDF active' : 'Default template active'}
-                      </span>
-                    </div>
-                  </>
-                )}
-                <div className="space-y-2.5">
-                  <div>
-                    <label htmlFor="session-minutes" className="block text-[0.65rem] font-bold uppercase tracking-wide text-slate-700 mb-1.5">
-                      Session Duration (minutes)
-                    </label>
-                    <div className="relative">
-                      <input
-                        id="session-minutes"
-                        type="number"
-                        min={DEFAULT_SESSION_MINUTES}
-                        max={180}
-                        value={vettingSession.active && vettingSession.durationMinutes ? vettingSession.durationMinutes : customDuration}
-                        onChange={(e) => {
-                          const value = parseInt(e.target.value) || calculatedDuration;
-                          setCustomDuration(Math.max(DEFAULT_SESSION_MINUTES, Math.min(180, value)));
-                        }}
-                        disabled={vettingSession.active}
-                        className="w-full rounded-lg border-2 border-emerald-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 shadow-sm hover:shadow-md transition-all disabled:bg-emerald-50/50 disabled:cursor-not-allowed"
-                      />
-                      {!vettingSession.active && (
-                        <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                          <span className="text-[0.65rem] text-emerald-600 font-semibold">min</span>
-                        </div>
-                      )}
-                      {vettingSession.active && (
-                        <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                          <span className="text-[0.65rem] text-emerald-600 font-semibold">Active</span>
-                        </div>
-                      )}
-                    </div>
-                    <p className="mt-1 text-[0.6rem] text-slate-600">
-                      {vettingSession.active
-                        ? `Session active. ${vettingCountdown ? `Time remaining: ${vettingCountdown}` : 'Time expired'}`
-                        : moderationSchedule?.scheduled && moderationStartCountdown
-                        ? `Waiting for scheduled time... ${moderationStartCountdown} remaining`
-                        : moderationSchedule?.scheduled
-                        ? `Scheduled time reached. Ready to start session.`
-                        : `Set schedule to auto-calculate`}
-                    </p>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    {isChiefExaminer
-                      ? vettingSession.active
-                        ? (
+                        {hasCustomChecklistPdf && onRemoveChecklist && (
                           <button
                             type="button"
-                            onClick={() => {
-                              if (onEndSession && confirm('Are you sure you want to end the vetting session? This will terminate all active vetter sessions.')) {
-                                onEndSession();
-                              }
-                            }}
-                            className="rounded-lg bg-gradient-to-r from-red-500 to-rose-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
+                            onClick={onRemoveChecklist}
+                            className="rounded-lg bg-gradient-to-r from-red-500 to-rose-600 px-2.5 py-1.5 text-[0.65rem] font-bold text-white shadow hover:shadow-md"
                           >
-                            <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                            <span className="relative z-10">End Session</span>
-                          </button>
-                        )
-                        : (
-                          <button
-                            type="button"
-                            onClick={() => onStartVetting(customDuration)}
-                            className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
-                          >
-                            <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                            <span className="relative z-10">Start Session</span>
-                          </button>
-                        )
-                      : canVetterStartSession && (
-                          <button
-                            type="button"
-                            onClick={() => onStartVetting(customDuration)}
-                            className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
-                          >
-                            <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                            <span className="relative z-10">Start Session (Enable Camera)</span>
+                            Remove
                           </button>
                         )}
-                    {isVetter && vetterHasJoined && (
-                      <button
-                        type="button"
-                        onClick={onCompleteVetting}
-                        className="rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group"
-                      >
-                        <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                        <span className="relative z-10">Complete</span>
-                      </button>
-                    )}
+                        <span className="text-[0.6rem] font-semibold text-blue-700">
+                          {hasCustomChecklist ? 'Custom template' : hasCustomChecklistPdf ? 'Custom PDF' : 'Default template'}
+                        </span>
+                      </div>
+                    </>
+                  )}
+                  <div className="space-y-2.5">
+                    <div>
+                      <label htmlFor="session-minutes" className="block text-[0.65rem] font-semibold text-slate-700 mb-1.5">
+                        Session Duration (minutes)
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="session-minutes"
+                          type="number"
+                          min={DEFAULT_SESSION_MINUTES}
+                          max={180}
+                          value={vettingSession.active && vettingSession.durationMinutes ? vettingSession.durationMinutes : customDuration}
+                          onChange={(e) => {
+                            const value = parseInt(e.target.value) || calculatedDuration;
+                            setCustomDuration(Math.max(DEFAULT_SESSION_MINUTES, Math.min(180, value)));
+                          }}
+                          disabled={vettingSession.active}
+                          className="w-full rounded-lg border-2 border-emerald-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 shadow-sm disabled:bg-emerald-50/50 disabled:cursor-not-allowed"
+                        />
+                        {!vettingSession.active && (
+                          <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                            <span className="text-[0.65rem] text-emerald-600 font-semibold">min</span>
+                          </div>
+                        )}
+                        {vettingSession.active && (
+                          <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                            <span className="text-[0.65rem] text-emerald-600 font-semibold">Active</span>
+                          </div>
+                        )}
+                      </div>
+                      <p className="mt-1 text-[0.6rem] text-slate-600">
+                        {vettingSession.active
+                          ? `Session active. ${vettingCountdown ? `Time remaining: ${vettingCountdown}` : 'Time expired'}`
+                          : moderationSchedule?.scheduled && moderationStartCountdown
+                          ? `Waiting for scheduled time... ${moderationStartCountdown} remaining`
+                          : moderationSchedule?.scheduled
+                          ? `Scheduled time reached. Ready to start session.`
+                          : `Set schedule to auto-calculate`}
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {isChiefExaminer
+                        ? vettingSession.active
+                          ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (onEndSession && confirm('Are you sure you want to end the vetting session? This will terminate all active vetter sessions.')) {
+                                  onEndSession();
+                                }
+                              }}
+                              className="rounded-lg bg-gradient-to-r from-red-500 to-rose-600 px-3 py-2 text-xs font-bold text-white shadow-md hover:shadow-lg hover:scale-[1.02] transition-all"
+                            >
+                              End Session
+                            </button>
+                          )
+                          : (
+                            <button
+                              type="button"
+                              onClick={() => onStartVetting(customDuration)}
+                              className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2 text-xs font-bold text-white shadow-md hover:shadow-lg hover:scale-[1.02] transition-all"
+                            >
+                              Start Session
+                            </button>
+                          )
+                        : canVetterStartSession && (
+                            <button
+                              type="button"
+                              onClick={() => onStartVetting(customDuration)}
+                              className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2 text-xs font-bold text-white shadow-md hover:shadow-lg hover:scale-[1.02] transition-all"
+                            >
+                              Start Session (Enable Camera)
+                            </button>
+                          )}
+                      {isVetter && vetterHasJoined && (
+                        <button
+                          type="button"
+                          onClick={onCompleteVetting}
+                          className="rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2 text-xs font-bold text-white shadow-md hover:shadow-lg hover:scale-[1.02] transition-all"
+                        >
+                          Complete
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
-
-            {canViewPaperAndChecklist && (
-              <div className="group relative overflow-hidden rounded-xl border-2 border-indigo-200/50 bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 p-4 shadow-lg hover:shadow-2xl transition-all duration-300">
-                <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-                  <div className="absolute inset-0 bg-gradient-to-br from-indigo-400/10 via-purple-400/10 to-pink-400/10"></div>
-                  <div className="absolute top-0 left-0 w-32 h-32 bg-gradient-to-br from-indigo-300/20 to-pink-300/20 rounded-full blur-3xl transform -translate-x-1/2 -translate-y-1/2"></div>
-                </div>
-                <div className="relative z-10">
-                  <div className="flex items-center gap-2 mb-3">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 shadow-md">
-                      <span className="text-white text-sm">💬</span>
-                    </div>
-                    <div>
-                      <h3 className="text-xs font-bold text-slate-800">Real-Time Annotations</h3>
-                      <p className="text-[0.65rem] text-slate-600">Synchronized comments</p>
-                    </div>
-                  </div>
-                  <form onSubmit={handleAnnotationSubmit} className="space-y-2.5">
-                    <input
-                      value={annotationDraft}
-                      onChange={(event) => setAnnotationDraft(event.target.value)}
-                      placeholder="Add annotation (Bloom's taxonomy reference, etc.)"
-                      className="w-full rounded-lg border-2 border-indigo-200 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 shadow-sm hover:shadow-md transition-all disabled:opacity-60"
-                      disabled={!vettingSession.active || (isVetter && !vetterHasJoined)}
-                    />
-                    <button
-                      type="submit"
-                      disabled={!vettingSession.active || (isVetter && !vetterHasJoined)}
-                      className="w-full rounded-lg bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 relative overflow-hidden group"
-                    >
-                      <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
-                      <span className="relative z-10 flex items-center justify-center gap-1.5">
-                        <span>📤</span>
-                        <span>Publish Comment</span>
-                      </span>
-                    </button>
-                  </form>
-                  <div className="mt-3 max-h-48 space-y-2 overflow-y-auto pr-1">
-                    {annotations.length === 0 ? (
-                      <p className="text-[0.65rem] text-slate-500 text-center py-4">No annotations yet. Start session to add comments.</p>
-                    ) : (
-                      annotations.map((annotation) => (
-                        <div
-                          key={annotation.id}
-                          className="group/ann relative overflow-hidden rounded-lg border border-indigo-200/50 bg-white/80 backdrop-blur-sm p-2.5 text-[0.65rem] text-slate-700 shadow-sm hover:shadow-md transition-all"
-                        >
-                          <p className="text-xs font-semibold text-slate-900 mb-1.5">"{annotation.comment}"</p>
-                          <div className="flex items-center justify-between">
-                            <span className="font-bold text-indigo-700 text-[0.65rem]">{annotation.author}</span>
-                            <span className="text-slate-500 text-[0.6rem]">{formatTimestamp(annotation.timestamp)}</span>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-          </>
+          </div>
         )}
 
         {/* Chief Examiner Monitoring Panel - Shows vetter camera feeds and warnings */}
