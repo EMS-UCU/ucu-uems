@@ -28,8 +28,13 @@ import LecturerDashboard from './components/LecturerDashboard';
 import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 import { supabase } from './lib/supabase';
 import { elevateToChiefExaminer, appointRole } from './lib/privilegeElevation';
+import { uploadVettingRecording } from './lib/examServices/recordingService';
+import { getVettingRecordings } from './lib/examServices/chiefExaminerService';
 import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead } from './lib/examServices/notificationService';
 import ucuLogo from './assets/ucu-logo.png';
+import RecordingReviewPanel from './components/RecordingReviewPanel';
+import type { RecordingEntry } from './types/recordings';
+import type { VettingSession } from './lib/supabase';
 
 type BaseRole = 'Admin' | 'Lecturer';
 type Role =
@@ -122,6 +127,42 @@ interface TimelineEvent {
   stage: WorkflowStage;
 }
 
+const STUDY_YEAR_PATTERNS = [
+  { label: 'First Year', keywords: ['first', 'yr1', 'year 1', '1st', '1'] },
+  { label: 'Second Year', keywords: ['second', 'yr2', 'year 2', '2nd', '2'] },
+  { label: 'Third Year', keywords: ['third', 'yr3', 'year 3', '3rd', '3'] },
+  { label: 'Fourth Year', keywords: ['fourth', 'yr4', 'year 4', '4th', '4'] },
+];
+
+const deriveStudyYearLabel = (rawYear?: string, courseCode?: string): string => {
+  if (rawYear) {
+    const normalized = rawYear.toLowerCase();
+    for (const pattern of STUDY_YEAR_PATTERNS) {
+      if (pattern.keywords.some((kw) => normalized.includes(kw))) {
+        return pattern.label;
+      }
+    }
+  }
+
+  if (courseCode) {
+    const digit = courseCode.replace(/\D/g, '').charAt(0);
+    switch (digit) {
+      case '1':
+        return 'First Year';
+      case '2':
+        return 'Second Year';
+      case '3':
+        return 'Third Year';
+      case '4':
+        return 'Fourth Year';
+      default:
+        break;
+    }
+  }
+
+  return 'Unspecified Year';
+};
+
 interface WorkflowDecision {
   type: 'Approved' | 'Rejected';
   actor: string;
@@ -198,6 +239,7 @@ interface VettingSessionRecord {
   annotations: Annotation[];
   checklistComments: Map<string, { comment: string; vetterName: string; timestamp: number; color: string }>;
   status: 'completed' | 'expired' | 'terminated';
+  recordingUrl?: string; // URL to the video recording for audit purposes
 }
 
 interface DestructionLogEntry {
@@ -1346,6 +1388,10 @@ function App() {
   const [vetterMonitoring, setVetterMonitoring] = useState<Map<string, VetterMonitoring>>(new Map());
   // Store camera stream references for Chief Examiner monitoring
   const vetterCameraStreams = useRef<Map<string, MediaStream>>(new Map());
+  // Store MediaRecorder instances for video recording during vetting sessions
+  const vetterMediaRecorders = useRef<Map<string, MediaRecorder>>(new Map());
+  // Store recording chunks for each vetter
+  const vetterRecordingChunks = useRef<Map<string, Blob[]>>(new Map());
   // Checklist comments - keyed by checklist category and item text
   const [checklistComments, setChecklistComments] = useState<ChecklistCommentsMap>(() => loadChecklistComments());
   const [checklistTypingState, setChecklistTypingState] = useState<Map<string, Map<string, { name: string; timestamp: number }>>>(new Map());
@@ -1378,6 +1424,114 @@ function App() {
   };
   
   const [vettingSessionRecords, setVettingSessionRecords] = useState<VettingSessionRecord[]>(loadVettingRecords());
+  const [chiefDashboardTab, setChiefDashboardTab] = useState<'overview' | 'recordings'>('overview');
+  // State for database recordings (for Chief Examiner and Super Admin)
+  const [databaseRecordings, setDatabaseRecordings] = useState<VettingSession[]>([]);
+  const [loadingRecordings, setLoadingRecordings] = useState(false);
+
+  const recordingEntries = useMemo<RecordingEntry[]>(() => {
+    const allRecords: RecordingEntry[] = [];
+    const paperMap = new Map(submittedPapers.map((paper) => [paper.id, paper]));
+    
+    // Add localStorage recordings
+    if (vettingSessionRecords.length > 0) {
+      vettingSessionRecords.forEach((record) => {
+        const paper = paperMap.get(record.paperId);
+        const referenceTimestamp = record.completedAt || record.startedAt || Date.now();
+        const yearValue = new Date(referenceTimestamp);
+        const calendarYear = Number.isNaN(yearValue.getFullYear())
+          ? 'Unspecified Year'
+          : yearValue.getFullYear().toString();
+        const semesterLabel = ((paper?.semester || 'Unassigned Semester').trim()) || 'Unassigned Semester';
+        
+        allRecords.push({
+          recordId: record.id,
+          paperId: record.paperId,
+          calendarYear,
+          semester: semesterLabel,
+          studyYear: deriveStudyYearLabel(paper?.year, paper?.courseCode),
+          courseUnit: record.courseUnit || paper?.courseUnit || 'Unknown Course Unit',
+          courseCode: paper?.courseCode,
+          startedAt: record.startedAt,
+          completedAt: record.completedAt,
+          durationMinutes: record.durationMinutes,
+          recordingUrl: record.recordingUrl,
+          annotationsCount: record.annotations.length,
+          vetterSummaries: record.vetters.map((vetter) => ({
+            vetterId: vetter.vetterId,
+            vetterName: vetter.vetterName,
+            warnings: vetter.warnings?.length || 0,
+            violations: vetter.violations || 0,
+          })),
+        });
+      });
+    }
+    
+    // Add database recordings (prefer database over localStorage)
+    if (databaseRecordings.length > 0) {
+      databaseRecordings.forEach((session) => {
+        // Check if we already have this record from localStorage
+        const existingIndex = allRecords.findIndex(r => r.recordId === session.id);
+        
+        if (existingIndex === -1 || (session.recording_url && !allRecords[existingIndex].recordingUrl)) {
+          // Either new record or database has recording URL but localStorage doesn't
+          const paper = paperMap.get(session.exam_paper_id);
+          const referenceTimestamp = session.completed_at 
+            ? new Date(session.completed_at).getTime()
+            : session.started_at 
+            ? new Date(session.started_at).getTime()
+            : Date.now();
+          const yearValue = new Date(referenceTimestamp);
+          const calendarYear = Number.isNaN(yearValue.getFullYear())
+            ? 'Unspecified Year'
+            : yearValue.getFullYear().toString();
+          const semesterLabel = ((paper?.semester || 'Unassigned Semester').trim()) || 'Unassigned Semester';
+          
+          const entry: RecordingEntry = {
+            recordId: session.id,
+            paperId: session.exam_paper_id,
+            calendarYear,
+            semester: semesterLabel,
+            studyYear: deriveStudyYearLabel(paper?.year, paper?.courseCode),
+            courseUnit: paper?.courseUnit || 'Unknown Course Unit',
+            courseCode: paper?.courseCode,
+            startedAt: session.started_at ? new Date(session.started_at).getTime() : undefined,
+            completedAt: session.completed_at ? new Date(session.completed_at).getTime() : undefined,
+            durationMinutes: session.recording_duration_seconds 
+              ? Math.floor(session.recording_duration_seconds / 60)
+              : undefined,
+            recordingUrl: session.recording_url,
+            annotationsCount: 0, // Would need to fetch from comments table
+            vetterSummaries: [], // Would need to fetch from assignments table
+          };
+          
+          if (existingIndex !== -1) {
+            // Update existing entry with database data
+            allRecords[existingIndex] = { ...allRecords[existingIndex], ...entry };
+          } else {
+            // Add new entry
+            allRecords.push(entry);
+          }
+        }
+      });
+    }
+    
+    // Remove duplicates based on recordId (prefer database records)
+    const uniqueRecords = new Map<string, RecordingEntry>();
+    allRecords.forEach(record => {
+      if (!uniqueRecords.has(record.recordId)) {
+        uniqueRecords.set(record.recordId, record);
+      } else {
+        // Prefer record with recordingUrl
+        const existing = uniqueRecords.get(record.recordId)!;
+        if (record.recordingUrl && !existing.recordingUrl) {
+          uniqueRecords.set(record.recordId, record);
+        }
+      }
+    });
+    
+    return Array.from(uniqueRecords.values());
+  }, [vettingSessionRecords, databaseRecordings, submittedPapers]);
   // Archive papers - for AI similarity checking
   const loadArchivedPapers = (): SubmittedPaper[] => {
     try {
@@ -1396,6 +1550,30 @@ function App() {
     () => users.find((user) => user.id === authUserId) ?? null,
     [authUserId, users]
   );
+
+  // Fetch recordings from database for Chief Examiner or Super Admin
+  useEffect(() => {
+    const fetchDatabaseRecordings = async () => {
+      if (!currentUser?.id) return;
+      
+      const isChiefExaminer = currentUser?.roles?.includes('Chief Examiner') ?? false;
+      const isSuperAdmin = currentUser?.isSuperAdmin ?? false;
+      
+      if (!isChiefExaminer && !isSuperAdmin) return;
+      
+      setLoadingRecordings(true);
+      try {
+        const recordings = await getVettingRecordings(currentUser.id);
+        setDatabaseRecordings(recordings);
+      } catch (error) {
+        console.error('Error fetching recordings from database:', error);
+      } finally {
+        setLoadingRecordings(false);
+      }
+    };
+    
+    fetchDatabaseRecordings();
+  }, [currentUser?.id, currentUser?.roles, currentUser?.isSuperAdmin]);
 
   useEffect(() => {
     try {
@@ -3740,10 +3918,52 @@ function App() {
       // Mark this vetter as joined
       setJoinedVetters(prev => new Set(prev).add(currentUser.id!));
       
-      // Store camera stream for Chief Examiner monitoring
+      // Store camera stream for Chief Examiner monitoring and recording
       try {
         const cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
         vetterCameraStreams.current.set(currentUser.id!, cameraStream);
+        
+        // Start video recording for audit purposes
+        try {
+          const mediaRecorder = new MediaRecorder(cameraStream, {
+            mimeType: 'video/webm;codecs=vp9',
+            videoBitsPerSecond: 2500000, // 2.5 Mbps for good quality
+          });
+          
+          const recordingChunks: Blob[] = [];
+          
+          // Store chunks reference for this recorder
+          vetterRecordingChunks.current.set(currentUser.id!, recordingChunks);
+          
+          mediaRecorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+              const chunks = vetterRecordingChunks.current.get(currentUser.id!);
+              if (chunks) {
+                chunks.push(event.data);
+                vetterRecordingChunks.current.set(currentUser.id!, chunks);
+              }
+            }
+          };
+          
+          mediaRecorder.onstop = () => {
+            const chunks = vetterRecordingChunks.current.get(currentUser.id!) || [];
+            const blob = new Blob(chunks, { type: 'video/webm' });
+            console.log(`📹 Recording stopped for vetter ${currentUser.id}, size: ${blob.size} bytes, chunks: ${chunks.length}`);
+          };
+          
+          mediaRecorder.onerror = (event) => {
+            console.error('MediaRecorder error:', event);
+          };
+          
+          // Start recording
+          mediaRecorder.start(1000); // Collect data every second
+          vetterMediaRecorders.current.set(currentUser.id!, mediaRecorder);
+          
+          console.log(`📹 Started video recording for vetter ${currentUser.id}`);
+        } catch (recordingError) {
+          console.error('Failed to start video recording:', recordingError);
+          // Continue even if recording fails - monitoring is more important
+        }
         
         // Initialize monitoring data for this vetter
         setVetterMonitoring(prev => {
@@ -4034,7 +4254,7 @@ function App() {
     reader.readAsText(file);
   };
 
-  const handleCompleteVetting = () => {
+  const handleCompleteVetting = async () => {
     if (!currentUserHasRole('Vetter')) {
       return;
     }
@@ -4048,6 +4268,74 @@ function App() {
     
     // Find the paper being vetted
     const vettedPaper = submittedPapers.find(p => p.status === 'in-vetting');
+    
+    // Stop and upload video recording if available
+    let recordingUrl: string | undefined;
+    let recordingFileSize: number | undefined;
+    let recordingDurationSeconds: number | undefined;
+    
+    if (currentUser?.id && vetterMediaRecorders.current.has(currentUser.id)) {
+      const mediaRecorder = vetterMediaRecorders.current.get(currentUser.id);
+      const recordingChunks = vetterRecordingChunks.current.get(currentUser.id) || [];
+      
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        try {
+          // Stop recording
+          mediaRecorder.stop();
+          
+          // Wait a bit for the recording to finalize
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+          // Combine chunks if multiple
+          const finalBlob = recordingChunks.length > 0
+            ? new Blob(recordingChunks, { type: 'video/webm' })
+            : null;
+          
+          // If we have chunks, use them; otherwise wait a bit more and check again
+          if (!finalBlob || finalBlob.size === 0) {
+            console.warn('Recording chunks are empty, attempting to retrieve from mediaRecorder');
+            // Wait a bit more and try to get the blob from the stopped recorder
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+          
+          if (finalBlob && finalBlob.size > 0 && vettedPaper) {
+            // Generate a session ID for this recording
+            const sessionId = `session-${vettedPaper.id}-${Date.now()}`;
+            
+            // Upload recording to Supabase Storage
+            const uploadResult = await uploadVettingRecording(
+              finalBlob,
+              sessionId,
+              vettedPaper.id
+            );
+            
+            if (uploadResult.recordingUrl && !uploadResult.error) {
+              recordingUrl = uploadResult.recordingUrl;
+              recordingFileSize = uploadResult.fileSize;
+              recordingDurationSeconds = Math.floor((completedAt - startedAt) / 1000);
+              
+              console.log(`✅ Video recording uploaded successfully for vetter ${currentUser.id}`, {
+                url: recordingUrl,
+                fileSize: recordingFileSize,
+                duration: recordingDurationSeconds,
+              });
+              
+              // TODO: Update the vetting_sessions table with recording data
+              // This requires the actual session ID from the database
+              // For now, we'll store it in the session record
+            } else {
+              console.error('Failed to upload recording:', uploadResult.error);
+            }
+          }
+        } catch (error) {
+          console.error('Error stopping/uploading recording:', error);
+        } finally {
+          // Clean up recorder
+          vetterMediaRecorders.current.delete(currentUser.id);
+          vetterRecordingChunks.current.delete(currentUser.id);
+        }
+      }
+    }
     
     // Create vetting session record
     if (vettedPaper) {
@@ -4092,6 +4380,7 @@ function App() {
         annotations: [...annotations],
         checklistComments: new Map(checklistComments),
         status: 'completed',
+        recordingUrl, // Store recording URL in session record
       };
       
       // Store the session record
@@ -4111,7 +4400,7 @@ function App() {
       }
     }
     
-    // Stop camera stream for current user immediately
+    // Stop camera stream for current user immediately (recording already stopped above)
     if (currentUser?.id) {
       const stream = vetterCameraStreams.current.get(currentUser.id);
       if (stream) {
@@ -5478,7 +5767,7 @@ function App() {
           return (
             <div className="space-y-6">
               {/* Dashboard Label */}
-              <div className="flex items-center justify-between rounded-xl border-2 border-blue-600 bg-gradient-to-r from-blue-50 to-purple-50 p-4 shadow-md">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border-2 border-blue-600 bg-gradient-to-r from-blue-50 to-purple-50 p-4 shadow-md">
                 <div className="flex items-center gap-3">
                   <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 text-white">
                     <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -5494,112 +5783,193 @@ function App() {
                     </p>
                   </div>
                 </div>
-                <div className="rounded-full bg-blue-600 px-3 py-1 text-xs font-semibold text-white">
-                  {isChiefExaminer ? 'CHIEF EXAMINER' : 'WORKFLOW'}
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="rounded-full bg-blue-600 px-3 py-1 text-xs font-semibold text-white">
+                    {isChiefExaminer ? 'CHIEF EXAMINER' : 'WORKFLOW'}
+                  </div>
+                  {isChiefExaminer && (
+                    <div className="flex rounded-xl border-2 border-blue-300 bg-white/90 p-1 text-sm font-semibold shadow-md">
+                      {[
+                        { id: 'overview', label: 'Overview', icon: '📊' },
+                        { id: 'recordings', label: 'Vetting Recordings', icon: '🎥' },
+                      ].map((tab) => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => setChiefDashboardTab(tab.id as 'overview' | 'recordings')}
+                          className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all duration-200 ${
+                            chiefDashboardTab === tab.id
+                              ? 'bg-blue-600 text-white shadow-lg scale-105'
+                              : 'text-blue-700 hover:bg-blue-50 hover:scale-102'
+                          }`}
+                        >
+                          <span className="text-base">{tab.icon}</span>
+                          <span>{tab.label}</span>
+                          {tab.id === 'recordings' && recordingEntries.length > 0 && (
+                            <span className={`ml-1 rounded-full px-2 py-0.5 text-xs font-bold ${
+                              chiefDashboardTab === tab.id
+                                ? 'bg-white/20 text-white'
+                                : 'bg-blue-600 text-white'
+                            }`}>
+                              {recordingEntries.length}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <DashboardStat
-                  label="Workflow Stage"
-                  value={workflow.stage.replace(/-/g, ' ')}
-                  tone="blue"
+              {isChiefExaminer && chiefDashboardTab === 'recordings' ? (
+                <RecordingReviewPanel
+                  recordings={recordingEntries}
+                  contextLabel="Chief Examiner"
                 />
-                <DashboardStat label="Version Label" value={latestVersionLabel} />
-                <DashboardStat
-                  label="Timeline Entries"
-                  value={`${timelineEntries} update${timelineEntries === 1 ? '' : 's'}`}
-                />
-                <DashboardStat
-                  label="Annotations Logged"
-                  value={`${totalAnnotations}`}
-                />
-              </section>
-
-              <SectionCard
-                title="Operational Snapshot"
-                kicker="Next Action"
-                description="High-level summary of the moderation cycle and pending responsibilities."
-              >
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-sm shadow-md">
-                    <p className="text-xs uppercase tracking-wide text-blue-600 font-semibold">
-                      Outstanding Task
-                    </p>
-                    <p className="mt-2 text-base font-semibold text-blue-800">
-                      {outstandingAction}
-                    </p>
-                  </div>
-                  <div className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-sm shadow-md">
-                    <p className="text-xs uppercase tracking-wide text-blue-600 font-semibold">
-                      Acting Roles
-                    </p>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {roles.map((role) => (
-                        <RoleBadge key={`overview-${role}`} role={role} />
-                      ))}
+              ) : (
+                <>
+                  {/* Quick Access to Recordings for Chief Examiner */}
+                  {isChiefExaminer && (
+                    <div className="rounded-2xl border-2 border-indigo-200 bg-gradient-to-r from-indigo-50 via-purple-50 to-pink-50 p-5 shadow-lg">
+                      <div className="flex flex-wrap items-center justify-between gap-4">
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-md">
+                            <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            </svg>
+                          </div>
+                          <div>
+                            <h3 className="text-base font-bold text-indigo-900">Review Vetting Session Recordings</h3>
+                            <p className="text-sm text-indigo-700 mt-0.5">
+                              {recordingEntries.length > 0 
+                                ? `Access ${recordingEntries.length} recording(s) organized by year, semester, and course`
+                                : 'Video recordings will appear here after vetting sessions are completed'}
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setChiefDashboardTab('recordings')}
+                          className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 px-5 py-3 text-sm font-bold text-white shadow-md transition hover:from-indigo-700 hover:to-purple-700 hover:shadow-lg hover:scale-105"
+                        >
+                          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                          View Recordings
+                          {recordingEntries.length > 0 && (
+                            <span className="rounded-full bg-white/20 px-2 py-0.5 text-xs font-bold">
+                              {recordingEntries.length}
+                            </span>
+                          )}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                </div>
-              </SectionCard>
+                  )}
 
-              <SectionCard
-                title="Recent Activity"
-                kicker="Audit Trail"
-                description="Snapshot of the latest workflow events recorded in the timeline."
-              >
-                {recentTimeline.length === 0 ? (
-                  <p className="text-sm text-blue-700">
-                    No activity logged yet. Actions taken across the moderation lifecycle will appear here.
-                  </p>
-                ) : (
-                  <ul className="space-y-3">
-                    {recentTimeline.map((event) => (
-                      <li
-                        key={`overview-timeline-${event.id}`}
-                        className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-3 text-sm text-blue-900 shadow-md"
-                      >
-                        <p className="font-semibold text-blue-800">{event.actor}</p>
-                        <p className="text-blue-900">{event.message}</p>
-                        <div className="mt-1 flex flex-wrap items-center justify-between text-xs text-blue-600">
-                          <span>{event.stage}</span>
-                          <span>{formatTimestamp(event.timestamp)}</span>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </SectionCard>
+                  <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <DashboardStat
+                      label="Workflow Stage"
+                      value={workflow.stage.replace(/-/g, ' ')}
+                      tone="blue"
+                    />
+                    <DashboardStat label="Version Label" value={latestVersionLabel} />
+                    <DashboardStat
+                      label="Timeline Entries"
+                      value={`${timelineEntries} update${timelineEntries === 1 ? '' : 's'}`}
+                    />
+                    <DashboardStat
+                      label="Annotations Logged"
+                      value={`${totalAnnotations}`}
+                    />
+                  </section>
 
-              <SectionCard
-                title="Version Ledger Snapshot"
-                kicker="Secure History"
-                description="Latest published versions and ownership details."
-              >
-                {recentVersions.length === 0 ? (
-                  <p className="text-sm text-blue-700">
-                    No version history recorded yet. Once the workflow progresses, versions will be listed here.
-                  </p>
-                ) : (
-                  <ul className="space-y-3">
-                    {recentVersions.map((entry) => (
-                      <li
-                        key={`overview-version-${entry.id}`}
-                        className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-3 shadow-md"
-                      >
-                        <div className="flex items-center justify-between text-xs text-blue-700">
-                          <span className="font-semibold text-blue-800">
-                            {entry.versionLabel}
-                          </span>
-                          <span>{formatTimestamp(entry.timestamp)}</span>
+                  <SectionCard
+                    title="Operational Snapshot"
+                    kicker="Next Action"
+                    description="High-level summary of the moderation cycle and pending responsibilities."
+                  >
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-sm shadow-md">
+                        <p className="text-xs uppercase tracking-wide text-blue-600 font-semibold">
+                          Outstanding Task
+                        </p>
+                        <p className="mt-2 text-base font-semibold text-blue-800">
+                          {outstandingAction}
+                        </p>
+                      </div>
+                      <div className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 text-sm shadow-md">
+                        <p className="text-xs uppercase tracking-wide text-blue-600 font-semibold">
+                          Acting Roles
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {roles.map((role) => (
+                            <RoleBadge key={`overview-${role}`} role={role} />
+                          ))}
                         </div>
-                        <p className="mt-1 text-sm text-blue-900">{entry.notes}</p>
-                        <p className="mt-1 text-xs text-blue-600">Owner: {entry.actor}</p>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </SectionCard>
+                      </div>
+                    </div>
+                  </SectionCard>
+
+                  <SectionCard
+                    title="Recent Activity"
+                    kicker="Audit Trail"
+                    description="Snapshot of the latest workflow events recorded in the timeline."
+                  >
+                    {recentTimeline.length === 0 ? (
+                      <p className="text-sm text-blue-700">
+                        No activity logged yet. Actions taken across the moderation lifecycle will appear here.
+                      </p>
+                    ) : (
+                      <ul className="space-y-3">
+                        {recentTimeline.map((event) => (
+                          <li
+                            key={`overview-timeline-${event.id}`}
+                            className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-3 text-sm text-blue-900 shadow-md"
+                          >
+                            <p className="font-semibold text-blue-800">{event.actor}</p>
+                            <p className="text-blue-900">{event.message}</p>
+                            <div className="mt-1 flex flex-wrap items-center justify-between text-xs text-blue-600">
+                              <span>{event.stage}</span>
+                              <span>{formatTimestamp(event.timestamp)}</span>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </SectionCard>
+
+                  <SectionCard
+                    title="Version Ledger Snapshot"
+                    kicker="Secure History"
+                    description="Latest published versions and ownership details."
+                  >
+                    {recentVersions.length === 0 ? (
+                      <p className="text-sm text-blue-700">
+                        No version history recorded yet. Once the workflow progresses, versions will be listed here.
+                      </p>
+                    ) : (
+                      <ul className="space-y-3">
+                        {recentVersions.map((entry) => (
+                          <li
+                            key={`overview-version-${entry.id}`}
+                            className="rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-3 shadow-md"
+                          >
+                            <div className="flex items-center justify-between text-xs text-blue-700">
+                              <span className="font-semibold text-blue-800">
+                                {entry.versionLabel}
+                              </span>
+                              <span>{formatTimestamp(entry.timestamp)}</span>
+                            </div>
+                            <p className="mt-1 text-sm text-blue-900">{entry.notes}</p>
+                            <p className="mt-1 text-xs text-blue-600">Owner: {entry.actor}</p>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </SectionCard>
+                </>
+              )}
             </div>
           );
         },
@@ -5633,6 +6003,7 @@ function App() {
             <SuperAdminDashboard
               currentUserId={currentUser.id}
               isSuperAdmin={true}
+              recordingEntries={recordingEntries}
             />
           ),
         }
@@ -5792,6 +6163,7 @@ function App() {
               return newSet;
             });
           }}
+          recordingEntries={recordingEntries}
           onSetSetterDeadline={(active: boolean, duration: { days: number; hours: number; minutes: number }) => {
             setSetterDeadlineActive(active);
             if (active) {
@@ -9717,6 +10089,7 @@ interface ChiefExaminerConsoleProps {
   restrictedVetters?: Set<string>;
   onReactivateVetter?: (vetterId: string) => void;
   sectionId?: string;
+  recordingEntries?: RecordingEntry[];
 }
 
 interface CountdownPillProps {
@@ -9790,6 +10163,7 @@ function ChiefExaminerConsole({
   restrictedVetters = new Set(),
   onReactivateVetter,
   sectionId,
+  recordingEntries = [],
 }: ChiefExaminerConsoleProps) {
   const [awardUserId, setAwardUserId] = useState('');
   const [selectedCourseUnit, setSelectedCourseUnit] = useState('');
@@ -10752,6 +11126,18 @@ function ChiefExaminerConsole({
             </div>
           )}
         </div>
+      </SectionCard>
+
+      {/* Vetting Session Recordings */}
+      <SectionCard
+        title="Vetting Session Recordings"
+        kicker="Audit & Review"
+        description="Review video recordings from completed vetting sessions organized by academic calendar."
+      >
+        <RecordingReviewPanel
+          recordings={recordingEntries}
+          contextLabel="Chief Examiner"
+        />
       </SectionCard>
 
       {/* Similarity Detection */}

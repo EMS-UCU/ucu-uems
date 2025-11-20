@@ -4,15 +4,19 @@ import type { DatabaseUser, ExamPaper } from '../lib/supabase';
 import PrivilegeElevationPanel from './PrivilegeElevationPanel';
 import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { motion } from 'framer-motion';
+import RecordingReviewPanel from './RecordingReviewPanel';
+import type { RecordingEntry } from '../types/recordings';
 
 interface SuperAdminDashboardProps {
   currentUserId: string;
   isSuperAdmin: boolean;
+  recordingEntries: RecordingEntry[];
 }
 
 export default function SuperAdminDashboard({
   currentUserId,
   isSuperAdmin,
+  recordingEntries,
 }: SuperAdminDashboardProps) {
   const [users, setUsers] = useState<DatabaseUser[]>([]);
   const [examPapers, setExamPapers] = useState<ExamPaper[]>([]);
@@ -25,6 +29,7 @@ export default function SuperAdminDashboard({
   });
   const [loading, setLoading] = useState(true);
   const [hoveredCard, setHoveredCard] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'overview' | 'recordings'>('overview');
 
   useEffect(() => {
     loadData();
@@ -175,6 +180,42 @@ export default function SuperAdminDashboard({
 
   return (
     <div className="space-y-6 bg-white p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-blue-100 bg-gradient-to-r from-blue-50 to-white px-4 py-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
+            Super Admin Command
+          </p>
+          <h2 className="text-xl font-bold text-blue-900">National Moderation Console</h2>
+          <p className="text-xs text-blue-600">
+            Switch between operational insights and recording archives.
+          </p>
+        </div>
+        <div className="flex rounded-full border border-blue-200 bg-white/80 p-0.5 text-xs font-semibold text-blue-700 shadow-sm">
+          {[
+            { id: 'overview', label: 'Overview' },
+            { id: 'recordings', label: 'Recordings' },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id as 'overview' | 'recordings')}
+              className={`px-3 py-1.5 rounded-full transition ${
+                activeTab === tab.id ? 'bg-blue-600 text-white' : 'hover:bg-blue-50'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {activeTab === 'recordings' ? (
+        <RecordingReviewPanel
+          recordings={recordingEntries}
+          contextLabel="Super Admin"
+        />
+      ) : (
+        <>
 
       {/* Stats Overview with Smooth Hover Cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
@@ -853,6 +894,8 @@ export default function SuperAdminDashboard({
           )}
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }

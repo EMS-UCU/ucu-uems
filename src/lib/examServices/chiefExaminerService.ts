@@ -1,8 +1,9 @@
 import { supabase } from '../supabase';
-import type { ExamPaper } from '../supabase';
+import type { ExamPaper, VettingSession } from '../supabase';
 import { addWorkflowEvent } from './workflowService';
 import { createNotification } from './notificationService';
-import { createVettingSession, assignVetters } from './vettingService';
+import { createVettingSession, assignVetters, getVettingSessionsWithRecordings, getVettingSessionWithRecording } from './vettingService';
+import { getRecordingSignedUrl } from './recordingService';
 
 // Appoint vetters for an exam (Chief Examiner)
 export async function appointVetters(
@@ -195,6 +196,50 @@ export async function getChiefExaminerExams(chiefExaminerId: string): Promise<Ex
   } catch (error) {
     console.error('Error fetching chief examiner exams:', error);
     return [];
+  }
+}
+
+// Get vetting session recordings for Chief Examiner
+export async function getVettingRecordings(
+  chiefExaminerId: string,
+  examPaperId?: string
+): Promise<VettingSession[]> {
+  try {
+    return await getVettingSessionsWithRecordings(chiefExaminerId, examPaperId);
+  } catch (error) {
+    console.error('Error fetching vetting recordings:', error);
+    return [];
+  }
+}
+
+// Get a specific recording URL (with signed URL for private bucket)
+export async function getRecordingUrl(
+  sessionId: string,
+  useSignedUrl: boolean = true
+): Promise<{ url?: string; error?: string }> {
+  try {
+    const session = await getVettingSessionWithRecording(sessionId);
+    
+    if (!session || !session.recording_url) {
+      return { error: 'Recording not found for this session' };
+    }
+
+    // If bucket is public, return the public URL directly
+    if (!useSignedUrl || !session.recording_file_path) {
+      return { url: session.recording_url };
+    }
+
+    // For private bucket, get a signed URL
+    const signedUrlResult = await getRecordingSignedUrl(session.recording_file_path, 3600); // 1 hour expiry
+    
+    if (signedUrlResult.error) {
+      // Fallback to public URL if signed URL fails
+      return { url: session.recording_url };
+    }
+
+    return { url: signedUrlResult.url };
+  } catch (error: any) {
+    return { error: error.message || 'Failed to get recording URL' };
   }
 }
 

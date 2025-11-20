@@ -137,15 +137,35 @@ export async function addVettingComment(
 export async function completeVettingSession(
   sessionId: string,
   vetterId: string,
-  scannedFileUrl: string
+  scannedFileUrl: string,
+  recordingData?: {
+    recordingUrl: string;
+    recordingFilePath: string;
+    recordingFileSize: number;
+    recordingDurationSeconds: number;
+    recordingStartedAt: string;
+    recordingCompletedAt: string;
+  }
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    const updateData: any = {
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+    };
+
+    // Add recording data if provided
+    if (recordingData) {
+      updateData.recording_url = recordingData.recordingUrl;
+      updateData.recording_file_path = recordingData.recordingFilePath;
+      updateData.recording_file_size = recordingData.recordingFileSize;
+      updateData.recording_duration_seconds = recordingData.recordingDurationSeconds;
+      updateData.recording_started_at = recordingData.recordingStartedAt;
+      updateData.recording_completed_at = recordingData.recordingCompletedAt;
+    }
+
     const { error: sessionError } = await supabase
       .from('vetting_sessions')
-      .update({
-        status: 'completed',
-        completed_at: new Date().toISOString(),
-      })
+      .update(updateData)
       .eq('id', sessionId);
 
     if (sessionError) {
@@ -253,6 +273,63 @@ export async function getVettingComments(sessionId: string): Promise<VettingComm
   } catch (error) {
     console.error('Error fetching vetting comments:', error);
     return [];
+  }
+}
+
+// Get vetting sessions with recordings for Chief Examiner
+export async function getVettingSessionsWithRecordings(
+  chiefExaminerId?: string,
+  examPaperId?: string
+): Promise<VettingSession[]> {
+  try {
+    let query = supabase
+      .from('vetting_sessions')
+      .select('*')
+      .not('recording_url', 'is', null)
+      .order('created_at', { ascending: false });
+
+    if (chiefExaminerId) {
+      query = query.eq('chief_examiner_id', chiefExaminerId);
+    }
+
+    if (examPaperId) {
+      query = query.eq('exam_paper_id', examPaperId);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('Error fetching sessions with recordings:', error);
+      return [];
+    }
+
+    return data || [];
+  } catch (error) {
+    console.error('Error fetching sessions with recordings:', error);
+    return [];
+  }
+}
+
+// Get a specific vetting session with recording
+export async function getVettingSessionWithRecording(
+  sessionId: string
+): Promise<VettingSession | null> {
+  try {
+    const { data, error } = await supabase
+      .from('vetting_sessions')
+      .select('*')
+      .eq('id', sessionId)
+      .single();
+
+    if (error) {
+      console.error('Error fetching session with recording:', error);
+      return null;
+    }
+
+    return data;
+  } catch (error) {
+    console.error('Error fetching session with recording:', error);
+    return null;
   }
 }
 

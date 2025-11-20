@@ -118,6 +118,12 @@ export interface VettingSession {
   started_at?: string;
   completed_at?: string;
   expires_at?: string;
+  recording_url?: string;
+  recording_file_path?: string;
+  recording_file_size?: number;
+  recording_duration_seconds?: number;
+  recording_started_at?: string;
+  recording_completed_at?: string;
   created_at: string;
 }
 
