@@ -13699,14 +13699,29 @@ function RepositoryPapersPanel({ repositoryPapers, users }: RepositoryPapersPane
                       <button
                         type="button"
                         className="flex-1 px-3 py-2 rounded-lg bg-purple-500 hover:bg-purple-600 text-xs font-medium text-white transition"
-                        onClick={(e) => {
+                        onClick={async (e) => {
                           e.stopPropagation();
-                          const blob = new Blob([paper.content], {
-                            type: 'application/pdf',
-                          });
-                          const url = URL.createObjectURL(blob);
-                          window.open(url, '_blank');
-                          setTimeout(() => URL.revokeObjectURL(url), 100);
+                          try {
+                            // paper.content contains the file URL/path from Supabase
+                            const fileUrl = paper.content;
+                            if (!fileUrl) {
+                              alert('PDF file URL not available.');
+                              return;
+                            }
+
+                            // Resolve the URL using the helper function
+                            const resolvedUrl = resolvePaperUrl(fileUrl);
+                            if (!resolvedUrl) {
+                              alert('Failed to resolve PDF file URL.');
+                              return;
+                            }
+
+                            // Open the PDF in a new tab
+                            window.open(resolvedUrl, '_blank');
+                          } catch (error) {
+                            console.error('Error opening PDF:', error);
+                            alert('Failed to open PDF document. Please try again.');
+                          }
                         }}
                       >
                         View PDF
