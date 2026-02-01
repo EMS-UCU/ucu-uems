@@ -11,12 +11,15 @@ interface SuperAdminDashboardProps {
   currentUserId: string;
   isSuperAdmin: boolean;
   recordingEntries: RecordingEntry[];
+  /** Called when privilege elevation/revoke succeeds - use to refresh App-level users */
+  onDataChange?: () => void | Promise<void>;
 }
 
 export default function SuperAdminDashboard({
   currentUserId,
   isSuperAdmin,
   recordingEntries,
+  onDataChange,
 }: SuperAdminDashboardProps) {
   const [users, setUsers] = useState<DatabaseUser[]>([]);
   const [examPapers, setExamPapers] = useState<ExamPaper[]>([]);
@@ -828,6 +831,10 @@ export default function SuperAdminDashboard({
         currentUserId={currentUserId}
         isSuperAdmin={isSuperAdmin}
         isChiefExaminer={false}
+        onPrivilegeChange={async () => {
+          await loadData();
+          onDataChange?.();
+        }}
       />
 
       {/* Recent Exam Papers */}

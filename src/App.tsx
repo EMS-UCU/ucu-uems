@@ -2169,6 +2169,23 @@ function App() {
     loadUsersFromSupabase();
   }, []);
 
+  // Refresh users from Supabase (used when privilege elevation/revoke succeeds for real-time dashboard updates)
+  const refreshUsers = useCallback(async () => {
+    try {
+      const supabaseUsers = await getAllUsers();
+      if (supabaseUsers.length > 0) {
+        setUsers(supabaseUsers);
+        try {
+          localStorage.setItem('ucu-moderation-users', JSON.stringify(supabaseUsers));
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch (error) {
+      console.error('Error refreshing users:', error);
+    }
+  }, []);
+
   // Load persisted notifications for the signed-in user from Supabase with real-time subscription
   useEffect(() => {
     const loadNotifications = async () => {
@@ -6004,6 +6021,7 @@ function App() {
               currentUserId={currentUser.id}
               isSuperAdmin={true}
               recordingEntries={recordingEntries}
+              onDataChange={refreshUsers}
             />
           ),
         }
@@ -6038,6 +6056,7 @@ function App() {
               currentUserId={currentUser!.id}
               isSuperAdmin={true}
               isChiefExaminer={false}
+              onPrivilegeChange={refreshUsers}
             />
           ),
         },
@@ -6529,6 +6548,7 @@ function App() {
               currentUserId={currentUser!.id}
               isSuperAdmin={false}
               isChiefExaminer={true}
+              onPrivilegeChange={refreshUsers}
             />
           ),
         }

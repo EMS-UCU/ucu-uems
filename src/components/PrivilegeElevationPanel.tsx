@@ -7,12 +7,15 @@ interface PrivilegeElevationPanelProps {
   currentUserId: string;
   isSuperAdmin: boolean;
   isChiefExaminer: boolean;
+  /** Called when elevation or revoke succeeds - use to refresh parent dashboards in real-time */
+  onPrivilegeChange?: () => void | Promise<void>;
 }
 
 export default function PrivilegeElevationPanel({
   currentUserId,
   isSuperAdmin,
   isChiefExaminer,
+  onPrivilegeChange,
 }: PrivilegeElevationPanelProps) {
   const [lecturers, setLecturers] = useState<DatabaseUser[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string>('');
@@ -163,10 +166,8 @@ export default function PrivilegeElevationPanel({
       if (result.success) {
         setMessage({ type: 'success', text: 'Successfully promoted lecturer to Chief Examiner' });
         
-        // Get the promoted lecturer details for optimistic update
+        // Optimistic update: add the new assignment immediately so card appears in real-time
         const promotedLecturer = lecturers.find(l => l.id === selectedUserId);
-        
-        // Optimistically add the new assignment immediately so card appears right away
         if (promotedLecturer) {
           const newAssignment = {
             id: `temp-${Date.now()}`,
@@ -175,6 +176,7 @@ export default function PrivilegeElevationPanel({
             role_granted: 'Chief Examiner',
             is_active: true,
             created_at: new Date().toISOString(),
+            granted_at: new Date().toISOString(),
             metadata: {
               category: category as 'Undergraduate' | 'Postgraduate',
               faculty,
@@ -188,25 +190,18 @@ export default function PrivilegeElevationPanel({
               email: promotedLecturer.email || '',
             }
           };
-          
-          // Add to state immediately and track it as optimistic
           optimisticUpdatesRef.current.set(selectedUserId, newAssignment);
           setSavedAssignments(prev => [newAssignment, ...prev]);
         }
         
-        await loadLecturers();
+        // Refresh data (lecturers list + assignments) - runs in parallel for faster UI update
+        await Promise.all([loadLecturers(), loadSavedAssignments()]);
         
-        // Reload assignments from database to get the real data and replace optimistic update
-        await loadSavedAssignments();
+        // One follow-up refresh to sync with DB (handles replication delay)
+        setTimeout(() => loadSavedAssignments(), 300);
         
-        // Retry a couple more times to ensure we have the latest data
-        setTimeout(async () => {
-          await loadSavedAssignments();
-        }, 500);
-        
-        setTimeout(async () => {
-          await loadSavedAssignments();
-        }, 1500);
+        // Notify parent dashboards to refresh in real-time
+        onPrivilegeChange?.();
         
         setSelectedUserId('');
         // Reset form fields
@@ -379,6 +374,8 @@ export default function PrivilegeElevationPanel({
         setMessage({ type: 'success', text: `Successfully revoked ${role} role` });
         await loadLecturers();
         await loadSavedAssignments();
+        // Notify parent dashboards to refresh in real-time
+        onPrivilegeChange?.();
       } else {
         setMessage({ type: 'error', text: result.error || 'Failed to revoke role' });
       }
