@@ -22,12 +22,12 @@ import {
   Cell,
 } from 'recharts';
 import HomePage from './HomePage';
-import { authenticateUser, getAllUsers } from './lib/auth';
+import { authenticateUser, getAllUsers, getVetterUserIds, getChiefExaminerUserIds } from './lib/auth';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
 import LecturerDashboard from './components/LecturerDashboard';
 import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 import { supabase } from './lib/supabase';
-import { elevateToChiefExaminer, appointRole } from './lib/privilegeElevation';
+import { elevateToChiefExaminer, appointRole, revokeRole } from './lib/privilegeElevation';
 import { uploadVettingRecording } from './lib/examServices/recordingService';
 import { getVettingRecordings } from './lib/examServices/chiefExaminerService';
 import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead } from './lib/examServices/notificationService';
@@ -1293,6 +1293,8 @@ function App() {
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const shownVettingStartedToastIds = useRef<Set<string>>(new Set());
+  const hasWarnedEmptyVetterForUserId = useRef<string | null>(null);
 
   useEffect(() => {
     if (!activeToast) {
@@ -2171,13 +2173,24 @@ function App() {
 
   // Load persisted notifications for the signed-in user from Supabase with real-time subscription
   useEffect(() => {
+    // On login (or user change), clear toast-seen set so vetter always sees "Vetting Session Started" / "Vetter re-activated" toast and can join
+    if (currentUser) {
+      shownVettingStartedToastIds.current.clear();
+    }
+
     const loadNotifications = async () => {
       if (!currentUser) {
+        hasWarnedEmptyVetterForUserId.current = null;
         setNotifications([]);
         return;
       }
       try {
         const dbNotifications = await getUserNotifications(currentUser.id);
+        const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
+        if (isVetter && dbNotifications.length === 0 && hasWarnedEmptyVetterForUserId.current !== currentUser.id) {
+          hasWarnedEmptyVetterForUserId.current = currentUser.id;
+          console.warn('🔔 Vetter notifications empty. User id:', currentUser.id, '- Check Supabase: 1) Run notifications_table_and_rls.sql 2) Run seed_all_notification_messages.sql (use user_profiles) 3) Chief must Start Session after SQL 4) user_profiles.roles must include "Vetter" for this user.');
+        }
         const mapped: AppNotification[] = dbNotifications.map((n) => ({
           id: n.id,
           message: n.message,
@@ -2186,29 +2199,47 @@ function App() {
           read: n.is_read,
           type: n.type,
         }));
-        setNotifications(mapped);
-        
-        // Check for unread role assignment notifications and show toast
-        const roleAssignmentNotifications = mapped.filter(
-          (n) => 
-            !n.read && 
-            n.type === 'success' && 
-            (n.title?.includes('Role Assigned') || n.title?.includes('Chief Examiner'))
+        // Merge with existing state so we don't wipe local notifications (e.g. Chief's "Vetting Session Started" toast) when polling runs
+        setNotifications((prev) => {
+          const dbIds = new Set(mapped.map((m) => m.id));
+          const localOnly = prev.filter((n) => !dbIds.has(n.id));
+          const merged = [...localOnly, ...mapped];
+          return merged
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+            .slice(0, 50);
+        });
+
+        // Show toast ONLY for session-specific notifications (Chief started / vetter re-activated) - not generic role/privilege alerts
+        const toShow = mapped.filter(
+          (n) => !n.read && (n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated')
         );
-        
-        if (roleAssignmentNotifications.length > 0) {
-          // Show the most recent role assignment notification
-          const mostRecent = roleAssignmentNotifications.sort(
+        if (toShow.length > 0) {
+          const mostRecent = toShow.sort(
             (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
           )[0];
-          
-          setActiveToast(mostRecent);
-          // Auto-hide toast after 8 seconds for role assignments
-          setTimeout(() => {
-            setActiveToast((current) =>
-              current && current.id === mostRecent.id ? null : current
-            );
-          }, 8000);
+          if (!shownVettingStartedToastIds.current.has(mostRecent.id)) {
+            shownVettingStartedToastIds.current.add(mostRecent.id);
+            setActiveToast(mostRecent);
+            setTimeout(() => {
+              setActiveToast((current) =>
+                current && current.id === mostRecent.id ? null : current
+              );
+            }, 8000);
+          }
+          // Enable "Start Session" for vetters when they have "Vetting Session Started" or "Vetter re-activated" in their list
+          const isVetterUser = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
+          if (isVetterUser && (mostRecent.title === 'Vetting Session Started' || mostRecent.title === 'Vetter re-activated')) {
+            setVettingSession((prev) => ({ ...prev, active: true }));
+            // When vetter receives "Vetter re-activated", clear their local restriction so they see Start Session (not "Restricted Access")
+            if (mostRecent.title === 'Vetter re-activated' && currentUser?.id) {
+              setRestrictedVetters((prev) => {
+                const next = new Set(prev);
+                next.delete(currentUser.id);
+                localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+                return next;
+              });
+            }
+          }
         }
       } catch (error) {
         console.error('Error loading user notifications:', error);
@@ -2250,9 +2281,25 @@ function App() {
                 type: newNotification.type || 'info',
               };
               setNotifications((prev) => [mapped, ...prev].slice(0, 50));
-              // Show toast for new notification
+              // Show toast for new notification (so vetter sees "Vetting Session Started" / "Vetter re-activated" same as session-end)
+              if (mapped.title === 'Vetting Session Started' || mapped.title === 'Vetter re-activated') {
+                shownVettingStartedToastIds.current.add(mapped.id);
+                // Enable "Start Session" for vetters when they receive the notification
+                const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
+                if (isVetter) {
+                  setVettingSession((prev) => ({ ...prev, active: true }));
+                  // When vetter receives "Vetter re-activated", clear their local restriction so they see Start Session
+                  if (mapped.title === 'Vetter re-activated' && currentUser?.id) {
+                    setRestrictedVetters((prev) => {
+                      const next = new Set(prev);
+                      next.delete(currentUser.id);
+                      localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+                      return next;
+                    });
+                  }
+                }
+              }
               setActiveToast(mapped);
-              // Auto-hide toast after 5 seconds
               setTimeout(() => {
                 setActiveToast((current) =>
                   current && current.id === mapped.id ? null : current
@@ -2314,6 +2361,193 @@ function App() {
       };
     }
   }, [currentUser]);
+
+  // Vetters: fetch on login and poll every 3s so they see "Vetting Session Started" within 3s of Chief starting (no dependency on session active)
+  useEffect(() => {
+    const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
+    if (!currentUser?.id || !isVetter) return;
+    let hasShownToastThisSession = false;
+    const showVettingToastIfUnread = (mapped: AppNotification[]) => {
+      if (hasShownToastThisSession) return;
+      const unread = mapped.filter((n) => !n.read && (n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated'));
+      if (unread.length > 0) {
+        hasShownToastThisSession = true;
+        const mostRecent = unread.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+        setActiveToast(mostRecent);
+        setTimeout(() => setActiveToast((c) => (c?.id === mostRecent.id ? null : c)), 8000);
+      }
+    };
+    const refetch = async () => {
+      try {
+        const dbNotifications = await getUserNotifications(currentUser.id);
+        if (dbNotifications.length === 0 && hasWarnedEmptyVetterForUserId.current !== currentUser.id) {
+          hasWarnedEmptyVetterForUserId.current = currentUser.id;
+          console.warn('🔔 Vetter poll: 0 notifications for user', currentUser.id, '- Run seed_all_notification_messages.sql in Supabase (use user_profiles). Chief must Start Session after SQL.');
+        }
+        const mapped: AppNotification[] = dbNotifications.map((n) => ({
+          id: n.id,
+          message: n.message,
+          title: n.title,
+          timestamp: n.created_at,
+          read: n.is_read,
+          type: n.type,
+        }));
+        setNotifications((prev) => {
+          const dbIds = new Set(mapped.map((m) => m.id));
+          const localOnly = prev.filter((n) => !dbIds.has(n.id));
+          return [...localOnly, ...mapped]
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+            .slice(0, 50);
+        });
+        showVettingToastIfUnread(mapped);
+        // Enable "Start Session" for vetters when they have "Vetting Session Started" or "Vetter re-activated" from DB
+        const hasStarted = mapped.some((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
+        const hasReActivated = mapped.some((n) => n.title === 'Vetter re-activated');
+        if (hasStarted) {
+          setVettingSession((prev) => ({ ...prev, active: true }));
+          if (hasReActivated && currentUser?.id) {
+            setRestrictedVetters((prev) => {
+              const next = new Set(prev);
+              next.delete(currentUser.id);
+              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+              return next;
+            });
+          }
+        }
+      } catch (e) {
+        console.error('Vetter notification refetch:', e);
+      }
+    };
+    refetch();
+    const interval = setInterval(refetch, 3000);
+    return () => clearInterval(interval);
+  }, [currentUser?.id, currentUser?.roles]);
+
+  // Vetters: refetch notifications when window gains focus so they see "Vetting Session Started" immediately after Chief starts
+  useEffect(() => {
+    const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
+    if (!currentUser?.id || !isVetter) return;
+    const onFocus = () => {
+      getUserNotifications(currentUser.id).then((dbNotifications) => {
+        const mapped: AppNotification[] = dbNotifications.map((n) => ({
+          id: n.id,
+          message: n.message,
+          title: n.title,
+          timestamp: n.created_at,
+          read: n.is_read,
+          type: n.type,
+        }));
+        setNotifications((prev) => {
+          const dbIds = new Set(mapped.map((m) => m.id));
+          const localOnly = prev.filter((n) => !dbIds.has(n.id));
+          return [...localOnly, ...mapped]
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+            .slice(0, 50);
+        });
+        const hasStarted = mapped.some((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
+        const hasReActivated = mapped.some((n) => n.title === 'Vetter re-activated');
+        if (hasStarted) {
+          setVettingSession((prev) => ({ ...prev, active: true }));
+          if (hasReActivated && currentUser?.id) {
+            setRestrictedVetters((prev) => {
+              const next = new Set(prev);
+              next.delete(currentUser.id);
+              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+              return next;
+            });
+          }
+          const startNotif = mapped.find((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
+          if (startNotif && !shownVettingStartedToastIds.current.has(startNotif.id)) {
+            shownVettingStartedToastIds.current.add(startNotif.id);
+            setActiveToast(startNotif);
+            setTimeout(() => setActiveToast((c) => (c?.id === startNotif.id ? null : c)), 5000);
+          }
+        }
+      }).catch((e) => console.error('Vetter focus refetch:', e));
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [currentUser?.id, currentUser?.roles]);
+
+  // When vetter opens the Vetting & Annotations page, refetch notifications immediately so they see "Vetting Session Started" right away
+  useEffect(() => {
+    const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
+    if (!currentUser?.id || !isVetter || activePanelId !== 'vetting-suite') return;
+    const refetch = async () => {
+      try {
+        const dbNotifications = await getUserNotifications(currentUser.id);
+        const mapped: AppNotification[] = dbNotifications.map((n) => ({
+          id: n.id,
+          message: n.message,
+          title: n.title,
+          timestamp: n.created_at,
+          read: n.is_read,
+          type: n.type,
+        }));
+        setNotifications((prev) => {
+          const dbIds = new Set(mapped.map((m) => m.id));
+          const localOnly = prev.filter((n) => !dbIds.has(n.id));
+          return [...localOnly, ...mapped]
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+            .slice(0, 50);
+        });
+        const unread = mapped.filter((n) => !n.read && (n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated'));
+        const mostRecent = unread.length > 0 ? unread.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0] : null;
+        if (mostRecent && !shownVettingStartedToastIds.current.has(mostRecent.id)) {
+          shownVettingStartedToastIds.current.add(mostRecent.id);
+          setActiveToast(mostRecent);
+          setTimeout(() => setActiveToast((c) => (c?.id === mostRecent.id ? null : c)), 8000);
+        }
+        // Enable "Start Session" when vetter has "Vetting Session Started" or "Vetter re-activated" from app (Chief started / re-activated)
+        const hasStarted = mapped.some((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
+        const hasReActivated = mapped.some((n) => n.title === 'Vetter re-activated');
+        if (hasStarted) {
+          setVettingSession((prev) => ({ ...prev, active: true }));
+          if (hasReActivated && currentUser?.id) {
+            setRestrictedVetters((prev) => {
+              const next = new Set(prev);
+              next.delete(currentUser.id);
+              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+              return next;
+            });
+          }
+        }
+      } catch (e) {
+        console.error('Vetter notifications on Vetting page:', e);
+      }
+    };
+    refetch();
+  }, [currentUser?.id, currentUser?.roles, activePanelId]);
+
+  // When vetter is on the app and session is active, keep polling every 5s so they stay in sync
+  useEffect(() => {
+    const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
+    if (!currentUser || !isVetter || !vettingSession.active) return;
+    const refetch = async () => {
+      try {
+        const dbNotifications = await getUserNotifications(currentUser.id);
+        const mapped: AppNotification[] = dbNotifications.map((n) => ({
+          id: n.id,
+          message: n.message,
+          title: n.title,
+          timestamp: n.created_at,
+          read: n.is_read,
+          type: n.type,
+        }));
+        setNotifications((prev) => {
+          const byId = new Map(prev.map((n) => [n.id, n]));
+          mapped.forEach((n) => byId.set(n.id, n));
+          return Array.from(byId.values()).sort(
+            (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+          );
+        });
+      } catch (e) {
+        console.error('Vetter notification refetch:', e);
+      }
+    };
+    const interval = setInterval(refetch, 5000);
+    return () => clearInterval(interval);
+  }, [currentUser?.id, currentUser?.roles, vettingSession.active]);
 
   // Persist users to localStorage whenever they change (as backup)
   useEffect(() => {
@@ -3285,14 +3519,14 @@ function App() {
 
       pushWorkflowEvent(message, actor);
 
-      // Create a notification for the Chief Examiner (current user) to see in their bell
+      // Create a notification for the Chief Examiner (current user) to see in their bell - same style as session expired
       const notification: AppNotification = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         message,
         timestamp: new Date().toISOString(),
         read: false,
-        title: 'Role Assignment Successful',
-        type: 'success',
+        title: 'Privilege Elevated',
+        type: 'warning',
       };
 
       // Show toast + local bell update for the current user (Chief Examiner)
@@ -3310,21 +3544,22 @@ function App() {
       }, 5000);
   };
 
-  const handleUnassignRole = (userId: string, role: Role) => {
+  const handleUnassignRole = async (userId: string, role: Role) => {
     const actor = currentUser?.name ?? 'Unknown';
-    let unassigned = false;
+    const target = users.find((user) => user.id === userId);
+    if (!target || !target.roles.includes(role)) return;
+
+    // Persist revocation in DB and send notification to the target user (same style as session expired)
+    const dbResult = await revokeRole(userId, role, actor, currentUser?.id);
+    if (!dbResult.success) {
+      console.error('Error revoking role in database:', dbResult.error);
+    }
+
     setUsers((prev) => {
       const updated = prev.map((user) => {
-        if (user.id !== userId) {
-          return user;
-        }
-        if (!user.roles.includes(role)) {
-          return user;
-        }
-        unassigned = true;
+        if (user.id !== userId || !user.roles.includes(role)) return user;
         return { ...user, roles: user.roles.filter((r) => r !== role) };
       });
-      // Persist immediately
       try {
         localStorage.setItem('ucu-moderation-users', JSON.stringify(updated));
       } catch (error) {
@@ -3333,15 +3568,25 @@ function App() {
       return updated;
     });
 
-    if (unassigned) {
-      const target = users.find((user) => user.id === userId);
-      if (target) {
-        pushWorkflowEvent(
-          `${actor} removed the ${role} role from ${target.name}.`,
-          actor
-        );
-      }
-    }
+    pushWorkflowEvent(
+      `${actor} removed the ${role} role from ${target.name}.`,
+      actor
+    );
+
+    // Show toast for Chief Examiner (same style as vetting session expired)
+    const notification: AppNotification = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      message: `The ${role} role has been removed from ${target.name}. They have been notified.`,
+      timestamp: new Date().toISOString(),
+      read: false,
+      title: 'Privilege Revoked',
+      type: 'warning',
+    };
+    setNotifications((prev) => [notification, ...prev].slice(0, 20));
+    setActiveToast(notification);
+    setTimeout(() => {
+      setActiveToast((current) => (current && current.id === notification.id ? null : current));
+    }, 5000);
   };
 
   const handleToggleDeadlines = (nextValue: boolean) => {
@@ -3806,6 +4051,51 @@ function App() {
     );
   };
 
+  const handleCheckForSession = useCallback(async () => {
+    if (!currentUser?.id) return;
+    const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
+    if (!isVetter) return;
+    try {
+      const dbNotifications = await getUserNotifications(currentUser.id);
+      const mapped: AppNotification[] = dbNotifications.map((n) => ({
+        id: n.id,
+        message: n.message,
+        title: n.title,
+        timestamp: n.created_at,
+        read: n.is_read,
+        type: n.type,
+      }));
+      setNotifications((prev) => {
+        const dbIds = new Set(mapped.map((m) => m.id));
+        const localOnly = prev.filter((n) => !dbIds.has(n.id));
+        return [...localOnly, ...mapped]
+          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+          .slice(0, 50);
+      });
+      const hasStarted = mapped.some((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
+      const hasReActivated = mapped.some((n) => n.title === 'Vetter re-activated');
+      if (hasStarted) {
+        setVettingSession((prev) => ({ ...prev, active: true }));
+        if (hasReActivated && currentUser?.id) {
+          setRestrictedVetters((prev) => {
+            const next = new Set(prev);
+            next.delete(currentUser.id);
+            localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+            return next;
+          });
+        }
+        const startNotif = mapped.find((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
+        if (startNotif && !shownVettingStartedToastIds.current.has(startNotif.id)) {
+          shownVettingStartedToastIds.current.add(startNotif.id);
+          setActiveToast(startNotif);
+          setTimeout(() => setActiveToast((c) => (c?.id === startNotif.id ? null : c)), 5000);
+        }
+      }
+    } catch (e) {
+      console.error('Check for session:', e);
+    }
+  }, [currentUser?.id, currentUser?.roles]);
+
   const handleStartVetting = async (minutes: number) => {
     console.log('handleStartVetting called with minutes:', minutes);
     console.log('Current state:', {
@@ -3870,20 +4160,61 @@ function App() {
         stage: 'Vetting in Progress',
       }));
 
-      // Notify all vetters that vetting session has started
+      // Notify all vetters – always use DB (getVetterUserIds) as source of truth so vetters are actually notified
       const vettingMessage = `Chief Examiner ${actor} started a vetting session. You can now join by clicking "Start Session" and enabling your camera.`;
-      users
-        .filter((u) => u.roles.includes('Vetter'))
-        .forEach((vetter) => {
-          if (vetter.id) {
-            void createNotification({
-              user_id: vetter.id,
-              title: 'Vetting Session Started',
-              message: vettingMessage,
-              type: 'info',
-            });
-          }
+      const dbVetters = await getVetterUserIds();
+      const inMemoryVetters = users.filter((u) => u.roles?.includes('Vetter') && u.id);
+      const dbIds = new Set(dbVetters.map((v) => v.id));
+      const extraFromMemory = inMemoryVetters.filter((u) => !dbIds.has(u.id)).map((u) => ({ id: u.id, name: u.name }));
+      const vetterList = dbVetters.length > 0 ? dbVetters : extraFromMemory;
+      const vetterCount = vetterList.length;
+      let notified = 0;
+      let failed = 0;
+      for (const vetter of vetterList) {
+        const result = await createNotification({
+          user_id: vetter.id,
+          title: 'Vetting Session Started',
+          message: vettingMessage,
+          type: 'warning',
         });
+        if (result.success) {
+          notified += 1;
+          console.log('✅ Vetting notification sent to:', vetter.name, vetter.id);
+        } else {
+          failed += 1;
+          console.error('❌ Failed to notify vetter:', vetter.name, vetter.id, result.error);
+        }
+      }
+      if (vetterCount === 0) {
+        console.warn('⚠️ No vetters found. Ensure user_profiles has users with role "Vetter" (case-insensitive).');
+      } else if (failed > 0) {
+        console.warn(`📬 Vetting: ${notified} sent, ${failed} failed. If vetters still do not receive notifications, run notifications_table_and_rls.sql in Supabase SQL Editor (RLS may be blocking INSERT).`);
+        console.log(`📬 Vetting session notifications: ${notified} sent, ${failed} failed of ${vetterCount} vetter(s).`);
+      } else {
+        console.log(`📬 Vetting session notifications: ${notified} sent to vetter(s).`);
+      }
+
+      // Persist notification for the Chief Examiner so it appears in the bell and can be read from there (real-time will add it to state and show toast)
+      if (currentUser?.id) {
+        void createNotification({
+          user_id: currentUser.id,
+          title: 'Vetting Session Started',
+          message: `Vetting session started. ${vetterCount} vetter(s) have been notified and can join now.`,
+          type: 'warning',
+        });
+      }
+      // Also add locally so bell shows immediately and toast appears without waiting for real-time
+      const chiefToast: AppNotification = {
+        id: createId(),
+        title: 'Vetting Session Started',
+        message: `Vetting session started. ${vetterCount} vetter(s) have been notified and can join now.`,
+        timestamp: new Date().toISOString(),
+        read: false,
+        type: 'warning',
+      };
+      setNotifications((prev) => [chiefToast, ...prev].slice(0, 20));
+      setActiveToast(chiefToast);
+      setTimeout(() => setActiveToast((c) => (c?.id === chiefToast.id ? null : c)), 5000);
 
       console.log('Global vetting session started by Chief Examiner!');
       return;
@@ -3996,7 +4327,7 @@ function App() {
   };
 
   // Function to restrict a vetter (sign out, add to restricted list, persist)
-  const restrictVetter = (vetterId: string, violationType: 'screenshot_attempt' | 'window_leave') => {
+  const restrictVetter = async (vetterId: string, violationType: 'screenshot_attempt' | 'window_leave') => {
     if (!vetterId) return;
     
     // Sign out the vetter immediately
@@ -4043,7 +4374,34 @@ function App() {
       : 'VIOLATION: Leaving the window is not allowed. Your session has been terminated and your access has been restricted. Please contact the Chief Examiner to regain access.';
     
     alert(violationMessage);
-    
+
+    // Notify Chief Examiner(s) that a vetter was deactivated (runs on vetter's browser; Chiefs get notification in bell + toast)
+    const vetter = users.find((u: User) => u.id === vetterId);
+    const vetterName = vetter?.name ?? 'A vetter';
+    const reason = violationType === 'screenshot_attempt' ? 'screenshot attempt detected' : 'window leave detected';
+    const chiefMessage = `${vetterName} was deactivated during vetting (${reason}). They have been restricted and must be re-activated to join again.`;
+    try {
+      const chiefs = await getChiefExaminerUserIds();
+      if (chiefs.length === 0) {
+        console.warn('⚠️ Vetter deactivation: No Chief Examiner(s) found in user_profiles. Chief will not get a notification. Ensure user_profiles.roles includes "Chief Examiner" for the Chief.');
+      }
+      for (const chief of chiefs) {
+        const result = await createNotification({
+          user_id: chief.id,
+          title: 'Vetter deactivated',
+          message: chiefMessage,
+          type: 'error',
+        });
+        if (result.success) {
+          console.log('✅ Chief notified (Vetter deactivated):', chief.name, chief.id);
+        } else {
+          console.error('❌ Failed to notify Chief:', chief.name, chief.id, result.error);
+        }
+      }
+    } catch (e) {
+      console.error('❌ Error notifying Chief of vetter deactivation:', e);
+    }
+
     // Note: User will need to manually log out or refresh - we've already restricted their access
   };
 
@@ -4756,7 +5114,7 @@ function App() {
       { stage: 'Vetting Session Expired' }
     );
     
-    // Show notification to all users
+    // Show notification locally (same as session-start: immediate feedback)
     const notification: AppNotification = {
       id: createId(),
       message: 'Vetting Session Expired: Session time finished. All vetter records have been saved and cameras stopped.',
@@ -4767,6 +5125,32 @@ function App() {
     };
     setNotifications((prev) => [notification, ...prev]);
     setActiveToast(notification);
+
+    // Persist "Session Expired" to DB for all vetters + Chief so everyone sees it in the bell (same mechanism as "Vetting Session Started")
+    const expiredMessage = 'Vetting Session Expired: Session time finished. All vetter records have been saved and cameras stopped.';
+    (async () => {
+      const dbVetters = await getVetterUserIds();
+      const recipients = currentUser?.id
+        ? [...dbVetters, { id: currentUser.id, name: currentUser.name ?? 'Chief' }]
+        : dbVetters;
+      const seen = new Set<string>();
+      const unique = recipients.filter((r) => {
+        if (seen.has(r.id)) return false;
+        seen.add(r.id);
+        return true;
+      });
+      for (const user of unique) {
+        const result = await createNotification({
+          user_id: user.id,
+          title: 'Vetting Session Expired',
+          message: expiredMessage,
+          type: 'warning',
+        });
+        if (!result.success) {
+          console.warn('Session expired notification failed for', user.name, result.error);
+        }
+      }
+    })();
   };
 
   const handleSanitizeAndForward = async () => {
@@ -6162,6 +6546,16 @@ function App() {
               localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(newSet)));
               return newSet;
             });
+            // Notify re-activated vetter so they see toast and can join if session is still active
+            const message = vettingSession.active
+              ? 'You have been re-activated. The vetting session is still active—join by clicking Start Session (Enable Camera).'
+              : 'You have been re-activated. You can join when the Chief starts a new vetting session.';
+            void createNotification({
+              user_id: vetterId,
+              title: 'Vetter re-activated',
+              message,
+              type: 'success',
+            });
           }}
           recordingEntries={recordingEntries}
           onSetSetterDeadline={(active: boolean, duration: { days: number; hours: number; minutes: number }) => {
@@ -6346,6 +6740,16 @@ function App() {
               localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(newSet)));
               return newSet;
             });
+            // Notify re-activated vetter so they see toast and can join if session is still active
+            const message = vettingSession.active
+              ? 'You have been re-activated. The vetting session is still active—join by clicking Start Session (Enable Camera).'
+              : 'You have been re-activated. You can join when the Chief starts a new vetting session.';
+            void createNotification({
+              user_id: vetterId,
+              title: 'Vetter re-activated',
+              message,
+              type: 'success',
+            });
           }}
           checklistComments={checklistComments}
           typingIndicators={checklistTypingIndicators}
@@ -6495,6 +6899,7 @@ function App() {
               actor
             );
           }}
+          onCheckForSession={handleCheckForSession}
           onForwardChecklist={handleForwardChecklistDecision}
           onApprove={handleApprove}
           onReject={handleReject}
@@ -7096,7 +7501,7 @@ function App() {
       )}
 
       <div className={`flex-1 flex flex-col ${isVetterActive ? 'w-full' : sidebarOpen ? 'lg:ml-72' : 'lg:ml-20'}`}>
-        <header className="relative border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
+        <header className="relative z-[100] border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             {/* Hamburger Menu Button - Mobile */}
             {!isVetterActive && (
@@ -7238,35 +7643,31 @@ function App() {
                     const wasOpen = showNotificationPanel;
                     setShowNotificationPanel((open) => !open);
                     
-                    // If opening panel, refresh notifications and mark all as read in database
+                    // If opening panel, refresh notifications from database (do NOT auto mark all read – user can click "Mark all read")
                     if (!wasOpen && currentUser) {
-                      // Refresh notifications from database
                       try {
                         const dbNotifications = await getUserNotifications(currentUser.id);
                         const mapped: AppNotification[] = dbNotifications.map((n) => ({
                           id: n.id,
-                          message: `${n.title}: ${n.message}`,
+                          title: n.title,
+                          message: n.title ? `${n.title}: ${n.message}` : n.message,
                           timestamp: n.created_at,
                           read: n.is_read,
+                          type: n.type,
                         }));
-                        setNotifications(mapped);
-                        
-                        // Mark all as read in database if there are unread ones
-                        const unreadCount = mapped.filter(n => !n.read).length;
-                        if (unreadCount > 0) {
-                          await markAllNotificationsAsRead(currentUser.id);
-                    setNotifications((prev) =>
-                      prev.map((n) => ({ ...n, read: true }))
-                    );
-                        }
+                        setNotifications((prev) => {
+                          const dbIds = new Set(mapped.map((m) => m.id));
+                          const dbTitles = new Set(mapped.map((m) => m.title).filter(Boolean));
+                          const localOnly = prev.filter(
+                            (n) => !dbIds.has(n.id) && !(n.title && dbTitles.has(n.title))
+                          );
+                          return localOnly.length ? [...localOnly, ...mapped] : mapped;
+                        });
                       } catch (error) {
                         console.error('Error refreshing notifications:', error);
                       }
                     } else if (!wasOpen) {
-                      // Just mark local notifications as read if no user
-                      setNotifications((prev) =>
-                        prev.map((n) => ({ ...n, read: true }))
-                      );
+                      // No user – leave local state as is
                     }
                   }}
                   className="relative flex h-10 w-10 items-center justify-center rounded-full border border-blue-200 bg-blue-50 text-blue-700 shadow-sm hover:bg-blue-100 hover:border-blue-300 transition"
@@ -7303,19 +7704,19 @@ function App() {
             </div>
           </div>
 
-          {/* Notification dropdown panel - light, AI-inspired */}
+          {/* Notification dropdown panel - light, AI-inspired; high z-index so it appears above all content */}
           <div
-            className={`absolute right-4 top-full z-50 mt-3 w-[300px] sm:w-[340px] rounded-2xl border border-blue-100 bg-white/95 shadow-xl shadow-blue-200/60 backdrop-blur-md transition-all duration-300 origin-top-right transform ${
+            className={`absolute right-4 top-full z-[9999] mt-3 w-[300px] sm:w-[340px] rounded-2xl border border-blue-100 bg-white shadow-xl shadow-blue-200/60 transition-all duration-300 origin-top-right transform ${
               showNotificationPanel
                 ? 'pointer-events-auto opacity-100 translate-y-0 scale-100'
                 : 'pointer-events-none opacity-0 -translate-y-2 scale-95'
             }`}
           >
-            <div className="relative overflow-hidden rounded-2xl">
+            <div className="relative overflow-hidden rounded-2xl bg-white">
               <div className="pointer-events-none absolute -right-10 -top-16 h-28 w-28 rounded-full bg-indigo-200/70 blur-3xl" />
               <div className="pointer-events-none absolute -left-10 -bottom-16 h-32 w-32 rounded-full bg-cyan-200/60 blur-3xl" />
 
-              <div className="relative flex items-center justify-between border-b border-slate-100 px-4 py-3">
+              <div className="relative z-10 flex items-center justify-between border-b border-slate-100 px-4 py-3 bg-white/95">
                 <div>
                   <p className="text-[0.65rem] font-semibold uppercase tracking-[0.22em] text-indigo-500/90">
                     Activity Stream
@@ -7324,20 +7725,39 @@ function App() {
                     Notifications
                   </p>
                 </div>
-                <button
-                  type="button"
-                  className="inline-flex items-center rounded-full border border-blue-100 bg-blue-50/70 px-2.5 py-1 text-[0.7rem] font-medium text-blue-800 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 hover:text-blue-900"
-                  onClick={() => setShowNotificationPanel(false)}
-                >
-                  Close
-                </button>
+                <div className="flex items-center gap-2">
+                  {notifications.some((n) => !n.read) && currentUser && (
+                    <button
+                      type="button"
+                      className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[0.7rem] font-medium text-blue-800 shadow-sm transition hover:bg-blue-100"
+                      onClick={async () => {
+                        if (!currentUser?.id) return;
+                        await markAllNotificationsAsRead(currentUser.id);
+                        setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+                      }}
+                    >
+                      Mark all read
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="inline-flex items-center rounded-full border border-blue-100 bg-blue-50/70 px-2.5 py-1 text-[0.7rem] font-medium text-blue-800 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 hover:text-blue-900"
+                    onClick={() => setShowNotificationPanel(false)}
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
 
-              <div className="relative max-h-72 space-y-2 overflow-y-auto px-4 py-3">
+              <div className="relative z-10 max-h-72 space-y-2 overflow-y-auto px-4 py-3 bg-white">
                 {notifications.length === 0 ? (
-                  <p className="text-xs text-slate-500">
-                    No notifications yet. Assign a role to a lecturer to see it here.
-                  </p>
+                  <div className="space-y-2 text-xs text-slate-500">
+                    <p>
+                      {currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter')
+                        ? "When the Chief starts a vetting session, you'll see a notification here. Still nothing? 1) Chief must click Start Session again after the SQL was run. 2) Open browser console (F12) and look for 🔔 hints. 3) In Supabase, check Table Editor → notifications for rows with your user_id."
+                        : 'No notifications yet. Assign a role to a lecturer to see it here.'}
+                    </p>
+                  </div>
                 ) : (
                   notifications.map((note) => (
                     <div
@@ -7357,9 +7777,9 @@ function App() {
                           }
                         }
                       }}
-                      className={`group relative overflow-hidden rounded-xl border px-3 py-2 text-xs text-slate-800 shadow-sm transition-all duration-300 cursor-pointer ${
+                      className={`group relative z-10 overflow-hidden rounded-xl border px-3 py-2 text-xs text-slate-800 shadow-sm transition-all duration-300 cursor-pointer ${
                         note.read
-                          ? 'border-slate-100 bg-slate-50/80'
+                          ? 'border-slate-100 bg-slate-50'
                           : 'border-blue-200 bg-gradient-to-r from-blue-50 via-indigo-50 to-cyan-50 shadow-[0_0_0_1px_rgba(129,140,248,0.35)]'
                       } hover:translate-y-[-1px] hover:shadow-md hover:shadow-blue-200/80`}
                     >
@@ -15991,6 +16411,7 @@ interface VettingAndAnnotationsProps {
   onRemoveChecklist?: () => void;
   onRemovePaperFromVetting?: (paperId: string) => void;
   onEndSession?: () => void;
+  onCheckForSession?: () => void | Promise<void>;
   onApprove?: (notes: string) => void;
   onReject?: (notes: string, newDeadline?: { days: number; hours: number; minutes: number }) => Promise<void>;
   onForwardChecklist?: (decision: 'approved' | 'rejected', notes: string) => void;
@@ -16079,6 +16500,7 @@ function VettingAndAnnotations({
   onRemoveChecklist,
   onRemovePaperFromVetting,
           onEndSession,
+          onCheckForSession,
           onApprove,
           onReject,
   onForwardChecklist,
@@ -17769,14 +18191,25 @@ function VettingAndAnnotations({
           </div>
         </div>
       ) : !vetterHasJoined ? (
-        <button
-          type="button"
-          onClick={() => onStartVetting(customDuration)}
-          disabled={!vettingSession.active}
-          className="w-full rounded-xl bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-3 text-sm font-bold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {vettingSession.active ? 'Start Session' : 'Waiting for Chief…'}
-        </button>
+        <div className="space-y-2">
+          <button
+            type="button"
+            onClick={() => onStartVetting(customDuration)}
+            disabled={!vettingSession.active}
+            className="w-full rounded-xl bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-3 text-sm font-bold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {vettingSession.active ? 'Start Session' : 'Waiting for Chief…'}
+          </button>
+          {!vettingSession.active && onCheckForSession && (
+            <button
+              type="button"
+              onClick={() => void onCheckForSession()}
+              className="w-full rounded-xl border-2 border-slate-300 bg-slate-50 px-4 py-2 text-xs font-semibold text-slate-700 shadow transition hover:bg-slate-100"
+            >
+              Check for session
+            </button>
+          )}
+        </div>
       ) : (
         <div className="space-y-2">
           <button

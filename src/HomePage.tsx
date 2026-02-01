@@ -39,6 +39,9 @@ export default function HomePage({
       setConnectionStatus('checking');
       const result = await testSupabaseConnection();
       setConnectionStatus(result.success ? 'connected' : 'disconnected');
+      if (!result.success && result.error) {
+        console.warn('Connection test:', result.error);
+      }
     };
     checkConnection();
   }, []);
@@ -176,7 +179,7 @@ export default function HomePage({
                   <div className="flex-1">
                     <p className="text-sm font-semibold text-amber-200">Database Connection Warning</p>
                     <p className="text-xs text-amber-200/80 mt-1">
-                      Initial connection test failed. You can still try to login. If login fails, check your Supabase RLS policies. See console for details.
+                      Add your Supabase anon key to the <code className="bg-amber-900/50 px-1 rounded">.env</code> file (VITE_SUPABASE_ANON_KEY). Get it from Supabase Dashboard → Settings → API, then restart the dev server.
                     </p>
                   </div>
                 </div>

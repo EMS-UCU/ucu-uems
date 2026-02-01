@@ -4,18 +4,23 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
-// Log configuration (without exposing the full key)
-if (!supabaseUrl || !supabaseAnonKey) {
-  console.error('❌ Supabase credentials not found!');
-  console.error('Please create a .env file in the project root with:');
-  console.error('VITE_SUPABASE_URL=https://your-project-id.supabase.co');
-  console.error('VITE_SUPABASE_ANON_KEY=your-anon-key-here');
+// Check for placeholder/invalid credentials
+const isPlaceholderKey = !supabaseAnonKey || supabaseAnonKey === 'your-anon-key-here' || supabaseAnonKey.length < 50;
+const isPlaceholderUrl = !supabaseUrl || supabaseUrl.includes('your-project-id');
+
+if (isPlaceholderUrl || isPlaceholderKey) {
+  console.error('❌ Supabase credentials missing or invalid!');
+  if (isPlaceholderUrl) {
+    console.error('VITE_SUPABASE_URL must be your real project URL (e.g. https://xxxxx.supabase.co)');
+  }
+  if (isPlaceholderKey) {
+    console.error('VITE_SUPABASE_ANON_KEY must be your real anon key from Supabase Dashboard → Settings → API');
+  }
   console.error('');
-  console.error('Get these from: Supabase Dashboard → Settings → API');
+  console.error('Add the correct values to your .env file and restart the dev server.');
 } else {
   console.log('✅ Supabase configured');
   console.log('URL:', supabaseUrl);
-  console.log('Key:', supabaseAnonKey.substring(0, 20) + '...');
 }
 
 // Create Supabase client with options

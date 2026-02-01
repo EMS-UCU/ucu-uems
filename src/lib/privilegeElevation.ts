@@ -1,6 +1,7 @@
 import { supabase } from './supabase';
 import type { PrivilegeElevation } from './supabase';
 import { createNotification } from './examServices/notificationService';
+import { getSuperAdminUserIds } from './auth';
 
 // Elevate a lecturer to Chief Examiner (Super Admin only)
 export async function elevateToChiefExaminer(
@@ -16,16 +17,17 @@ export async function elevateToChiefExaminer(
   }
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Get current user roles - using user_profiles instead of users
+    // Get current user roles and name - using user_profiles instead of users
     const { data: user, error: userError } = await supabase
       .from('user_profiles')
-      .select('roles')
+      .select('roles, name')
       .eq('id', lecturerId)
       .single();
 
     if (userError || !user) {
       return { success: false, error: 'User not found' };
     }
+    const targetName = (user as any).name || 'User';
 
     const currentRoles = user.roles || [];
     if (currentRoles.includes('Chief Examiner')) {
@@ -75,10 +77,42 @@ export async function elevateToChiefExaminer(
       : '';
     await createNotification({
       user_id: lecturerId,
-      title: 'Chief Examiner Role Assigned',
+      title: 'Privilege Elevated',
       message: `You have been assigned the Chief Examiner role${metadataText}. You can now manage exam workflows and assign roles to other lecturers.`,
-      type: 'success',
+      type: 'warning',
     });
+
+    // Alert the actor and all Super Admins so every elevation is visible in notifications
+    const { data: actorProfile } = await supabase
+      .from('user_profiles')
+      .select('name')
+      .eq('id', elevatedBy)
+      .single();
+    const actorName = (actorProfile as any)?.name || 'Admin';
+    const admins = await getSuperAdminUserIds();
+    const seen = new Set<string>();
+    for (const admin of admins) {
+      if (seen.has(admin.id)) continue;
+      seen.add(admin.id);
+      const isActor = admin.id === elevatedBy;
+      await createNotification({
+        user_id: admin.id,
+        title: 'Chief Examiner Role Assigned',
+        message: isActor
+          ? `You elevated ${targetName} to Chief Examiner.`
+          : `${actorName} elevated ${targetName} to Chief Examiner.`,
+        type: 'warning',
+      });
+    }
+    // Ensure the actor gets a notification even if not in Super Admin list (e.g. Chief Examiner)
+    if (!seen.has(elevatedBy)) {
+      await createNotification({
+        user_id: elevatedBy,
+        title: 'Chief Examiner Role Assigned',
+        message: `You elevated ${targetName} to Chief Examiner.`,
+        type: 'warning',
+      });
+    }
 
     return { success: true };
   } catch (error: any) {
@@ -93,16 +127,17 @@ export async function appointRole(
   appointedBy: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Get current user roles - using user_profiles instead of users
+    // Get current user roles and name - using user_profiles instead of users
     const { data: user, error: userError } = await supabase
       .from('user_profiles')
-      .select('roles')
+      .select('roles, name')
       .eq('id', userId)
       .single();
 
     if (userError || !user) {
       return { success: false, error: 'User not found' };
     }
+    const targetName = (user as any).name || 'User';
 
     const currentRoles = user.roles || [];
     if (currentRoles.includes(role)) {
@@ -141,10 +176,42 @@ export async function appointRole(
 
     await createNotification({
       user_id: userId,
-      title: `${role} Role Assigned`,
+      title: 'Privilege Elevated',
       message: roleMessages[role] || `You have been assigned the ${role} role.`,
-      type: 'success',
+      type: 'warning',
     });
+
+    // Alert the actor and all Super Admins so every elevation is visible in notifications
+    const { data: actorProfile } = await supabase
+      .from('user_profiles')
+      .select('name')
+      .eq('id', appointedBy)
+      .single();
+    const actorName = (actorProfile as any)?.name || 'Admin';
+    const admins = await getSuperAdminUserIds();
+    const seen = new Set<string>();
+    for (const admin of admins) {
+      if (seen.has(admin.id)) continue;
+      seen.add(admin.id);
+      const isActor = admin.id === appointedBy;
+      await createNotification({
+        user_id: admin.id,
+        title: 'Role Assigned',
+        message: isActor
+          ? `You assigned ${role} to ${targetName}.`
+          : `${actorName} assigned ${role} to ${targetName}.`,
+        type: 'warning',
+      });
+    }
+    // Ensure the actor gets a notification even if not in Super Admin list (e.g. Chief Examiner)
+    if (!seen.has(appointedBy)) {
+      await createNotification({
+        user_id: appointedBy,
+        title: 'Role Assigned',
+        message: `You assigned ${role} to ${targetName}.`,
+        type: 'warning',
+      });
+    }
 
     return { success: true };
   } catch (error: any) {
@@ -152,23 +219,25 @@ export async function appointRole(
   }
 }
 
-// Revoke a role
+// Revoke a role (revokedBy: actor name from App, or actor id from PrivilegeElevationPanel; revokedById: optional actor id when revokedBy is name)
 export async function revokeRole(
   userId: string,
   role: string,
-  revokedBy: string
+  revokedBy: string,
+  revokedById?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Get current user roles - using user_profiles instead of users
+    // Get current user roles and name - using user_profiles instead of users
     const { data: user, error: userError } = await supabase
       .from('user_profiles')
-      .select('roles')
+      .select('roles, name')
       .eq('id', userId)
       .single();
 
     if (userError || !user) {
       return { success: false, error: 'User not found' };
     }
+    const targetName = (user as any).name || 'User';
 
     const currentRoles = user.roles || [];
     if (!currentRoles.includes(role)) {
@@ -198,6 +267,46 @@ export async function revokeRole(
       .eq('user_id', userId)
       .eq('role_granted', role)
       .eq('is_active', true);
+
+    // Notify the user that their role was revoked (same style as session expired / privilege elevated)
+    await createNotification({
+      user_id: userId,
+      title: 'Privilege Revoked',
+      message: `Your ${role} role has been revoked.`,
+      type: 'warning',
+    });
+
+    // Alert the actor and all Super Admins (revokedBy may be actor id from PrivilegeElevationPanel or actor name from App; revokedById from App when revokedBy is name)
+    const looksLikeId = revokedBy.length >= 30 && /^[a-f0-9-]+$/i.test(revokedBy);
+    const actorId = revokedById || (looksLikeId ? revokedBy : undefined);
+    const { data: actorRow } = actorId
+      ? await supabase.from('user_profiles').select('name').eq('id', actorId).single()
+      : { data: null };
+    const actorName = actorRow ? (actorRow as any).name : revokedBy;
+    const admins = await getSuperAdminUserIds();
+    const seen = new Set<string>();
+    for (const admin of admins) {
+      if (seen.has(admin.id)) continue;
+      seen.add(admin.id);
+      const isActor = admin.id === actorId || (!actorId && admin.name === revokedBy);
+      await createNotification({
+        user_id: admin.id,
+        title: 'Privilege Revoked',
+        message: isActor
+          ? `You revoked ${role} from ${targetName}.`
+          : `${actorName} revoked ${role} from ${targetName}.`,
+        type: 'warning',
+      });
+    }
+    // Ensure the actor gets a notification even if not in Super Admin list (e.g. Chief Examiner)
+    if (actorId && !seen.has(actorId)) {
+      await createNotification({
+        user_id: actorId,
+        title: 'Privilege Revoked',
+        message: `You revoked ${role} from ${targetName}.`,
+        type: 'warning',
+      });
+    }
 
     return { success: true };
   } catch (error: any) {

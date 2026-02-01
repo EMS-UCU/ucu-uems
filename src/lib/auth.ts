@@ -46,21 +46,29 @@ export async function testSupabaseConnection(): Promise<{ success: boolean; erro
       return { success: false, error: 'Supabase credentials not configured' };
     }
 
+    // Reject placeholder credentials
+    if (supabaseKey === 'your-anon-key-here' || supabaseKey.length < 50 || supabaseUrl.includes('your-project-id')) {
+      return { success: false, error: 'Replace placeholder credentials in .env with your real Supabase API key from Dashboard → Settings → API' };
+    }
+
     // Test connection by checking auth
     const { data: { session }, error } = await supabase.auth.getSession();
     
     if (error) {
-      console.log('Supabase connection test error:', {
-        code: error.message,
-        message: error.message
-      });
-      // Auth errors are OK for connection test - just means not logged in
+      // Network errors (Failed to fetch, ERR_NAME_NOT_RESOLVED) mean connection failed
+      const isNetworkError = error.message?.includes('fetch') || error.message?.includes('Failed to');
+      if (isNetworkError) {
+        return { success: false, error: 'Cannot reach Supabase. Check your URL and internet connection.' };
+      }
+      // Auth errors (invalid key, etc.) mean we reached the server but auth failed
       return { success: true, error: 'Connection OK (not authenticated)' };
     }
     
     return { success: true, data: { connected: true } };
   } catch (error: any) {
-    return { success: false, error: error.message || 'Connection test failed' };
+    const msg = error?.message || 'Connection test failed';
+    const isNetworkError = msg.includes('fetch') || msg.includes('Failed to');
+    return { success: false, error: isNetworkError ? 'Cannot reach Supabase. Check your URL and anon key.' : msg };
   }
 }
 
@@ -249,6 +257,104 @@ export async function getAllUsers(): Promise<User[]> {
     return users;
   } catch (error: any) {
     console.error('Error fetching users:', error);
+    return [];
+  }
+}
+
+/** Returns true if roles array/string includes Vetter (case-insensitive). Handles Postgres TEXT[] or jsonb or single string. */
+function hasVetterRole(roles: unknown): boolean {
+  if (!roles) return false;
+  let arr: unknown[] = [];
+  if (Array.isArray(roles)) {
+    arr = roles;
+  } else if (typeof roles === 'string') {
+    if (roles.startsWith('[')) {
+      try { arr = JSON.parse(roles); } catch { arr = []; }
+    } else {
+      arr = [roles]; // single role string e.g. "Vetter"
+    }
+  }
+  return arr.some((r: unknown) => String(r).toLowerCase() === 'vetter');
+}
+
+/** Returns true if roles array/string includes Chief Examiner (case-insensitive). Handles "Chief Examiner" or "ChiefExaminer". */
+function hasChiefExaminerRole(roles: unknown): boolean {
+  if (!roles) return false;
+  let arr: unknown[] = [];
+  if (Array.isArray(roles)) {
+    arr = roles;
+  } else if (typeof roles === 'string') {
+    if (roles.startsWith('[')) {
+      try { arr = JSON.parse(roles); } catch { arr = []; }
+    } else {
+      arr = [roles];
+    }
+  }
+  return arr.some((r: unknown) => {
+    const s = String(r).toLowerCase();
+    return s.includes('chief examiner') || s.includes('chiefexaminer');
+  });
+}
+
+/** Get user ids (and names) of all users who have the Chief Examiner role. Used to notify Chief when a vetter is deactivated. */
+export async function getChiefExaminerUserIds(): Promise<{ id: string; name: string }[]> {
+  try {
+    const { data: profiles, error } = await supabase
+      .from('user_profiles')
+      .select('id, name, roles')
+      .order('name', { ascending: true });
+
+    if (error) {
+      console.error('Error fetching Chief Examiners from user_profiles:', error);
+      return [];
+    }
+    if (!profiles || profiles.length === 0) return [];
+    const chiefs = profiles.filter((p: any) => hasChiefExaminerRole(p.roles));
+    return chiefs.map((p: any) => ({ id: p.id, name: p.name || 'Chief Examiner' }));
+  } catch (error: any) {
+    console.error('Error in getChiefExaminerUserIds:', error);
+    return [];
+  }
+}
+
+/** Get user ids (and names) of all users who have the Vetter role. Used when Chief starts vetting so vetters are always notified from DB source of truth. */
+export async function getVetterUserIds(): Promise<{ id: string; name: string }[]> {
+  try {
+    const { data: profiles, error } = await supabase
+      .from('user_profiles')
+      .select('id, name, roles')
+      .order('name', { ascending: true });
+
+    if (error) {
+      console.error('Error fetching vetters from user_profiles:', error);
+      return [];
+    }
+    if (!profiles || profiles.length === 0) return [];
+    const vetters = profiles.filter((p: any) => hasVetterRole(p.roles));
+    return vetters.map((p: any) => ({ id: p.id, name: p.name || 'Vetter' }));
+  } catch (error: any) {
+    console.error('Error in getVetterUserIds:', error);
+    return [];
+  }
+}
+
+/** Get user ids (and names) of all Super Admins. Used to alert every admin when any elevation/revoke happens. */
+export async function getSuperAdminUserIds(): Promise<{ id: string; name: string }[]> {
+  try {
+    const { data: profiles, error } = await supabase
+      .from('user_profiles')
+      .select('id, name, is_super_admin')
+      .eq('is_super_admin', true)
+      .order('name', { ascending: true });
+
+    if (error) {
+      console.error('Error fetching Super Admins from user_profiles:', error);
+      return [];
+    }
+    if (!profiles || profiles.length === 0) return [];
+    return profiles.map((p: any) => ({ id: p.id, name: p.name || 'Admin' }));
+  } catch (error: any) {
+    console.error('Error in getSuperAdminUserIds:', error);
     return [];
   }
 }
