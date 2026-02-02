@@ -35,6 +35,22 @@ export function dbUserToAppUser(dbUser: DatabaseUser): User {
   };
 }
 
+/** Restore session from Supabase (e.g. on page load). Returns user if valid session exists. */
+export async function restoreSession(): Promise<User | null> {
+  try {
+    const { data: { session }, error } = await supabase.auth.getSession();
+    if (error || !session?.user) return null;
+    const { data: profile } = await supabase
+      .from('user_profiles')
+      .select('*')
+      .eq('id', session.user.id)
+      .single();
+    return authUserToAppUser(session.user, profile);
+  } catch {
+    return null;
+  }
+}
+
 // Test function to verify Supabase connection
 export async function testSupabaseConnection(): Promise<{ success: boolean; error?: string; data?: any }> {
   try {

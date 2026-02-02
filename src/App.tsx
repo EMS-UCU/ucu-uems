@@ -22,13 +22,17 @@ import {
   Cell,
 } from 'recharts';
 import HomePage from './HomePage';
-import { authenticateUser, getAllUsers, getVetterUserIds, getChiefExaminerUserIds } from './lib/auth';
+import { authenticateUser, getAllUsers, getVetterUserIds, getChiefExaminerUserIds, restoreSession } from './lib/auth';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
 import LecturerDashboard from './components/LecturerDashboard';
 import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
+import ConsentAgreementModal from './components/ConsentAgreementModal';
+import ComplianceDocumentsDropdown from './components/ComplianceDocumentsDropdown';
 import { supabase } from './lib/supabase';
+import { recordConsentAcceptance, getCurrentUserRoles, type WorkflowRole } from './lib/roleConsentService';
 import { elevateToChiefExaminer, appointRole, revokeRole } from './lib/privilegeElevation';
 import { uploadVettingRecording } from './lib/examServices/recordingService';
+import { syncVettingRecordingToSession } from './lib/examServices/vettingService';
 import { getVettingRecordings } from './lib/examServices/chiefExaminerService';
 import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead } from './lib/examServices/notificationService';
 import ucuLogo from './assets/ucu-logo.png';
@@ -1291,8 +1295,11 @@ function App() {
   );
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
+  const [showConsentModal, setShowConsentModal] = useState(false);
+  const [rolesNeedingConsent, setRolesNeedingConsent] = useState<WorkflowRole[]>([]);
   const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [showUserDropdown, setShowUserDropdown] = useState(false);
   const shownVettingStartedToastIds = useRef<Set<string>>(new Set());
   const hasWarnedEmptyVetterForUserId = useRef<string | null>(null);
 
@@ -2113,6 +2120,26 @@ function App() {
     }
   };
 
+  // Restore Supabase session on mount (so returning users stay logged in)
+  useEffect(() => {
+    let cancelled = false;
+    restoreSession().then((user) => {
+      if (cancelled || !user) {
+        console.log('ℹ️ No session to restore');
+        return;
+      }
+      console.log('✅ Session restored for user:', user.name, 'Roles:', user.roles);
+      setAuthUserId(user.id);
+      setUsers((prev) => {
+        const exists = prev.find((u) => u.id === user.id);
+        if (!exists) return [...prev, user];
+        return prev.map((u) => (u.id === user.id ? user : u));
+      });
+      // Consent check will trigger automatically via the authUserId useEffect
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   // Load users from Supabase on mount
   useEffect(() => {
     const loadUsersFromSupabase = async () => {
@@ -2170,6 +2197,63 @@ function App() {
 
     loadUsersFromSupabase();
   }, []);
+
+  // Check for role consent agreements - show on EVERY login for users with workflow roles
+  const checkRoleConsent = useCallback(async () => {
+    if (!authUserId) {
+      // Clear modal state when no user
+      setShowConsentModal(false);
+      setRolesNeedingConsent([]);
+      return;
+    }
+    
+    try {
+      console.log('🔍 Checking role consent for user:', authUserId);
+      const userRoles = await getCurrentUserRoles(authUserId);
+      console.log('📋 User roles:', userRoles);
+      
+      const workflowRoles: WorkflowRole[] = ['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'];
+      // Filter to only roles the user actually has
+      const userWorkflowRoles = workflowRoles.filter((r) => userRoles.includes(r));
+      console.log('✅ User workflow roles:', userWorkflowRoles);
+      
+      if (userWorkflowRoles.length > 0) {
+        console.log('📝 Showing consent modal for roles:', userWorkflowRoles);
+        console.log('🔧 Setting rolesNeedingConsent:', userWorkflowRoles);
+        console.log('🔧 Setting showConsentModal to true');
+        setRolesNeedingConsent(userWorkflowRoles);
+        setShowConsentModal(true);
+        console.log('✅ Modal state updated');
+      } else {
+        console.log('ℹ️ No workflow roles found, hiding consent modal');
+        setShowConsentModal(false);
+        setRolesNeedingConsent([]);
+      }
+    } catch (err) {
+      console.error('❌ Error checking role consent:', err);
+      setShowConsentModal(false);
+      setRolesNeedingConsent([]);
+    }
+  }, [authUserId]);
+
+  // Check for role consent on login AND session restore (when authUserId changes)
+  useEffect(() => {
+    if (authUserId) {
+      console.log('🔄 authUserId changed, checking role consent...');
+      // Close user dropdown when user changes
+      setShowUserDropdown(false);
+      // Small delay to ensure user state is fully loaded
+      const timer = setTimeout(() => {
+        checkRoleConsent();
+      }, 100);
+      return () => clearTimeout(timer);
+    } else {
+      // Clear modal and dropdown when logged out
+      setShowConsentModal(false);
+      setRolesNeedingConsent([]);
+      setShowUserDropdown(false);
+    }
+  }, [authUserId, checkRoleConsent]);
 
   // Refresh users from Supabase (used when privilege elevation/revoke succeeds for real-time dashboard updates)
   const refreshUsers = useCallback(async () => {
@@ -3197,7 +3281,7 @@ function App() {
         return false;
       }
 
-      console.log('Login successful for user:', user.name, 'Roles:', user.roles);
+      console.log('✅ Login successful for user:', user.name, 'Roles:', user.roles);
 
       // Update users list if user is not already in it
       setUsers((prevUsers) => {
@@ -3210,6 +3294,7 @@ function App() {
 
       setAuthUserId(user.id);
       setAuthError(null);
+      // Consent check will trigger automatically via the authUserId useEffect
       
       // Set default panel based on role
       if (user.isSuperAdmin) {
@@ -3231,6 +3316,7 @@ function App() {
   };
 
   const handleLogout = () => {
+    setShowUserDropdown(false); // Close dropdown on logout
     setAuthUserId(null);
     setAuthError(null);
   };
@@ -4695,9 +4781,22 @@ function App() {
                 duration: recordingDurationSeconds,
               });
               
-              // TODO: Update the vetting_sessions table with recording data
-              // This requires the actual session ID from the database
-              // For now, we'll store it in the session record
+              // Sync recording to vetting_sessions so it appears in Chief's dashboard
+              if (uploadResult.filePath) {
+                const syncResult = await syncVettingRecordingToSession(vettedPaper.id, {
+                  recordingUrl: uploadResult.recordingUrl,
+                  recordingFilePath: uploadResult.filePath,
+                  recordingFileSize: recordingFileSize ?? 0,
+                  recordingDurationSeconds: recordingDurationSeconds ?? 0,
+                  recordingStartedAt: new Date(startedAt).toISOString(),
+                  recordingCompletedAt: new Date(completedAt).toISOString(),
+                });
+                if (syncResult.success) {
+                  console.log('✅ Recording synced to vetting_sessions for Chief Examiner dashboard');
+                } else {
+                  console.warn('Recording upload OK but DB sync failed:', syncResult.error);
+                }
+              }
             } else {
               console.error('Failed to upload recording:', uploadResult.error);
             }
@@ -7052,6 +7151,36 @@ function App() {
 
   return (
     <div className={`min-h-screen bg-white text-slate-900 flex ${isVetterActive ? 'fullscreen-vetter-mode' : ''}`}>
+      {/* Role consent agreement modal - shown on first visit when user has unaccepted workflow roles */}
+      {showConsentModal && rolesNeedingConsent.length > 0 && authUserId && (
+        <ConsentAgreementModal
+          rolesToAccept={rolesNeedingConsent}
+          userName={currentUser?.name ?? 'User'}
+          onAccept={async (role) => {
+            console.log('✅ User accepting agreement for role:', role);
+            const result = await recordConsentAcceptance(authUserId, role);
+            if (!result.success) {
+              console.error('❌ Failed to record acceptance:', result.error);
+              throw new Error(result.error || 'Failed to record acceptance');
+            }
+            console.log('✅ Acceptance recorded successfully for role:', role);
+          }}
+          onDecline={async () => {
+            // User declined terms - log them out
+            setShowConsentModal(false);
+            setRolesNeedingConsent([]);
+            // Sign out from Supabase
+            await supabase.auth.signOut();
+            // Clear local state
+            setAuthUserId(null);
+            setAuthError('You have declined the terms and conditions. Please contact your administrator if you wish to proceed.');
+          }}
+          onComplete={() => {
+            setShowConsentModal(false);
+            setRolesNeedingConsent([]);
+          }}
+        />
+      )}
       {/* Overlay for mobile when sidebar is open */}
       {!isVetterActive && sidebarOpen && (
         <div
@@ -7521,140 +7650,69 @@ function App() {
       )}
 
       <div className={`flex-1 flex flex-col ${isVetterActive ? 'w-full' : sidebarOpen ? 'lg:ml-72' : 'lg:ml-20'}`}>
-        <header className="relative z-[100] border-b border-slate-200 bg-white px-4 py-5 backdrop-blur sm:px-6 lg:px-10 shadow-sm">
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            {/* Hamburger Menu Button - Mobile */}
-            {!isVetterActive && (
-              <button
-                onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="lg:hidden fixed top-4 left-4 z-50 p-2 rounded-lg bg-white shadow-md border border-slate-200 hover:bg-slate-50 transition-colors"
-                aria-label="Toggle menu"
-              >
-                <svg
-                  className="w-6 h-6 text-slate-700"
-                  fill="none"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="2"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
+        <header className="sticky top-0 z-[100] border-b border-blue-300/50 bg-gradient-to-r from-blue-50 via-blue-100/80 to-indigo-100/70 px-6 py-6 backdrop-blur sm:px-8 lg:px-10 shadow-md">
+          <div className="flex items-center justify-between gap-5">
+            {/* Left Section - Title and Info */}
+            <div className="flex items-center gap-4 flex-1 min-w-0">
+              {/* Hamburger Menu Button - Mobile */}
+              {!isVetterActive && (
+                <button
+                  onClick={() => setSidebarOpen(!sidebarOpen)}
+                  className="lg:hidden p-2.5 rounded-lg bg-white/80 shadow-sm border border-slate-200 hover:bg-white transition-colors"
+                  aria-label="Toggle menu"
                 >
-                  {sidebarOpen ? (
-                    <path d="M6 18L18 6M6 6l12 12" />
-                  ) : (
-                    <path d="M4 6h16M4 12h16M4 18h16" />
-                  )}
-                </svg>
-              </button>
-            )}
-            
-            {/* Hamburger Menu Button - Desktop */}
-            {!isVetterActive && (
-              <button
-                onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="hidden lg:flex items-center justify-center p-2 rounded-lg bg-slate-100 hover:bg-slate-200 transition-colors mr-4"
-                aria-label="Toggle menu"
-              >
-                <svg
-                  className="w-6 h-6 text-slate-700"
-                  fill="none"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="2"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
+                  <svg className="w-6 h-6 text-slate-700" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" stroke="currentColor">
+                    {sidebarOpen ? <path d="M6 18L18 6M6 6l12 12" /> : <path d="M4 6h16M4 12h16M4 18h16" />}
+                  </svg>
+                </button>
+              )}
+              {/* Hamburger Menu Button - Desktop */}
+              {!isVetterActive && (
+                <button
+                  onClick={() => setSidebarOpen(!sidebarOpen)}
+                  className="hidden lg:flex items-center justify-center p-2.5 rounded-lg bg-white/60 hover:bg-white transition-colors shadow-sm"
+                  aria-label="Toggle menu"
                 >
-                  {sidebarOpen ? (
-                    <path d="M6 18L18 6M6 6l12 12" />
-                  ) : (
-                    <path d="M4 6h16M4 12h16M4 18h16" />
+                  <svg className="w-6 h-6 text-slate-700" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" stroke="currentColor">
+                    {sidebarOpen ? <path d="M6 18L18 6M6 6l12 12" /> : <path d="M4 6h16M4 12h16M4 18h16" />}
+                  </svg>
+                </button>
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-4 flex-wrap">
+                  <p className="text-[0.75rem] font-bold uppercase tracking-[0.15em] text-blue-600 whitespace-nowrap">
+                    {isAdmin ? 'Admin Dashboard' : isChiefExaminer ? 'Chief Examiner Console' : isTeamLead ? 'Team Lead Console' : isVetter ? 'Vetting Console' : isSetter ? 'Setter Console' : isPureLecturer ? 'Lecturer Dashboard' : 'Current Stage'}
+                  </p>
+                  <div className="h-5 w-px bg-blue-300/60"></div>
+                  <h2 className="text-2xl font-bold text-blue-900 sm:text-3xl lg:text-3xl whitespace-nowrap">
+                    {isAdmin ? 'System Administration' : isChiefExaminer ? 'Chief Examiner' : isTeamLead ? 'Team Lead' : isVetter ? 'Vetting' : isSetter ? 'Setter' : isPureLecturer ? 'Teaching & Student Engagement' : workflow.stage.replace(/-/g, ' ')}
+                  </h2>
+                  <div className="h-5 w-px bg-blue-300/60"></div>
+                  <p className="text-sm text-slate-500 font-medium truncate max-w-md">
+                    {isAdmin ? 'Manage staff accounts and system configuration' : isChiefExaminer ? 'Assign and manage the exam process' : isTeamLead ? 'Coordinate setters and manage submissions' : isVetter ? 'Review and vet exam papers' : isSetter ? 'Prepare and submit exam papers' : isPureLecturer ? 'Manage classes, students and reports' : outstandingAction}
+                  </p>
+                  {currentUser?.roles.length > 0 && (
+                    <>
+                      <div className="h-5 w-px bg-blue-300/60"></div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {currentUser.roles.slice(0, 2).map((role) => (
+                          <span key={`header-badge-${role}`} className="inline-flex items-center rounded-md bg-gradient-to-r from-blue-100 to-indigo-100 px-2.5 py-1 text-[0.75rem] font-bold text-blue-700 border border-blue-200/50 shadow-sm">
+                            {role}
+                          </span>
+                        ))}
+                      </div>
+                    </>
                   )}
-                </svg>
-              </button>
-            )}
-            
-            <div className={!isVetterActive && sidebarOpen ? 'lg:ml-0' : ''}>
-              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-600">
-                {isAdmin
-                  ? 'Admin Dashboard'
-                  : isChiefExaminer
-                  ? 'Chief Examiner Console'
-                  : isTeamLead
-                  ? 'Team Lead Console'
-                  : isVetter
-                  ? 'Vetting Console'
-                  : isSetter
-                  ? 'Setter Console'
-                  : isPureLecturer
-                  ? 'Lecturer Dashboard'
-                  : 'Current Stage'}
-              </p>
-              <h2 className="mt-2 text-2xl font-semibold text-blue-900 sm:text-3xl">
-                {isAdmin
-                  ? 'System Administration'
-                  : isChiefExaminer
-                  ? 'Chief Examiner'
-                  : isTeamLead
-                  ? 'Team Lead'
-                  : isVetter
-                  ? 'Vetting'
-                  : isSetter
-                  ? 'Setter'
-                  : isPureLecturer
-                  ? 'Teaching & Student Engagement'
-                  : workflow.stage.replace(/-/g, ' ')}
-              </h2>
-              <p className="mt-1 text-sm text-slate-600">
-                {isAdmin
-                  ? 'Manage staff accounts and system configuration'
-                  : isChiefExaminer
-                  ? 'Assign and manage the exam process'
-                  : isTeamLead
-                  ? 'Coordinate setters and manage submissions'
-                  : isVetter
-                  ? 'Review and vet exam papers'
-                  : isSetter
-                  ? 'Prepare and submit exam papers'
-                  : isPureLecturer
-                  ? 'Manage classes, students and reports'
-                  : outstandingAction}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="relative rounded-xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-indigo-50 px-3 py-2 text-xs shadow-sm sm:min-w-[210px]">
-                <div className="pointer-events-none absolute -right-6 -top-6 h-16 w-16 rounded-full bg-blue-200/40 blur-2xl" />
-                <p className="text-[0.6rem] font-semibold uppercase tracking-[0.25em] text-blue-600">
-                  Signed In
-                </p>
-                <p className="mt-1 text-sm font-semibold text-blue-900">
-                  {currentUser?.name ?? 'Unknown user'}
-                </p>
-                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                  {currentUser?.roles.map((role) => (
-                    <RoleBadge key={`header-${role}`} role={role} />
-                  )) ?? []}
-                  {currentUser?.roles.includes('Chief Examiner') && currentUser?.lecturerCategory && (
-                    <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-[0.65rem] font-semibold text-emerald-700 border border-emerald-200 shadow-inner">
-                      {currentUser.lecturerCategory === 'Undergraduate' ? 'UG Chief Examiner' : 'PG Chief Examiner'}
-                    </span>
-                  )}
-                  {currentUser && (
-                    <span className="inline-flex items-center rounded-full bg-yellow-50 px-2.5 py-0.5 text-[0.65rem] font-semibold text-yellow-700 border border-yellow-200 shadow-inner">
-                      Semester: Advent
-                    </span>
-                  )}
-                  {currentUser?.courseUnit &&
-                    currentUser.courseUnit.toLowerCase().includes('network') && (
-                      <span className="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-0.5 text-[0.65rem] font-semibold text-indigo-700 border border-indigo-200 shadow-inner">
-                        {currentUser.roles.includes('Team Lead')
-                          ? 'Team Lead – Networking'
-                          : currentUser.roles.includes('Setter')
-                          ? 'Setter – Networking'
-                          : 'Networking'}
-                      </span>
-                    )}
                 </div>
               </div>
+            </div>
+            {/* Right Section - Actions */}
+            <div className="flex items-center gap-3 flex-shrink-0">
+              <ComplianceDocumentsDropdown
+                workflowRoles={['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'].filter((r) =>
+                  currentUserHasRole(r)
+                )}
+              />
               {/* Notification bell */}
               <div className="relative">
                 <button
@@ -7662,8 +7720,6 @@ function App() {
                   onClick={async () => {
                     const wasOpen = showNotificationPanel;
                     setShowNotificationPanel((open) => !open);
-                    
-                    // If opening panel, refresh notifications from database (do NOT auto mark all read – user can click "Mark all read")
                     if (!wasOpen && currentUser) {
                       try {
                         const dbNotifications = await getUserNotifications(currentUser.id);
@@ -7686,41 +7742,85 @@ function App() {
                       } catch (error) {
                         console.error('Error refreshing notifications:', error);
                       }
-                    } else if (!wasOpen) {
-                      // No user – leave local state as is
-                    }
+                    } else if (!wasOpen) {}
                   }}
-                  className="relative flex h-10 w-10 items-center justify-center rounded-full border border-blue-200 bg-blue-50 text-blue-700 shadow-sm hover:bg-blue-100 hover:border-blue-300 transition"
+                  className="relative flex h-11 w-11 items-center justify-center rounded-lg border border-blue-200 bg-gradient-to-br from-blue-50 to-white text-blue-700 shadow-sm hover:bg-blue-100 hover:border-blue-300 hover:shadow-md transition-all"
                   aria-label="Notifications"
                 >
-                  <svg
-                    className="h-5 w-5"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={1.8}
-                      d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
-                    />
+                  <svg className="h-5.5 w-5.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
                   </svg>
                   {notifications.some((n) => !n.read) && (
-                    <span className="absolute -top-1 -right-1 h-4 min-w-[1rem] rounded-full bg-rose-500 px-1 text-[0.65rem] font-semibold leading-4 text-white">
+                    <span className="absolute -top-0.5 -right-0.5 h-4 min-w-[1rem] flex items-center justify-center rounded-full bg-gradient-to-r from-rose-500 to-pink-500 px-1 text-[0.65rem] font-bold leading-4 text-white shadow-sm">
                       {notifications.filter((n) => !n.read).length}
                     </span>
                   )}
                 </button>
               </div>
-
-              <button
-                type="button"
-                onClick={handleLogout}
-                className="rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-2 text-sm font-semibold text-blue-800 transition hover:bg-blue-400/20 hover:text-emerald-100"
-              >
-                Sign out
-              </button>
+              {/* User Avatar Dropdown - Last position */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowUserDropdown(!showUserDropdown)}
+                  className="flex items-center gap-2 rounded-lg border border-blue-200 bg-gradient-to-br from-blue-50 to-white p-2 shadow-md hover:shadow-lg transition-all hover:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 group"
+                  aria-label="User menu"
+                >
+                  <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-600 text-white font-bold text-base shadow-inner group-hover:shadow-lg transition-shadow">
+                    {currentUser?.name?.charAt(0)?.toUpperCase() || 'U'}
+                  </div>
+                </button>
+                
+                {/* Dropdown Menu */}
+                {showUserDropdown && (
+                  <>
+                    {/* Backdrop */}
+                    <div
+                      className="fixed inset-0 z-[90]"
+                      onClick={() => setShowUserDropdown(false)}
+                    />
+                    {/* Dropdown Content */}
+                    <div className="absolute right-0 top-full mt-2 z-[100] w-64 rounded-xl border border-blue-200 bg-white shadow-2xl">
+                      <div className="p-4">
+                        <p className="text-[0.6rem] font-semibold uppercase tracking-[0.25em] text-blue-600 mb-2">
+                          SIGNED IN
+                        </p>
+                        <p className="text-base font-bold text-blue-900 mb-3">
+                          {currentUser?.name ?? 'Unknown user'}
+                        </p>
+                        <div className="flex flex-col gap-2">
+                          {currentUser?.roles.map((role) => (
+                            <RoleBadge key={`dropdown-${role}`} role={role} />
+                          )) ?? []}
+                          {currentUser?.roles.includes('Chief Examiner') && currentUser?.lecturerCategory && (
+                            <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 border border-emerald-200">
+                              {currentUser.lecturerCategory === 'Undergraduate' ? 'UG Chief Examiner' : 'PG Chief Examiner'}
+                            </span>
+                          )}
+                          {currentUser && (
+                            <span className="inline-flex items-center rounded-full bg-yellow-50 px-2.5 py-1 text-xs font-semibold text-yellow-700 border border-yellow-200">
+                              Semester: Advent
+                            </span>
+                          )}
+                          {currentUser?.courseUnit &&
+                            currentUser.courseUnit.toLowerCase().includes('network') && (
+                              <span className="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700 border border-indigo-200">
+                                {currentUser.roles.includes('Team Lead') ? 'Team Lead – Networking' : currentUser.roles.includes('Setter') ? 'Setter – Networking' : 'Networking'}
+                              </span>
+                            )}
+                        </div>
+                        <div className="mt-4 pt-4 border-t border-slate-200">
+                          <button
+                            onClick={handleLogout}
+                            className="w-full rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-2 text-sm font-semibold text-blue-800 transition hover:bg-blue-400/20"
+                          >
+                            Sign out
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           </div>
 
