@@ -30,7 +30,7 @@ import { supabase } from './lib/supabase';
 import { elevateToChiefExaminer, appointRole, revokeRole } from './lib/privilegeElevation';
 import { uploadVettingRecording } from './lib/examServices/recordingService';
 import { getVettingRecordings } from './lib/examServices/chiefExaminerService';
-import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead } from './lib/examServices/notificationService';
+import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead, clearAllNotifications } from './lib/examServices/notificationService';
 import ucuLogo from './assets/ucu-logo.png';
 import RecordingReviewPanel from './components/RecordingReviewPanel';
 import type { RecordingEntry } from './types/recordings';
@@ -2010,6 +2010,7 @@ function App() {
         });
 
         // Merge Supabase papers with persisted papers, prioritizing Supabase data but keeping persisted statuses
+        // IMPORTANT: Only merge papers that exist in Supabase - don't add back deleted papers from localStorage
         const persistedPapers = loadPersistedPapers();
         const mergedPapers: SubmittedPaper[] = submitted.map(supabasePaper => {
           const persisted = persistedPapers.find(p => p.id === supabasePaper.id);
@@ -2019,13 +2020,13 @@ function App() {
           }
           return supabasePaper;
         });
-        // Add any persisted papers that aren't in Supabase yet
-        const newPersisted = persistedPapers.filter(p => !submitted.find(s => s.id === p.id));
-        const finalPapers = ensureDemoPaper([...mergedPapers, ...newPersisted]);
+        // Only add persisted papers that aren't in Supabase if they're truly new (not deleted)
+        // For now, we'll only use papers from Supabase to avoid showing deleted papers
+        const finalPapers = ensureDemoPaper(mergedPapers);
         setSubmittedPapers(finalPapers);
         setRepositoryPapers(repo);
         
-        // Persist the merged papers
+        // Persist the merged papers (this will remove deleted papers from localStorage)
         try {
           localStorage.setItem('ucu-moderation-papers', JSON.stringify(finalPapers));
         } catch (error) {
@@ -2037,6 +2038,288 @@ function App() {
     };
 
     loadExamPapersFromSupabase();
+
+    // Set up real-time subscription for exam_papers to detect DELETE, INSERT, and UPDATE events
+    const examPapersChannel = supabase
+      .channel('exam_papers_changes')
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'exam_papers',
+        },
+        (payload) => {
+          console.log('🗑️ Paper deleted from database:', payload);
+          const deletedId = payload.old?.id as string;
+          if (deletedId) {
+            // Remove from submittedPapers
+            setSubmittedPapers((prev) => {
+              const beforeCount = prev.length;
+              const updated = prev.filter((p) => p.id !== deletedId);
+              const afterCount = updated.length;
+              if (beforeCount !== afterCount) {
+                console.log(`✅ Removed paper ${deletedId} from submittedPapers (${beforeCount} -> ${afterCount})`);
+                try {
+                  localStorage.setItem('ucu-moderation-papers', JSON.stringify(updated));
+                } catch (error) {
+                  console.error('Error saving papers to localStorage:', error);
+                }
+              } else {
+                console.warn(`⚠️ Paper ${deletedId} not found in submittedPapers`);
+              }
+              return updated;
+            });
+            // Remove from repositoryPapers
+            setRepositoryPapers((prev) => {
+              const beforeCount = prev.length;
+              const updated = prev.filter((p) => p.id !== deletedId);
+              const afterCount = updated.length;
+              if (beforeCount !== afterCount) {
+                console.log(`✅ Removed paper ${deletedId} from repositoryPapers (${beforeCount} -> ${afterCount})`);
+              } else {
+                console.warn(`⚠️ Paper ${deletedId} not found in repositoryPapers`);
+              }
+              return updated;
+            });
+          } else {
+            console.error('❌ DELETE event received but no paper ID found:', payload);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'exam_papers',
+        },
+        (payload) => {
+          console.log('➕ Paper inserted into database:', payload);
+          // Reload papers to get the new paper with all its data
+          loadExamPapersFromSupabase();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'exam_papers',
+        },
+        (payload) => {
+          console.log('📝 Paper updated in database:', payload);
+          const updatedPaper = payload.new as any;
+          if (updatedPaper?.id) {
+            // Update submittedPapers
+            setSubmittedPapers((prev) => {
+              const existingIndex = prev.findIndex((p) => p.id === updatedPaper.id);
+              if (existingIndex === -1) {
+                // Paper doesn't exist locally, reload all papers
+                loadExamPapersFromSupabase();
+                return prev;
+              }
+
+              // Map backend status to UI status
+              let status: 'submitted' | 'in-vetting' | 'vetted' | 'approved' = 'submitted';
+              if (updatedPaper.status === 'approved_for_printing') {
+                status = 'approved';
+              } else if (
+                updatedPaper.status === 'appointed_for_vetting' ||
+                updatedPaper.status === 'vetting_in_progress' ||
+                updatedPaper.status === 'vetted_with_comments'
+              ) {
+                status = 'in-vetting';
+              } else if (updatedPaper.status === 'integrated_by_team_lead') {
+                status = 'submitted';
+              }
+
+              const updated = [...prev];
+              const existing = updated[existingIndex];
+              updated[existingIndex] = {
+                ...existing,
+                fileName: updatedPaper.file_name || updatedPaper.course_name || existing.fileName,
+                status,
+                courseCode: updatedPaper.course_code || existing.courseCode,
+                courseUnit: updatedPaper.course_name || existing.courseUnit,
+                semester: updatedPaper.semester || existing.semester,
+                year: updatedPaper.academic_year || existing.year,
+                fileUrl: updatedPaper.file_url || existing.fileUrl,
+                fileSize: updatedPaper.file_size || existing.fileSize,
+              };
+
+              try {
+                localStorage.setItem('ucu-moderation-papers', JSON.stringify(updated));
+              } catch (error) {
+                console.error('Error saving papers to localStorage:', error);
+              }
+              return updated;
+            });
+
+            // Update repositoryPapers
+            setRepositoryPapers((prev) => {
+              const existingIndex = prev.findIndex((p) => p.id === updatedPaper.id);
+              if (existingIndex === -1) {
+                // Paper doesn't exist locally, reload all papers
+                loadExamPapersFromSupabase();
+                return prev;
+              }
+
+              let submittedRole: 'Setter' | 'Team Lead' | 'Chief Examiner' | 'Manual' | 'Unknown' = 'Unknown';
+              if (updatedPaper.team_lead_id) {
+                submittedRole = 'Team Lead';
+              } else if (updatedPaper.setter_id) {
+                submittedRole = 'Setter';
+              } else if (updatedPaper.chief_examiner_id) {
+                submittedRole = 'Chief Examiner';
+              }
+
+              const updated = [...prev];
+              const existing = updated[existingIndex];
+              updated[existingIndex] = {
+                ...existing,
+                courseUnit: updatedPaper.course_name || existing.courseUnit,
+                courseCode: updatedPaper.course_code || existing.courseCode,
+                semester: updatedPaper.semester || existing.semester,
+                year: updatedPaper.academic_year || existing.year,
+                submittedBy: updatedPaper.setter_id || updatedPaper.team_lead_id || existing.submittedBy,
+                submittedAt: updatedPaper.submitted_at || updatedPaper.created_at || existing.submittedAt,
+                fileName: updatedPaper.file_name || existing.fileName,
+                content: updatedPaper.file_url || existing.content,
+                fileSize: updatedPaper.file_size || existing.fileSize,
+                submittedRole,
+              };
+              return updated;
+            });
+          }
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('✅ Real-time exam_papers subscription active');
+        } else if (status === 'CHANNEL_ERROR') {
+          console.error('❌ Real-time exam_papers subscription error');
+        } else if (status === 'TIMED_OUT') {
+          console.warn('⏱️ Real-time exam_papers subscription timed out');
+        } else {
+          console.log('📡 Real-time exam_papers subscription status:', status);
+        }
+      });
+
+    return () => {
+      supabase.removeChannel(examPapersChannel);
+    };
+  }, []);
+
+  // Refresh papers when window gains focus to catch any deletions that might have been missed
+  useEffect(() => {
+    const onFocus = () => {
+      // Reload papers from Supabase to ensure we're in sync
+      const loadExamPapersFromSupabase = async () => {
+        try {
+          const { data, error } = await supabase
+            .from('exam_papers')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+          if (error || !data) {
+            console.error('Error loading exam papers from Supabase on focus:', error);
+            return;
+          }
+
+          // Map exam_papers rows into SubmittedPaper + repositoryPapers structures
+          const submitted: SubmittedPaper[] = data.map((paper: any) => {
+            let submittedRole: SubmittedPaper['submittedRole'] = 'Unknown';
+            if (paper.team_lead_id) {
+              submittedRole = 'Team Lead';
+            } else if (paper.setter_id) {
+              submittedRole = 'Setter';
+            } else if (paper.chief_examiner_id) {
+              submittedRole = 'Chief Examiner';
+            }
+
+            return {
+              id: paper.id,
+              fileName: paper.file_name || paper.course_name || 'Exam Paper',
+              submittedBy:
+                paper.team_lead_id ||
+                paper.setter_id ||
+                paper.chief_examiner_id ||
+                'Unknown',
+              submittedAt: paper.submitted_at || paper.created_at,
+              fileSize: paper.file_size || undefined,
+              status:
+                paper.status === 'approved_for_printing'
+                  ? 'approved'
+                  : paper.status === 'appointed_for_vetting' ||
+                    paper.status === 'vetting_in_progress' ||
+                    paper.status === 'vetted_with_comments'
+                  ? 'in-vetting'
+                  : paper.status === 'integrated_by_team_lead'
+                  ? 'submitted'
+                  : 'submitted',
+              courseCode: paper.course_code,
+              courseUnit: paper.course_name,
+              semester: paper.semester,
+              year: paper.academic_year,
+              fileUrl: paper.file_url || undefined,
+              submittedRole,
+            };
+          });
+
+          const repo = data.map((paper: any) => {
+            let submittedRole: 'Setter' | 'Team Lead' | 'Chief Examiner' | 'Manual' | 'Unknown' = 'Unknown';
+            if (paper.team_lead_id) {
+              submittedRole = 'Team Lead';
+            } else if (paper.setter_id) {
+              submittedRole = 'Setter';
+            } else if (paper.chief_examiner_id) {
+              submittedRole = 'Chief Examiner';
+            }
+            
+            return {
+              id: paper.id,
+              courseUnit: paper.course_name,
+              courseCode: paper.course_code,
+              semester: paper.semester,
+              year: paper.academic_year,
+              submittedBy: paper.setter_id || paper.team_lead_id || 'Unknown',
+              submittedAt: paper.submitted_at || paper.created_at,
+              fileName: paper.file_name || 'Exam Paper',
+              content: paper.file_url || '',
+              fileSize: paper.file_size || undefined,
+              submittedRole,
+            };
+          });
+
+          // Only use papers from Supabase - don't merge with localStorage to avoid showing deleted papers
+          const persistedPapers = loadPersistedPapers();
+          const mergedPapers: SubmittedPaper[] = submitted.map(supabasePaper => {
+            const persisted = persistedPapers.find(p => p.id === supabasePaper.id);
+            // If paper exists in persisted and has "in-vetting" status, keep that status
+            if (persisted && persisted.status === 'in-vetting') {
+              return { ...supabasePaper, status: 'in-vetting' as const };
+            }
+            return supabasePaper;
+          });
+          const finalPapers = ensureDemoPaper(mergedPapers);
+          setSubmittedPapers(finalPapers);
+          setRepositoryPapers(repo);
+          
+          // Persist the updated papers (this removes deleted papers from localStorage)
+          try {
+            localStorage.setItem('ucu-moderation-papers', JSON.stringify(finalPapers));
+          } catch (error) {
+            console.error('Error saving papers to localStorage:', error);
+          }
+        } catch (err) {
+          console.error('Unexpected error loading exam papers on focus:', err);
+        }
+      };
+      loadExamPapersFromSupabase();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
   }, []);
 
   // Helper: upload exam paper file to Supabase Storage + log metadata in exam_papers table
@@ -2188,6 +2471,16 @@ function App() {
     }
   }, []);
 
+  // Refetch current user's profile when window gains focus so revoked users (e.g. ex-vetter) get updated roles and stop seeing vetting notifications
+  useEffect(() => {
+    if (!authUserId) return;
+    const onFocus = () => {
+      refreshUsers();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [authUserId, refreshUsers]);
+
   // Load persisted notifications for the signed-in user from Supabase with real-time subscription
   useEffect(() => {
     // On login (or user change), clear toast-seen set so vetter always sees "Vetting Session Started" / "Vetter re-activated" toast and can join
@@ -2208,7 +2501,7 @@ function App() {
           hasWarnedEmptyVetterForUserId.current = currentUser.id;
           console.warn('🔔 Vetter notifications empty. User id:', currentUser.id, '- Check Supabase: 1) Run notifications_table_and_rls.sql 2) Run seed_all_notification_messages.sql (use user_profiles) 3) Chief must Start Session after SQL 4) user_profiles.roles must include "Vetter" for this user.');
         }
-        const mapped: AppNotification[] = dbNotifications.map((n) => ({
+        let mapped: AppNotification[] = dbNotifications.map((n) => ({
           id: n.id,
           message: n.message,
           title: n.title,
@@ -2216,6 +2509,11 @@ function App() {
           read: n.is_read,
           type: n.type,
         }));
+        // Revoked vetters must not see vetting session notifications – only current vetters do
+        if (!isVetter) {
+          const vettingTitles = new Set(['Vetting Session Started', 'Vetter re-activated']);
+          mapped = mapped.filter((n) => !(n.title && vettingTitles.has(n.title)));
+        }
         // Merge with existing state so we don't wipe local notifications (e.g. Chief's "Vetting Session Started" toast) when polling runs
         setNotifications((prev) => {
           const dbIds = new Set(mapped.map((m) => m.id));
@@ -2226,7 +2524,7 @@ function App() {
             .slice(0, 50);
         });
 
-        // Show toast ONLY for session-specific notifications (Chief started / vetter re-activated) - not generic role/privilege alerts
+        // Show toast ONLY for session-specific notifications (Chief started / vetter re-activated) - and only if user is still a vetter (mapped already filtered for non-vetters above)
         const toShow = mapped.filter(
           (n) => !n.read && (n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated')
         );
@@ -2289,6 +2587,10 @@ function App() {
                 title?: string;
                 type?: 'info' | 'warning' | 'error' | 'success' | 'deadline';
               };
+              const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
+              const isVettingSessionNotif = newNotification.title === 'Vetting Session Started' || newNotification.title === 'Vetter re-activated';
+              // Revoked vetters must not see vetting session notifications – skip add and toast
+              if (isVettingSessionNotif && !isVetter) return;
               const mapped: AppNotification = {
                 id: newNotification.id,
                 message: newNotification.message,
@@ -2299,21 +2601,16 @@ function App() {
               };
               setNotifications((prev) => [mapped, ...prev].slice(0, 50));
               // Show toast for new notification (so vetter sees "Vetting Session Started" / "Vetter re-activated" same as session-end)
-              if (mapped.title === 'Vetting Session Started' || mapped.title === 'Vetter re-activated') {
+              if (isVettingSessionNotif) {
                 shownVettingStartedToastIds.current.add(mapped.id);
-                // Enable "Start Session" for vetters when they receive the notification
-                const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
-                if (isVetter) {
-                  setVettingSession((prev) => ({ ...prev, active: true }));
-                  // When vetter receives "Vetter re-activated", clear their local restriction so they see Start Session
-                  if (mapped.title === 'Vetter re-activated' && currentUser?.id) {
-                    setRestrictedVetters((prev) => {
-                      const next = new Set(prev);
-                      next.delete(currentUser.id);
-                      localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
-                      return next;
-                    });
-                  }
+                setVettingSession((prev) => ({ ...prev, active: true }));
+                if (mapped.title === 'Vetter re-activated' && currentUser?.id) {
+                  setRestrictedVetters((prev) => {
+                    const next = new Set(prev);
+                    next.delete(currentUser.id);
+                    localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+                    return next;
+                  });
                 }
               }
               setActiveToast(mapped);
@@ -3529,36 +3826,66 @@ function App() {
 
     if (!dbResult.success) {
       console.error('Error saving role assignment to database:', dbResult.error);
-      // Optional: show an error toast or roll back the local change
-    }
-
-      const message = `${role} role assigned to ${targetUser.name} by ${actor}.`;
-
-      pushWorkflowEvent(message, actor);
-
-      // Create a notification for the Chief Examiner (current user) to see in their bell - same style as session expired
-      const notification: AppNotification = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        message,
+      // Roll back local state so UI matches DB and assignments don't get lost on refresh
+      const rollbackUserId = userId;
+      const rollbackRole = role;
+      setUsers((prev) => {
+        const reverted = prev.map((u) =>
+          u.id === rollbackUserId && u.roles.includes(rollbackRole)
+            ? { ...u, roles: u.roles.filter((r) => r !== rollbackRole) }
+            : u
+        );
+        try {
+          localStorage.setItem('ucu-moderation-users', JSON.stringify(reverted));
+        } catch (e) {
+          console.error('Error rolling back users to localStorage:', e);
+        }
+        return reverted;
+      });
+      const errorNotification: AppNotification = {
+        id: `err-${Date.now()}`,
+        message: dbResult.error || 'Role could not be saved. Try again.',
         timestamp: new Date().toISOString(),
         read: false,
-        title: 'Privilege Elevated',
-        type: 'warning',
+        title: 'Role assignment failed',
+        type: 'error',
       };
+      setNotifications((prev) => [errorNotification, ...prev].slice(0, 20));
+      setActiveToast(errorNotification);
+      setTimeout(() => setActiveToast((c) => (c?.id === errorNotification.id ? null : c)), 6000);
+      return;
+    }
 
-      // Show toast + local bell update for the current user (Chief Examiner)
-      setNotifications((prev) => [notification, ...prev].slice(0, 20));
-      setActiveToast(notification);
+    // Sync from DB so refresh shows correct data and list stays consistent
+    await refreshUsers();
 
-      // Note: Notification for the target user is created in privilegeElevation.ts
-      // (appointRole/elevateToChiefExaminer functions)
+    const message = `${role} role assigned to ${targetUser.name} by ${actor}.`;
 
-      // Auto-hide toast after a few seconds
-      setTimeout(() => {
-        setActiveToast((current) =>
-          current && current.id === notification.id ? null : current
-        );
-      }, 5000);
+    pushWorkflowEvent(message, actor);
+
+    // Create a notification for the Chief Examiner (current user) to see in their bell - same style as session expired
+    const notification: AppNotification = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      message,
+      timestamp: new Date().toISOString(),
+      read: false,
+      title: 'Privilege Elevated',
+      type: 'warning',
+    };
+
+    // Show toast + local bell update for the current user (Chief Examiner)
+    setNotifications((prev) => [notification, ...prev].slice(0, 20));
+    setActiveToast(notification);
+
+    // Note: Notification for the target user is created in privilegeElevation.ts
+    // (appointRole/elevateToChiefExaminer functions)
+
+    // Auto-hide toast after a few seconds
+    setTimeout(() => {
+      setActiveToast((current) =>
+        current && current.id === notification.id ? null : current
+      );
+    }, 5000);
   };
 
   const handleUnassignRole = async (userId: string, role: Role) => {
@@ -3570,6 +3897,18 @@ function App() {
     const dbResult = await revokeRole(userId, role, actor, currentUser?.id);
     if (!dbResult.success) {
       console.error('Error revoking role in database:', dbResult.error);
+      const errNotif: AppNotification = {
+        id: `err-revoke-${Date.now()}`,
+        message: dbResult.error || 'Could not revoke role. Try again.',
+        timestamp: new Date().toISOString(),
+        read: false,
+        title: 'Revoke failed',
+        type: 'error',
+      };
+      setNotifications((prev) => [errNotif, ...prev].slice(0, 20));
+      setActiveToast(errNotif);
+      setTimeout(() => setActiveToast((c) => (c?.id === errNotif.id ? null : c)), 6000);
+      return;
     }
 
     setUsers((prev) => {
@@ -3604,6 +3943,7 @@ function App() {
     setTimeout(() => {
       setActiveToast((current) => (current && current.id === notification.id ? null : current));
     }, 5000);
+    await refreshUsers();
   };
 
   const handleToggleDeadlines = (nextValue: boolean) => {
@@ -4211,20 +4551,20 @@ function App() {
         console.log(`📬 Vetting session notifications: ${notified} sent to vetter(s).`);
       }
 
-      // Persist notification for the Chief Examiner so it appears in the bell and can be read from there (real-time will add it to state and show toast)
+      // Persist notification for the Chief Examiner: he has activated the timer for all vetters across the system
       if (currentUser?.id) {
         void createNotification({
           user_id: currentUser.id,
-          title: 'Vetting Session Started',
-          message: `Vetting session started. ${vetterCount} vetter(s) have been notified and can join now.`,
+          title: 'Vetting Timer Activated',
+          message: `You have activated the vetting timer for all vetters across the system. ${vetterCount} vetter(s) have been notified and can join now.`,
           type: 'warning',
         });
       }
       // Also add locally so bell shows immediately and toast appears without waiting for real-time
       const chiefToast: AppNotification = {
         id: createId(),
-        title: 'Vetting Session Started',
-        message: `Vetting session started. ${vetterCount} vetter(s) have been notified and can join now.`,
+        title: 'Vetting Timer Activated',
+        message: `You have activated the vetting timer for all vetters across the system. ${vetterCount} vetter(s) have been notified and can join now.`,
         timestamp: new Date().toISOString(),
         read: false,
         type: 'warning',
@@ -4335,6 +4675,41 @@ function App() {
         `Vetter ${actor} joined the vetting session. Safe browser restrictions are now active.`,
         actor
       );
+
+      // Notify this vetter that their timer has started (they receive when their time is activated)
+      const vetterTimerMessage = 'Your vetting timer has started. Complete your work before the session ends.';
+      const vetterNotif = await createNotification({
+        user_id: currentUser.id,
+        title: 'Your Timer Started',
+        message: vetterTimerMessage,
+        type: 'info',
+      });
+      if (vetterNotif.success) {
+        const localNotif: AppNotification = {
+          id: createId(),
+          title: 'Your Timer Started',
+          message: vetterTimerMessage,
+          timestamp: new Date().toISOString(),
+          read: false,
+          type: 'info',
+        };
+        setNotifications((prev) => [localNotif, ...prev].slice(0, 50));
+      }
+
+      // Notify Chief Examiner(s) that this vetter has started their timer (Chief receives who has joined)
+      const chiefs = await getChiefExaminerUserIds();
+      const chiefMessage = `Vetter ${actor} has started their vetting session (timer active).`;
+      for (const chief of chiefs) {
+        const res = await createNotification({
+          user_id: chief.id,
+          title: 'Vetter Timer Started',
+          message: chiefMessage,
+          type: 'info',
+        });
+        if (!res.success) {
+          console.warn('Failed to notify Chief (vetter joined):', chief.name, res.error);
+        }
+      }
 
       console.log('Vetter joined session successfully!', {
         vetterId: currentUser.id,
@@ -4523,7 +4898,7 @@ function App() {
     }
   };
 
-  const handleRemovePaperFromVetting = (paperId: string) => {
+  const handleRemovePaperFromVetting = async (paperId: string) => {
     const paper = submittedPapers.find(p => p.id === paperId);
     if (!paper) {
       alert('Paper not found.');
@@ -4531,6 +4906,25 @@ function App() {
     }
     
     if (confirm(`Are you sure you want to remove "${paper.fileName}" from vetting? This will change its status back to "submitted".`)) {
+      // Sync status change to Supabase first
+      try {
+        const { error } = await supabase
+          .from('exam_papers')
+          .update({ status: 'integrated_by_team_lead' })
+          .eq('id', paperId);
+        
+        if (error) {
+          console.error('Error updating paper status in Supabase:', error);
+          alert(`Failed to sync status change to database: ${error.message}`);
+          return;
+        }
+      } catch (error: any) {
+        console.error('Unexpected error syncing paper status:', error);
+        alert(`Failed to sync status change: ${error?.message || 'Unknown error'}`);
+        return;
+      }
+
+      // Update local state
       setSubmittedPapers(prev => {
         const updated = prev.map(p => 
           p.id === paperId 
@@ -5108,6 +5502,10 @@ function App() {
       console.log('📹 Stopped global monitoring camera stream (session expired)');
     }
     
+    // Capture who was in this session before clearing (so we only notify them, not all vetters)
+    const sessionVetterIds = new Set(joinedVetters);
+    const sessionVetterDetails = new Map(vetterMonitoring);
+
     // Remove all vetters from joined set
     setJoinedVetters(new Set());
     
@@ -5143,20 +5541,18 @@ function App() {
     setNotifications((prev) => [notification, ...prev]);
     setActiveToast(notification);
 
-    // Persist "Session Expired" to DB for all vetters + Chief so everyone sees it in the bell (same mechanism as "Vetting Session Started")
+    // Persist "Session Expired" only to Chief + vetters who were in THIS session (not all vetters)
     const expiredMessage = 'Vetting Session Expired: Session time finished. All vetter records have been saved and cameras stopped.';
     (async () => {
-      const dbVetters = await getVetterUserIds();
-      const recipients = currentUser?.id
-        ? [...dbVetters, { id: currentUser.id, name: currentUser.name ?? 'Chief' }]
-        : dbVetters;
-      const seen = new Set<string>();
-      const unique = recipients.filter((r) => {
-        if (seen.has(r.id)) return false;
-        seen.add(r.id);
-        return true;
+      const recipients: { id: string; name: string }[] = [];
+      if (currentUser?.id) {
+        recipients.push({ id: currentUser.id, name: currentUser.name ?? 'Chief' });
+      }
+      sessionVetterIds.forEach((vetterId) => {
+        const details = sessionVetterDetails.get(vetterId);
+        recipients.push({ id: vetterId, name: details?.vetterName ?? 'Vetter' });
       });
-      for (const user of unique) {
+      for (const user of recipients) {
         const result = await createNotification({
           user_id: user.id,
           title: 'Vetting Session Expired',
@@ -6620,7 +7016,7 @@ function App() {
       label: 'Repository Papers',
       visible: true,
       render: () => (
-        <RepositoryPapersPanel repositoryPapers={repositoryPapers} users={users} />
+        <RepositoryPapersPanel repositoryPapers={repositoryPapers} submittedPapers={submittedPapers} users={users} />
       ),
     });
   }
@@ -7746,14 +8142,54 @@ function App() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  {notifications.length > 0 && currentUser && (
+                    <button
+                      type="button"
+                      className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[0.7rem] font-medium text-slate-700 shadow-sm transition hover:bg-slate-100 hover:border-slate-300"
+                      onClick={async () => {
+                        if (!currentUser?.id) return;
+                        const ok = await clearAllNotifications(currentUser.id);
+                        if (ok?.success !== false) {
+                          setNotifications([]);
+                        }
+                      }}
+                    >
+                      Clear all
+                    </button>
+                  )}
                   {notifications.some((n) => !n.read) && currentUser && (
                     <button
                       type="button"
                       className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[0.7rem] font-medium text-blue-800 shadow-sm transition hover:bg-blue-100"
                       onClick={async () => {
                         if (!currentUser?.id) return;
-                        await markAllNotificationsAsRead(currentUser.id);
+                        const ok = await markAllNotificationsAsRead(currentUser.id);
                         setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+                        // Refetch from DB so state stays in sync and toasts don't re-appear on next poll
+                        if (ok?.success !== false) {
+                          getUserNotifications(currentUser.id).then((list) => {
+                            const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
+                            let mapped: AppNotification[] = list.map((n) => ({
+                              id: n.id,
+                              message: n.message,
+                              title: n.title,
+                              timestamp: n.created_at,
+                              read: n.is_read,
+                              type: n.type,
+                            }));
+                            if (!isVetter) {
+                              const vettingTitles = new Set(['Vetting Session Started', 'Vetter re-activated']);
+                              mapped = mapped.filter((n) => !(n.title && vettingTitles.has(n.title)));
+                            }
+                            setNotifications((prev) => {
+                              const dbIds = new Set(mapped.map((m) => m.id));
+                              const localOnly = prev.filter((n) => !dbIds.has(n.id));
+                              return [...localOnly, ...mapped]
+                                .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+                                .slice(0, 50);
+                            });
+                          }).catch(() => {});
+                        }
                       }}
                     >
                       Mark all read
@@ -13959,10 +14395,22 @@ function _LecturerDashboardPanel({
 
 interface RepositoryPapersPanelProps {
   repositoryPapers: RepositoryPaper[];
+  submittedPapers: SubmittedPaper[];
   users: User[];
 }
 
-function RepositoryPapersPanel({ repositoryPapers, users }: RepositoryPapersPanelProps) {
+function RepositoryPapersPanel({ repositoryPapers, submittedPapers, users }: RepositoryPapersPanelProps) {
+  // Filter out papers that have been sent to vetting or beyond
+  // Only show papers that are still in the repository (not yet sent to vetting)
+  const papersReadyForAnalysis = repositoryPapers.filter((repoPaper) => {
+    const submittedPaper = submittedPapers.find(sp => sp.id === repoPaper.id);
+    // If paper is not in submittedPapers, it's still in repository
+    if (!submittedPaper) return true;
+    // If paper is in submittedPapers but status is still 'submitted', it's ready for analysis
+    if (submittedPaper.status === 'submitted') return true;
+    // If paper has been sent to vetting or beyond, exclude it
+    return false;
+  });
   const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
   const [userNameCache, setUserNameCache] = useState<Record<string, string>>({});
   const fetchedUserIdsRef = useRef<Set<string>>(new Set());
@@ -14034,13 +14482,13 @@ function RepositoryPapersPanel({ repositoryPapers, users }: RepositoryPapersPane
       kicker="Central Exam Repository"
       description="View all papers compiled and submitted by Team Lead. These papers are ready for Chief Examiner AI similarity analysis before vetting."
     >
-      {repositoryPapers.length === 0 ? (
+      {papersReadyForAnalysis.length === 0 ? (
         <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
-          No papers are currently in the repository for this semester.
+          No papers are currently in the repository for this semester. All papers have been sent to vetting or are in progress.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {repositoryPapers.map((paper) => {
+          {papersReadyForAnalysis.map((paper) => {
             const isExpanded = expandedCards.has(paper.id);
             const submitterName = getSubmitterName(paper.submittedBy);
             return (
@@ -16538,6 +16986,7 @@ function VettingAndAnnotations({
   const [deadlineHours, setDeadlineHours] = useState(0);
   const [deadlineMinutes, setDeadlineMinutes] = useState(0);
   const checklistUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const vetterSelfVideoRef = useRef<HTMLVideoElement | null>(null);
   const isChiefExaminer = userHasRole('Chief Examiner');
   const isVetter = userHasRole('Vetter');
   const vetterHasJoined = currentUserId ? joinedVetters.has(currentUserId) : false;
@@ -16569,6 +17018,20 @@ function VettingAndAnnotations({
     }
     return `${names[0]}, ${names[1]} +${names.length - 2} more are typing…`;
   };
+
+  // Vetter circular preview: attach camera stream to video element when available (fixes black/no-face)
+  const vetterPreviewStream = (isVetter && currentUserId && vetterMonitoring?.get(currentUserId)?.cameraStream) || (window as any).__vettingCameraStream;
+  useEffect(() => {
+    const video = vetterSelfVideoRef.current;
+    if (!video || !vetterPreviewStream || !vetterPreviewStream.active) return;
+    video.srcObject = vetterPreviewStream;
+    const play = () => video.play().catch(() => {});
+    play();
+    video.addEventListener('loadedmetadata', play);
+    return () => {
+      video.removeEventListener('loadedmetadata', play);
+    };
+  }, [vetterPreviewStream, isVetter, vetterHasJoined, vettingSession.cameraOn, currentUserId]);
 
   const _SectionCommentArea = ({
     sectionKey,
@@ -18278,23 +18741,12 @@ function VettingAndAnnotations({
       }
     >
       <div className="space-y-5">
-        {/* Circular video preview for vetter - shows their recorded face */}
-        {isVetter && vetterHasJoined && vettingSession.cameraOn && currentUserId && (() => {
-          // Get camera stream from monitoring data or global stream
-          const monitoring = vetterMonitoring?.get(currentUserId);
-          const cameraStream = monitoring?.cameraStream || (window as any).__vettingCameraStream;
-          if (!cameraStream) return null;
-          
-          return (
+        {/* Circular video preview for vetter - shows their recorded face (useEffect attaches stream for reliable display) */}
+        {isVetter && vetterHasJoined && vettingSession.cameraOn && currentUserId && (
             <div className="fixed bottom-6 right-6 z-50">
               <div className="relative w-32 h-32 rounded-full border-4 border-green-500 bg-slate-900 overflow-hidden shadow-2xl">
                 <video
-                  ref={(video) => {
-                    if (video && cameraStream) {
-                      video.srcObject = cameraStream;
-                      video.play().catch(err => console.error('Circular preview playback error:', err));
-                    }
-                  }}
+                  ref={vetterSelfVideoRef}
                   autoPlay
                   playsInline
                   muted
@@ -18306,8 +18758,7 @@ function VettingAndAnnotations({
                 </div>
               </div>
             </div>
-          );
-        })()}
+        )}
         {showVetterFocusedLayout && vetterSessionPanel}
         {paperChecklistColumns}
 

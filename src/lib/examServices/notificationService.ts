@@ -133,6 +133,26 @@ export async function deleteNotification(
   }
 }
 
+// Clear all notifications for a user
+export async function clearAllNotifications(
+  userId: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { error } = await supabase
+      .from('notifications')
+      .delete()
+      .eq('user_id', userId);
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+}
+
 // Get unread notification count
 export async function getUnreadCount(userId: string): Promise<number> {
   try {
