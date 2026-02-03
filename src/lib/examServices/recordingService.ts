@@ -1,6 +1,6 @@
 import { supabase } from '../supabase';
 
-const STORAGE_BUCKET = 'vetting-recordings';
+const STORAGE_BUCKET = 'vetting_recordings';
 
 /**
  * Upload video recording to Supabase Storage

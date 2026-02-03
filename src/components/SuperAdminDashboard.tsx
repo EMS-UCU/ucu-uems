@@ -6,6 +6,7 @@ import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, CartesianGrid, Tool
 import { motion } from 'framer-motion';
 import RecordingReviewPanel from './RecordingReviewPanel';
 import type { RecordingEntry } from '../types/recordings';
+import ConsentAcceptancesReport from './ConsentAcceptancesReport';
 
 interface SuperAdminDashboardProps {
   currentUserId: string;
@@ -32,7 +33,7 @@ export default function SuperAdminDashboard({
   });
   const [loading, setLoading] = useState(true);
   const [hoveredCard, setHoveredCard] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'recordings'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'recordings' | 'consents'>('overview');
 
   useEffect(() => {
     loadData();
@@ -197,11 +198,12 @@ export default function SuperAdminDashboard({
           {[
             { id: 'overview', label: 'Overview' },
             { id: 'recordings', label: 'Recordings' },
+            { id: 'consents', label: 'Consent Reports' },
           ].map((tab) => (
             <button
               key={tab.id}
               type="button"
-              onClick={() => setActiveTab(tab.id as 'overview' | 'recordings')}
+              onClick={() => setActiveTab(tab.id as 'overview' | 'recordings' | 'consents')}
               className={`px-3 py-1.5 rounded-full transition ${
                 activeTab === tab.id ? 'bg-blue-600 text-white' : 'hover:bg-blue-50'
               }`}
@@ -217,6 +219,8 @@ export default function SuperAdminDashboard({
           recordings={recordingEntries}
           contextLabel="Super Admin"
         />
+      ) : activeTab === 'consents' ? (
+        <ConsentAcceptancesReport />
       ) : (
         <>
 

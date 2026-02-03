@@ -133,6 +133,84 @@ export async function addVettingComment(
   }
 }
 
+/**
+ * Update or create a vetting session with recording data after successful upload.
+ * Finds existing session by exam_paper_id, or creates one if none exists.
+ */
+export async function syncVettingRecordingToSession(
+  examPaperId: string,
+  recordingData: {
+    recordingUrl: string;
+    recordingFilePath: string;
+    recordingFileSize: number;
+    recordingDurationSeconds: number;
+    recordingStartedAt: string;
+    recordingCompletedAt: string;
+  }
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Find existing vetting session for this exam paper (most recent first)
+    const { data: sessions, error: findError } = await supabase
+      .from('vetting_sessions')
+      .select('id, chief_examiner_id')
+      .eq('exam_paper_id', examPaperId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (findError) {
+      return { success: false, error: findError.message };
+    }
+
+    const updateData = {
+      status: 'completed' as const,
+      completed_at: recordingData.recordingCompletedAt,
+      recording_url: recordingData.recordingUrl,
+      recording_file_path: recordingData.recordingFilePath,
+      recording_file_size: recordingData.recordingFileSize,
+      recording_duration_seconds: recordingData.recordingDurationSeconds,
+      recording_started_at: recordingData.recordingStartedAt,
+      recording_completed_at: recordingData.recordingCompletedAt,
+    };
+
+    if (sessions && sessions.length > 0) {
+      const { error: updateError } = await supabase
+        .from('vetting_sessions')
+        .update(updateData)
+        .eq('id', sessions[0].id);
+
+      if (updateError) {
+        return { success: false, error: updateError.message };
+      }
+      return { success: true };
+    }
+
+    // No existing session: create one so recording appears in Chief's dashboard
+    const { data: examPaper } = await supabase
+      .from('exam_papers')
+      .select('chief_examiner_id')
+      .eq('id', examPaperId)
+      .single();
+
+    const { error: insertError } = await supabase
+      .from('vetting_sessions')
+      .insert({
+        exam_paper_id: examPaperId,
+        chief_examiner_id: examPaper?.chief_examiner_id ?? null,
+        status: 'completed',
+        started_at: recordingData.recordingStartedAt,
+        completed_at: recordingData.recordingCompletedAt,
+        ...updateData,
+      });
+
+    if (insertError) {
+      return { success: false, error: insertError.message };
+    }
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error?.message ?? 'Failed to sync recording' };
+  }
+}
+
 // Complete vetting session
 export async function completeVettingSession(
   sessionId: string,
