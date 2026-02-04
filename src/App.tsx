@@ -67,7 +67,12 @@ type WorkflowStage =
 const getEffectiveWorkflowStage = (
   submittedPapers: SubmittedPaper[],
   currentStage: WorkflowStage
-): WorkflowStage => {
+): WorkflowStage | null => {
+  // If there are no papers, return null to indicate no active workflow
+  if (submittedPapers.length === 0) {
+    return null;
+  }
+
   const hasApproved = submittedPapers.some((p) => p.status === 'approved');
   if (hasApproved) return 'Approved';
 
@@ -137,6 +142,12 @@ const STUDY_YEAR_PATTERNS = [
   { label: 'Third Year', keywords: ['third', 'yr3', 'year 3', '3rd', '3'] },
   { label: 'Fourth Year', keywords: ['fourth', 'yr4', 'year 4', '4th', '4'] },
 ];
+
+// Helper function to check if a file is a checklist (not an exam paper)
+const isChecklist = (fileName: string): boolean => {
+  const normalized = fileName.toLowerCase();
+  return normalized.includes('checklist') || normalized.includes('check-list');
+};
 
 const deriveStudyYearLabel = (rawYear?: string, courseCode?: string): string => {
   if (rawYear) {
@@ -1264,6 +1275,7 @@ function App() {
     hours: number;
     minutes: number;
   }>({ days: 0, hours: 0, minutes: 7 });
+  const [setterDeadlineScheduledTime, setSetterDeadlineScheduledTime] = useState<number | null>(null);
   
   const [teamLeadDeadlineActive, setTeamLeadDeadlineActive] = useState(false);
   const [teamLeadDeadlineStartTime, setTeamLeadDeadlineStartTime] = useState<number | null>(null);
@@ -1272,6 +1284,7 @@ function App() {
     hours: number;
     minutes: number;
   }>({ days: 7, hours: 0, minutes: 0 });
+  const [teamLeadDeadlineScheduledTime, setTeamLeadDeadlineScheduledTime] = useState<number | null>(null);
   
   const [repositoriesActive, setRepositoriesActive] = useState(false);
   const [lastModerationDownload, setLastModerationDownload] = useState<
@@ -1836,9 +1849,11 @@ function App() {
         setterDeadlineActive?: boolean;
         setterDeadlineStartTime?: number | null;
         setterDeadlineDuration?: { days: number; hours: number; minutes: number };
+        setterDeadlineScheduledTime?: number | null;
         teamLeadDeadlineActive?: boolean;
         teamLeadDeadlineStartTime?: number | null;
         teamLeadDeadlineDuration?: { days: number; hours: number; minutes: number };
+        teamLeadDeadlineScheduledTime?: number | null;
       };
 
       if (typeof parsed.setterDeadlineActive === 'boolean') {
@@ -1850,6 +1865,9 @@ function App() {
       if (parsed.setterDeadlineDuration) {
         setSetterDeadlineDuration(parsed.setterDeadlineDuration);
       }
+      if (typeof parsed.setterDeadlineScheduledTime === 'number') {
+        setSetterDeadlineScheduledTime(parsed.setterDeadlineScheduledTime);
+      }
 
       if (typeof parsed.teamLeadDeadlineActive === 'boolean') {
         setTeamLeadDeadlineActive(parsed.teamLeadDeadlineActive);
@@ -1859,6 +1877,9 @@ function App() {
       }
       if (parsed.teamLeadDeadlineDuration) {
         setTeamLeadDeadlineDuration(parsed.teamLeadDeadlineDuration);
+      }
+      if (typeof parsed.teamLeadDeadlineScheduledTime === 'number') {
+        setTeamLeadDeadlineScheduledTime(parsed.teamLeadDeadlineScheduledTime);
       }
     } catch (error) {
       console.error('Error loading deadline state from localStorage:', error);
@@ -1872,9 +1893,11 @@ function App() {
         setterDeadlineActive,
         setterDeadlineStartTime,
         setterDeadlineDuration,
+        setterDeadlineScheduledTime,
         teamLeadDeadlineActive,
         teamLeadDeadlineStartTime,
         teamLeadDeadlineDuration,
+        teamLeadDeadlineScheduledTime,
       };
       localStorage.setItem('ucu-moderation-deadlines', JSON.stringify(payload));
     } catch (error) {
@@ -1884,9 +1907,11 @@ function App() {
     setterDeadlineActive,
     setterDeadlineStartTime,
     setterDeadlineDuration,
+    setterDeadlineScheduledTime,
     teamLeadDeadlineActive,
     teamLeadDeadlineStartTime,
     teamLeadDeadlineDuration,
+    teamLeadDeadlineScheduledTime,
   ]);
 
   // Persist submittedPapers whenever they change
@@ -1991,30 +2016,36 @@ function App() {
           };
         });
 
-        const repo = data.map((paper: any) => {
-          let submittedRole: 'Setter' | 'Team Lead' | 'Chief Examiner' | 'Manual' | 'Unknown' = 'Unknown';
-          if (paper.team_lead_id) {
-            submittedRole = 'Team Lead';
-          } else if (paper.setter_id) {
-            submittedRole = 'Setter';
-          } else if (paper.chief_examiner_id) {
-            submittedRole = 'Chief Examiner';
-          }
-          
-          return {
-            id: paper.id,
-            courseUnit: paper.course_name,
-            courseCode: paper.course_code,
-            semester: paper.semester,
-            year: paper.academic_year,
-            submittedBy: paper.setter_id || paper.team_lead_id || 'Unknown',
-            submittedAt: paper.submitted_at || paper.created_at,
-            fileName: paper.file_name || 'Exam Paper',
-            content: paper.file_url || '',
-            fileSize: paper.file_size || undefined,
-            submittedRole,
-          };
-        });
+        const repo = data
+          .filter((paper: any) => {
+            // Filter out checklists - only include exam papers in repository
+            const fileName = paper.file_name || 'Exam Paper';
+            return !isChecklist(fileName);
+          })
+          .map((paper: any) => {
+            let submittedRole: 'Setter' | 'Team Lead' | 'Chief Examiner' | 'Manual' | 'Unknown' = 'Unknown';
+            if (paper.team_lead_id) {
+              submittedRole = 'Team Lead';
+            } else if (paper.setter_id) {
+              submittedRole = 'Setter';
+            } else if (paper.chief_examiner_id) {
+              submittedRole = 'Chief Examiner';
+            }
+            
+            return {
+              id: paper.id,
+              courseUnit: paper.course_name,
+              courseCode: paper.course_code,
+              semester: paper.semester,
+              year: paper.academic_year,
+              submittedBy: paper.setter_id || paper.team_lead_id || 'Unknown',
+              submittedAt: paper.submitted_at || paper.created_at,
+              fileName: paper.file_name || 'Exam Paper',
+              content: paper.file_url || '',
+              fileSize: paper.file_size || undefined,
+              submittedRole,
+            };
+          });
 
         // Merge Supabase papers with persisted papers, prioritizing Supabase data but keeping persisted statuses
         // IMPORTANT: Only merge papers that exist in Supabase - don't add back deleted papers from localStorage
@@ -2747,41 +2778,26 @@ function App() {
           }
         });
 
-      // Also keep polling as backup (every 10 seconds for faster updates)
-      const interval = setInterval(() => {
-        loadNotifications();
-      }, 10000);
+      // Real-time subscription is sufficient - no polling needed
+      // Notifications will only appear from real-time updates or explicit user actions
       
       return () => {
         console.log('🔌 Cleaning up notification subscription');
         supabase.removeChannel(channel);
-        clearInterval(interval);
       };
     }
   }, [currentUser]);
 
-  // Vetters: fetch on login and poll every 3s so they see "Vetting Session Started" within 3s of Chief starting (no dependency on session active)
+  // Vetters: fetch on login only - real-time subscription handles updates
+  // Removed polling - notifications only come from real-time subscriptions or user actions
   useEffect(() => {
     const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
     if (!currentUser?.id || !isVetter) return;
-    let hasShownToastThisSession = false;
-    const showVettingToastIfUnread = (mapped: AppNotification[]) => {
-      if (hasShownToastThisSession) return;
-      const unread = mapped.filter((n) => !n.read && (n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated'));
-      if (unread.length > 0) {
-        hasShownToastThisSession = true;
-        const mostRecent = unread.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
-        setActiveToast(mostRecent);
-        setTimeout(() => setActiveToast((c) => (c?.id === mostRecent.id ? null : c)), 8000);
-      }
-    };
-    const refetch = async () => {
+    
+    // Only fetch once on login - real-time subscription will handle updates
+    const fetchOnce = async () => {
       try {
         const dbNotifications = await getUserNotifications(currentUser.id);
-        if (dbNotifications.length === 0 && hasWarnedEmptyVetterForUserId.current !== currentUser.id) {
-          hasWarnedEmptyVetterForUserId.current = currentUser.id;
-          console.warn('🔔 Vetter poll: 0 notifications for user', currentUser.id, '- Run seed_all_notification_messages.sql in Supabase (use user_profiles). Chief must Start Session after SQL.');
-        }
         const mapped: AppNotification[] = dbNotifications.map((n) => ({
           id: n.id,
           message: n.message,
@@ -2797,7 +2813,6 @@ function App() {
             .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
             .slice(0, 50);
         });
-        showVettingToastIfUnread(mapped);
         // Enable "Start Session" for vetters when they have "Vetting Session Started" or "Vetter re-activated" from DB
         const hasStarted = mapped.some((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
         const hasReActivated = mapped.some((n) => n.title === 'Vetter re-activated');
@@ -2813,12 +2828,10 @@ function App() {
           }
         }
       } catch (e) {
-        console.error('Vetter notification refetch:', e);
+        console.error('Vetter notification fetch:', e);
       }
     };
-    refetch();
-    const interval = setInterval(refetch, 3000);
-    return () => clearInterval(interval);
+    fetchOnce();
   }, [currentUser?.id, currentUser?.roles]);
 
   // Vetters: refetch notifications when window gains focus so they see "Vetting Session Started" immediately after Chief starts
@@ -2917,35 +2930,8 @@ function App() {
     refetch();
   }, [currentUser?.id, currentUser?.roles, activePanelId]);
 
-  // When vetter is on the app and session is active, keep polling every 5s so they stay in sync
-  useEffect(() => {
-    const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
-    if (!currentUser || !isVetter || !vettingSession.active) return;
-    const refetch = async () => {
-      try {
-        const dbNotifications = await getUserNotifications(currentUser.id);
-        const mapped: AppNotification[] = dbNotifications.map((n) => ({
-          id: n.id,
-          message: n.message,
-          title: n.title,
-          timestamp: n.created_at,
-          read: n.is_read,
-          type: n.type,
-        }));
-        setNotifications((prev) => {
-          const byId = new Map(prev.map((n) => [n.id, n]));
-          mapped.forEach((n) => byId.set(n.id, n));
-          return Array.from(byId.values()).sort(
-            (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-          );
-        });
-      } catch (e) {
-        console.error('Vetter notification refetch:', e);
-      }
-    };
-    const interval = setInterval(refetch, 5000);
-    return () => clearInterval(interval);
-  }, [currentUser?.id, currentUser?.roles, vettingSession.active]);
+  // Removed polling for active sessions - real-time subscription handles all updates
+  // Notifications will only appear from real-time updates or explicit user actions
 
   // Persist users to localStorage whenever they change (as backup)
   useEffect(() => {
@@ -4082,6 +4068,12 @@ function App() {
     semester: string,
     year: string
   ) => {
+    // Skip checklists - only track exam papers in repository
+    if (isChecklist(file.name)) {
+      alert('Checklists are not tracked in the repository. Only exam papers are stored for AI similarity analysis.');
+      return;
+    }
+
     const actorName = currentUser?.name ?? 'Unknown';
     const actorId = authUserId || currentUser?.id;
 
@@ -4300,26 +4292,28 @@ function App() {
       return ensureDemoPaper(updated);
     });
 
-    // Auto-add to repository
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const content = e.target?.result as string;
-      const repositoryPaper = {
-        id: createId(),
-        courseUnit,
-        courseCode,
-        semester,
-        year,
-        submittedBy: actor,
-        submittedAt: new Date().toISOString(),
-        fileName: file.name,
-        content: content || `Paper content for ${file.name}`,
-        fileSize: file.size,
-        submittedRole: 'Team Lead' as const,
+    // Auto-add to repository (only for exam papers, not checklists)
+    if (!isChecklist(file.name)) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        const repositoryPaper = {
+          id: createId(),
+          courseUnit,
+          courseCode,
+          semester,
+          year,
+          submittedBy: actor,
+          submittedAt: new Date().toISOString(),
+          fileName: file.name,
+          content: content || `Paper content for ${file.name}`,
+          fileSize: file.size,
+          submittedRole: 'Team Lead' as const,
+        };
+        setRepositoryPapers((prev) => [...prev, repositoryPaper]);
       };
-      setRepositoryPapers((prev) => [...prev, repositoryPaper]);
-    };
-    reader.readAsText(file);
+      reader.readAsText(file);
+    }
 
     // Persist Team Lead submission to Supabase so Chief Examiner and vetters can see it
     const result = await saveExamPaperToSupabase(file, {
@@ -4981,6 +4975,100 @@ function App() {
       setCustomChecklistPdf(null);
       setCustomChecklist(null);
       alert('Checklist removed from vetting. Default checklist will be used.');
+    }
+  };
+
+  const handleDeleteRepositoryPaper = async (paperId: string) => {
+    const paper = repositoryPapers.find(p => p.id === paperId);
+    if (!paper) {
+      alert('Paper not found.');
+      return;
+    }
+    
+    if (!confirm(`Are you sure you want to permanently delete "${paper.fileName}" from the repository? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      // First, get the file path from the database to delete from storage
+      const { data: examPaperData, error: fetchError } = await supabase
+        .from('exam_papers')
+        .select('file_url')
+        .eq('id', paperId)
+        .single();
+
+      if (fetchError && fetchError.code !== 'PGRST116') { // PGRST116 = no rows returned
+        console.error('Error fetching paper data:', fetchError);
+        alert(`Failed to fetch paper data: ${fetchError.message}`);
+        return;
+      }
+
+      // Delete file from storage if it exists
+      // Try to get file path from database first, then fallback to paper.content
+      let filePathToDelete: string | null = null;
+      
+      if (examPaperData?.file_url) {
+        // Extract the file path from the URL
+        // The file_url might be a full URL or just a path
+        let filePath = examPaperData.file_url;
+        
+        // If it's a full URL, extract the path after the bucket name
+        const urlMatch = examPaperData.file_url.match(/exam_papers\/(.+)$/);
+        if (urlMatch) {
+          filePathToDelete = urlMatch[1];
+        } else if (examPaperData.file_url.startsWith('http')) {
+          // If it's a full URL but doesn't match the pattern, try to extract path
+          const pathMatch = examPaperData.file_url.split('exam_papers/');
+          if (pathMatch.length > 1) {
+            filePathToDelete = pathMatch[1].split('?')[0]; // Remove query params
+          }
+        } else {
+          // If it's not a URL, it might be a direct path
+          filePathToDelete = filePath;
+        }
+      } else if (paper.content && paper.content.includes('/')) {
+        // Fallback: try to extract path from paper.content
+        // Format: "Stored in Supabase at {path}" or just the path
+        const contentMatch = paper.content.match(/Stored in Supabase at (.+)/);
+        if (contentMatch) {
+          filePathToDelete = contentMatch[1];
+        } else if (!paper.content.startsWith('http')) {
+          filePathToDelete = paper.content;
+        }
+      }
+
+      // Delete from storage if we have a valid path
+      if (filePathToDelete) {
+        const { error: storageError } = await supabase.storage
+          .from('exam_papers')
+          .remove([filePathToDelete]);
+
+        if (storageError) {
+          console.warn('Error deleting file from storage (continuing with DB delete):', storageError);
+          // Continue with database deletion even if storage deletion fails
+        }
+      }
+
+      // Delete from database - this will trigger the real-time subscription
+      // which will automatically remove it from repositoryPapers and submittedPapers
+      const { error: deleteError } = await supabase
+        .from('exam_papers')
+        .delete()
+        .eq('id', paperId);
+
+      if (deleteError) {
+        console.error('Error deleting paper from database:', deleteError);
+        alert(`Failed to delete paper from database: ${deleteError.message}`);
+        return;
+      }
+
+      // Show success message
+      alert(`Paper "${paper.fileName}" has been successfully deleted from the repository and database.`);
+      
+      // The real-time subscription will automatically update the UI
+    } catch (error: any) {
+      console.error('Unexpected error deleting paper:', error);
+      alert(`Failed to delete paper: ${error?.message || 'Unknown error'}`);
     }
   };
 
@@ -6333,6 +6421,68 @@ function App() {
     Rejected: 'Assign a new setter and restart the workflow cycle.',
   };
 
+  // Automatically activate Setter deadline when scheduled time is reached
+  useEffect(() => {
+    if (setterDeadlineScheduledTime && !setterDeadlineActive && currentTime >= setterDeadlineScheduledTime) {
+      // Scheduled time reached - activate Setter deadline automatically
+      setSetterDeadlineActive(true);
+      setSetterDeadlineStartTime(Date.now());
+      setSetterDeadlineScheduledTime(null); // Clear scheduled time after activation
+      
+      const actor = currentUser?.name ?? 'System';
+      const durationText = `${setterDeadlineDuration.days} day${setterDeadlineDuration.days !== 1 ? 's' : ''}, ${setterDeadlineDuration.hours} hour${setterDeadlineDuration.hours !== 1 ? 's' : ''}, ${setterDeadlineDuration.minutes} minute${setterDeadlineDuration.minutes !== 1 ? 's' : ''}`;
+      pushWorkflowEvent(
+        `Setter submission deadline activated automatically as scheduled (${durationText}).`,
+        actor
+      );
+      
+      // Notify all Setters
+      const setters = users.filter((u) => u.roles.includes('Setter'));
+      const message = `Submission deadline has been activated. You have ${durationText} to submit your exam paper drafts.`;
+      setters.forEach((setter) => {
+        if (setter.id) {
+          void createNotification({
+            user_id: setter.id,
+            title: 'Submission Deadline Activated',
+            message,
+            type: 'deadline',
+          });
+        }
+      });
+    }
+  }, [currentTime, setterDeadlineScheduledTime, setterDeadlineActive, setterDeadlineDuration, users, currentUser?.name]);
+
+  // Automatically activate Team Lead deadline when scheduled time is reached
+  useEffect(() => {
+    if (teamLeadDeadlineScheduledTime && !teamLeadDeadlineActive && currentTime >= teamLeadDeadlineScheduledTime) {
+      // Scheduled time reached - activate Team Lead deadline automatically
+      setTeamLeadDeadlineActive(true);
+      setTeamLeadDeadlineStartTime(Date.now());
+      setTeamLeadDeadlineScheduledTime(null); // Clear scheduled time after activation
+      
+      const actor = currentUser?.name ?? 'System';
+      const durationText = `${teamLeadDeadlineDuration.days} day${teamLeadDeadlineDuration.days !== 1 ? 's' : ''}, ${teamLeadDeadlineDuration.hours} hour${teamLeadDeadlineDuration.hours !== 1 ? 's' : ''}, ${teamLeadDeadlineDuration.minutes} minute${teamLeadDeadlineDuration.minutes !== 1 ? 's' : ''}`;
+      pushWorkflowEvent(
+        `Team Lead submission deadline activated automatically as scheduled (${durationText}).`,
+        actor
+      );
+      
+      // Notify all Team Leads
+      const teamLeads = users.filter((u) => u.roles.includes('Team Lead'));
+      const message = `Submission deadline has been activated. You have ${durationText} to submit your compiled papers.`;
+      teamLeads.forEach((teamLead) => {
+        if (teamLead.id) {
+          void createNotification({
+            user_id: teamLead.id,
+            title: 'Submission Deadline Activated',
+            message,
+            type: 'deadline',
+          });
+        }
+      });
+    }
+  }, [currentTime, teamLeadDeadlineScheduledTime, teamLeadDeadlineActive, teamLeadDeadlineDuration, users, currentUser?.name]);
+
   // Automatically start Team Lead deadline when Setter deadline expires
   useEffect(() => {
     if (!setterDeadlineActive || !setterDeadlineStartTime) {
@@ -7015,6 +7165,9 @@ function App() {
           setterSubmissions={setterSubmissions}
           annotations={annotations}
           users={users}
+          repositoryPapers={repositoryPapers}
+          moderationSchedule={moderationSchedule}
+          moderationStartCountdown={moderationStartCountdown}
         />
       ),
     });
@@ -7024,7 +7177,7 @@ function App() {
       label: 'Track Paper',
       visible: true,
       render: () => (
-        <PaperTrackingPanel workflow={workflow} submittedPapers={submittedPapers} />
+        <PaperTrackingPanel workflow={workflow} submittedPapers={submittedPapers} repositoryPapers={repositoryPapers} />
       ),
     });
 
@@ -7049,9 +7202,14 @@ function App() {
           setterDeadlineActive={setterDeadlineActive}
           setterDeadlineDuration={setterDeadlineDuration}
           setterDeadlineStartTime={setterDeadlineStartTime}
+          setterDeadlineScheduledTime={setterDeadlineScheduledTime}
+          onSetSetterDeadlineScheduled={(scheduledTime: number | null) => setSetterDeadlineScheduledTime(scheduledTime)}
           teamLeadDeadlineActive={teamLeadDeadlineActive}
           teamLeadDeadlineDuration={teamLeadDeadlineDuration}
           teamLeadDeadlineStartTime={teamLeadDeadlineStartTime}
+          teamLeadDeadlineScheduledTime={teamLeadDeadlineScheduledTime}
+          onSetTeamLeadDeadlineScheduled={(scheduledTime: number | null) => setTeamLeadDeadlineScheduledTime(scheduledTime)}
+          currentTime={currentTime}
           restrictedVetters={restrictedVetters}
           onReactivateVetter={(vetterId) => {
             setRestrictedVetters(prev => {
@@ -7072,7 +7230,7 @@ function App() {
             });
           }}
           recordingEntries={recordingEntries}
-          onSetSetterDeadline={(active: boolean, duration: { days: number; hours: number; minutes: number }) => {
+          onSetSetterDeadline={async (active: boolean, duration: { days: number; hours: number; minutes: number }) => {
             setSetterDeadlineActive(active);
             if (active) {
               setSetterDeadlineStartTime(Date.now());
@@ -7086,8 +7244,24 @@ function App() {
               `${active ? 'Activated' : 'Deactivated'} Setter submission deadline (${durationText}).`,
               actor
             );
+            
+            // Notify all Setters when deadline is activated
+            if (active) {
+              const setters = users.filter((u) => u.roles.includes('Setter'));
+              const message = `Submission deadline has been activated. You have ${durationText} to submit your exam paper drafts.`;
+              setters.forEach((setter) => {
+                if (setter.id) {
+                  void createNotification({
+                    user_id: setter.id,
+                    title: 'Submission Deadline Activated',
+                    message,
+                    type: 'deadline',
+                  });
+                }
+              });
+            }
           }}
-          onSetTeamLeadDeadline={(active: boolean, duration: { days: number; hours: number; minutes: number }) => {
+          onSetTeamLeadDeadline={async (active: boolean, duration: { days: number; hours: number; minutes: number }) => {
             setTeamLeadDeadlineActive(active);
             if (active) {
               setTeamLeadDeadlineStartTime(Date.now());
@@ -7101,6 +7275,22 @@ function App() {
               `${active ? 'Activated' : 'Deactivated'} Team Lead submission deadline (${durationText}).`,
               actor
             );
+            
+            // Notify all Team Leads when deadline is activated
+            if (active) {
+              const teamLeads = users.filter((u) => u.roles.includes('Team Lead'));
+              const message = `Submission deadline has been activated. You have ${durationText} to compile and submit exam papers to the Chief Examiner.`;
+              teamLeads.forEach((teamLead) => {
+                if (teamLead.id) {
+                  void createNotification({
+                    user_id: teamLead.id,
+                    title: 'Submission Deadline Activated',
+                    message,
+                    type: 'deadline',
+                  });
+                }
+              });
+            }
           }}
           onAddPaperToRepository={handleAddPaperToRepository}
           repositoryPapers={repositoryPapers}
@@ -7115,7 +7305,12 @@ function App() {
       label: 'Repository Papers',
       visible: true,
       render: () => (
-        <RepositoryPapersPanel repositoryPapers={repositoryPapers} submittedPapers={submittedPapers} users={users} />
+        <RepositoryPapersPanel 
+          repositoryPapers={repositoryPapers} 
+          submittedPapers={submittedPapers} 
+          users={users}
+          onDeletePaper={handleDeleteRepositoryPaper}
+        />
       ),
     });
   }
@@ -7133,6 +7328,7 @@ function App() {
           deadlineActive={setterDeadlineActive}
           deadlineStartTime={setterDeadlineStartTime}
           deadlineDuration={setterDeadlineDuration}
+          deadlineScheduledTime={setterDeadlineScheduledTime}
           currentUserCourseUnit={currentUser?.courseUnit}
           currentUserCampus={currentUser?.campus}
           mySubmissions={setterSubmissions.filter((s) => s.submittedBy === currentUser?.name)}
@@ -7160,6 +7356,7 @@ function App() {
           teamLeadDeadlineActive={teamLeadDeadlineActive}
           teamLeadDeadlineStartTime={teamLeadDeadlineStartTime}
           teamLeadDeadlineDuration={teamLeadDeadlineDuration}
+          repositoryPapers={repositoryPapers}
         />
       ),
     });
@@ -7173,6 +7370,7 @@ function App() {
           deadlinesActive={teamLeadDeadlineActive}
           deadlineStartTime={teamLeadDeadlineStartTime}
           deadlineDuration={teamLeadDeadlineDuration}
+          deadlineScheduledTime={teamLeadDeadlineScheduledTime}
           repositoriesActive={repositoriesActive}
           onTeamLeadCompile={handleTeamLeadCompile}
           submittedPapers={submittedPapers.filter(
@@ -8087,7 +8285,7 @@ function App() {
                   <p className="text-sm text-slate-500 font-medium truncate max-w-md">
                     {isAdmin ? 'Manage staff accounts and system configuration' : isChiefExaminer ? 'Assign and manage the exam process' : isTeamLead ? 'Coordinate setters and manage submissions' : isVetter ? 'Review and vet exam papers' : isSetter ? 'Prepare and submit exam papers' : isPureLecturer ? 'Manage classes, students and reports' : outstandingAction}
                   </p>
-                  {currentUser?.roles.length > 0 && (
+                  {currentUser?.roles && currentUser.roles.length > 0 && (
                     <>
                       <div className="h-5 w-px bg-blue-300/60"></div>
                       <div className="flex items-center gap-2 flex-wrap">
@@ -8105,7 +8303,7 @@ function App() {
             {/* Right Section - Actions */}
             <div className="flex items-center gap-3 flex-shrink-0">
               <ComplianceDocumentsDropdown
-                workflowRoles={['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'].filter((r) =>
+                workflowRoles={(['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'] as Role[]).filter((r) =>
                   currentUserHasRole(r)
                 )}
               />
@@ -11042,9 +11240,14 @@ interface ChiefExaminerConsoleProps {
   setterDeadlineActive: boolean;
   setterDeadlineDuration: { days: number; hours: number; minutes: number };
   setterDeadlineStartTime: number | null;
+  setterDeadlineScheduledTime: number | null;
+  onSetSetterDeadlineScheduled: (scheduledTime: number | null) => void;
   teamLeadDeadlineActive: boolean;
   teamLeadDeadlineDuration: { days: number; hours: number; minutes: number };
   teamLeadDeadlineStartTime: number | null;
+  teamLeadDeadlineScheduledTime: number | null;
+  onSetTeamLeadDeadlineScheduled: (scheduledTime: number | null) => void;
+  currentTime: number;
   onSetSetterDeadline: (active: boolean, duration: { days: number; hours: number; minutes: number }) => void;
   onSetTeamLeadDeadline: (active: boolean, duration: { days: number; hours: number; minutes: number }) => void;
   onAddPaperToRepository: (file: File, courseUnit: string, courseCode: string, semester: string, year: string) => void;
@@ -11127,9 +11330,14 @@ function ChiefExaminerConsole({
   setterDeadlineActive,
   setterDeadlineDuration,
   setterDeadlineStartTime,
+  setterDeadlineScheduledTime,
+  onSetSetterDeadlineScheduled,
   teamLeadDeadlineActive,
   teamLeadDeadlineDuration,
   teamLeadDeadlineStartTime,
+  teamLeadDeadlineScheduledTime,
+  onSetTeamLeadDeadlineScheduled,
+  currentTime,
   onSetSetterDeadline,
   onSetTeamLeadDeadline,
   onAddPaperToRepository,
@@ -11148,8 +11356,34 @@ function ChiefExaminerConsole({
   const [durationForm, _setDurationForm] = useState(deadlineDuration);
   const [showSetterDurationSettings, setShowSetterDurationSettings] = useState(false);
   const [setterDurationForm, setSetterDurationForm] = useState(setterDeadlineDuration);
+  const [showSetterScheduleSettings, setShowSetterScheduleSettings] = useState(false);
+  const [setterScheduleDateTime, setSetterScheduleDateTime] = useState(() => {
+    if (setterDeadlineScheduledTime) {
+      const date = new Date(setterDeadlineScheduledTime);
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      const hours = String(date.getHours()).padStart(2, '0');
+      const minutes = String(date.getMinutes()).padStart(2, '0');
+      return `${year}-${month}-${day}T${hours}:${minutes}`;
+    }
+    return '';
+  });
   const [showTeamLeadDurationSettings, setShowTeamLeadDurationSettings] = useState(false);
   const [teamLeadDurationForm, setTeamLeadDurationForm] = useState(teamLeadDeadlineDuration);
+  const [showTeamLeadScheduleSettings, setShowTeamLeadScheduleSettings] = useState(false);
+  const [teamLeadScheduleDateTime, setTeamLeadScheduleDateTime] = useState(() => {
+    if (teamLeadDeadlineScheduledTime) {
+      const date = new Date(teamLeadDeadlineScheduledTime);
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      const hours = String(date.getHours()).padStart(2, '0');
+      const minutes = String(date.getMinutes()).padStart(2, '0');
+      return `${year}-${month}-${day}T${hours}:${minutes}`;
+    }
+    return '';
+  });
 
   const awardableRoles: Role[] = ['Team Lead', 'Vetter', 'Setter', 'Lecturer'];
 
@@ -11741,6 +11975,25 @@ function ChiefExaminerConsole({
               />
             </div>
 
+            {setterDeadlineScheduledTime && !setterDeadlineActive && (
+              <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4 flex flex-col gap-2">
+                <p className="text-xs font-semibold text-amber-800">Scheduled Activation</p>
+                <p className="text-sm text-amber-900 font-medium">
+                  Will activate on: {new Date(setterDeadlineScheduledTime).toLocaleString()}
+                </p>
+                {setterDeadlineScheduledTime > currentTime && (
+                  <p className="text-xs text-amber-700">
+                    Time until activation: {(() => {
+                      const remaining = setterDeadlineScheduledTime - currentTime;
+                      const hours = Math.floor(remaining / (60 * 60 * 1000));
+                      const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+                      const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
+                      return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+                    })()}
+                  </p>
+                )}
+              </div>
+            )}
             {setterDeadlineActive && setterDeadlineStartTime && (
               <div className="mb-4 rounded-lg border border-pink-200 bg-pink-50 p-4 flex flex-col gap-1">
                 <p className="text-xs font-semibold text-pink-700">Current Deadline Duration</p>
@@ -11756,7 +12009,7 @@ function ChiefExaminerConsole({
             )}
 
             <div className="space-y-4">
-              {!showSetterDurationSettings ? (
+              {!showSetterDurationSettings && !showSetterScheduleSettings ? (
                 <>
                   <button
                     type="button"
@@ -11767,6 +12020,13 @@ function ChiefExaminerConsole({
                   </button>
                   <button
                     type="button"
+                    onClick={() => setShowSetterScheduleSettings(true)}
+                    className="w-full rounded-xl border border-blue-300 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
+                  >
+                    {setterDeadlineScheduledTime ? 'Update Scheduled Activation' : 'Schedule Activation'}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => onSetSetterDeadline(!setterDeadlineActive, setterDeadlineDuration)}
                     className={`w-full rounded-xl px-6 py-3 text-sm font-semibold transition ${
                       setterDeadlineActive
@@ -11774,9 +12034,83 @@ function ChiefExaminerConsole({
                         : 'bg-pink-500/90 text-pink-950 hover:bg-pink-400'
                     }`}
                   >
-                    {setterDeadlineActive ? 'Disable Setter Deadline' : 'Activate Setter Deadline'}
+                    {setterDeadlineActive ? 'Disable Setter Deadline' : 'Activate Setter Deadline Now'}
                   </button>
                 </>
+              ) : showSetterScheduleSettings ? (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-3">
+                      Schedule Automatic Activation
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={setterScheduleDateTime}
+                      onChange={(e) => setSetterScheduleDateTime(e.target.value)}
+                      min={new Date().toISOString().slice(0, 16)}
+                      className="w-full rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-pink-500 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
+                    />
+                    <p className="mt-2 text-xs text-slate-500">
+                      The deadline will automatically activate at the scheduled time.
+                    </p>
+                  </div>
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (setterScheduleDateTime) {
+                          const scheduledTime = new Date(setterScheduleDateTime).getTime();
+                          if (scheduledTime < Date.now()) {
+                            alert('Scheduled time must be in the future');
+                            return;
+                          }
+                          onSetSetterDeadlineScheduled(scheduledTime);
+                          setShowSetterScheduleSettings(false);
+                          alert('Schedule saved! Deadline will activate automatically at the scheduled time.');
+                        } else {
+                          onSetSetterDeadlineScheduled(null);
+                          setShowSetterScheduleSettings(false);
+                        }
+                      }}
+                      className="flex-1 rounded-xl bg-blue-500/90 px-4 py-3 text-sm font-semibold text-blue-950 transition hover:bg-blue-400"
+                    >
+                      Save Schedule
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSetterScheduleSettings(false);
+                        setSetterScheduleDateTime(setterDeadlineScheduledTime ? (() => {
+                          const date = new Date(setterDeadlineScheduledTime);
+                          const year = date.getFullYear();
+                          const month = String(date.getMonth() + 1).padStart(2, '0');
+                          const day = String(date.getDate()).padStart(2, '0');
+                          const hours = String(date.getHours()).padStart(2, '0');
+                          const minutes = String(date.getMinutes()).padStart(2, '0');
+                          return `${year}-${month}-${day}T${hours}:${minutes}`;
+                        })() : '');
+                      }}
+                      className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  {setterDeadlineScheduledTime && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm('Are you sure you want to clear the scheduled activation?')) {
+                          onSetSetterDeadlineScheduled(null);
+                          setSetterScheduleDateTime('');
+                          setShowSetterScheduleSettings(false);
+                        }
+                      }}
+                      className="w-full rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+                    >
+                      Clear Schedule
+                    </button>
+                  )}
+                </div>
               ) : (
                 <form onSubmit={(e) => {
                   e.preventDefault();
@@ -11893,6 +12227,25 @@ function ChiefExaminerConsole({
               />
             </div>
 
+            {teamLeadDeadlineScheduledTime && !teamLeadDeadlineActive && (
+              <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4 flex flex-col gap-2">
+                <p className="text-xs font-semibold text-amber-800">Scheduled Activation</p>
+                <p className="text-sm text-amber-900 font-medium">
+                  Will activate on: {new Date(teamLeadDeadlineScheduledTime).toLocaleString()}
+                </p>
+                {teamLeadDeadlineScheduledTime > currentTime && (
+                  <p className="text-xs text-amber-700">
+                    Time until activation: {(() => {
+                      const remaining = teamLeadDeadlineScheduledTime - currentTime;
+                      const hours = Math.floor(remaining / (60 * 60 * 1000));
+                      const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+                      const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
+                      return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+                    })()}
+                  </p>
+                )}
+              </div>
+            )}
             {teamLeadDeadlineActive && teamLeadDeadlineStartTime && (
               <div className="mb-4 rounded-lg border border-violet-200 bg-violet-50 p-4 flex flex-col gap-1">
                 <p className="text-xs font-semibold text-violet-700">Current Deadline Duration</p>
@@ -11908,7 +12261,7 @@ function ChiefExaminerConsole({
             )}
 
             <div className="space-y-4">
-              {!showTeamLeadDurationSettings ? (
+              {!showTeamLeadDurationSettings && !showTeamLeadScheduleSettings ? (
                 <>
                   <button
                     type="button"
@@ -11916,6 +12269,18 @@ function ChiefExaminerConsole({
                     className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
                   >
                     {teamLeadDeadlineActive ? 'Update Deadline Duration' : 'Set Deadline Duration'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowTeamLeadScheduleSettings(true)}
+                    disabled={Boolean(setterDeadlineActive && setterDeadlineStartTime)}
+                    className={`w-full rounded-xl border px-4 py-3 text-sm font-semibold transition ${
+                      setterDeadlineActive && setterDeadlineStartTime
+                        ? 'border-slate-300 bg-slate-100 text-slate-500 cursor-not-allowed'
+                        : 'border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100'
+                    }`}
+                  >
+                    {teamLeadDeadlineScheduledTime ? 'Update Scheduled Activation' : 'Schedule Activation'}
                   </button>
                   <button
                     type="button"
@@ -11929,7 +12294,7 @@ function ChiefExaminerConsole({
                         : 'bg-violet-500/90 text-violet-950 hover:bg-violet-400'
                     }`}
                   >
-                    {teamLeadDeadlineActive ? 'Disable Team Lead Deadline' : setterDeadlineActive && setterDeadlineStartTime ? 'Will Start When Setter Deadline Expires' : 'Activate Team Lead Deadline'}
+                    {teamLeadDeadlineActive ? 'Disable Team Lead Deadline' : setterDeadlineActive && setterDeadlineStartTime ? 'Will Start When Setter Deadline Expires' : 'Activate Team Lead Deadline Now'}
                   </button>
                   {setterDeadlineActive && setterDeadlineStartTime && (
                     <p className="text-xs text-amber-400 text-center">
@@ -11937,6 +12302,80 @@ function ChiefExaminerConsole({
                     </p>
                   )}
                 </>
+              ) : showTeamLeadScheduleSettings ? (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-3">
+                      Schedule Automatic Activation
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={teamLeadScheduleDateTime}
+                      onChange={(e) => setTeamLeadScheduleDateTime(e.target.value)}
+                      min={new Date().toISOString().slice(0, 16)}
+                      className="w-full rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
+                    />
+                    <p className="mt-2 text-xs text-slate-500">
+                      The deadline will automatically activate at the scheduled time.
+                    </p>
+                  </div>
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (teamLeadScheduleDateTime) {
+                          const scheduledTime = new Date(teamLeadScheduleDateTime).getTime();
+                          if (scheduledTime < Date.now()) {
+                            alert('Scheduled time must be in the future');
+                            return;
+                          }
+                          onSetTeamLeadDeadlineScheduled(scheduledTime);
+                          setShowTeamLeadScheduleSettings(false);
+                          alert('Schedule saved! Deadline will activate automatically at the scheduled time.');
+                        } else {
+                          onSetTeamLeadDeadlineScheduled(null);
+                          setShowTeamLeadScheduleSettings(false);
+                        }
+                      }}
+                      className="flex-1 rounded-xl bg-blue-500/90 px-4 py-3 text-sm font-semibold text-blue-950 transition hover:bg-blue-400"
+                    >
+                      Save Schedule
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowTeamLeadScheduleSettings(false);
+                        setTeamLeadScheduleDateTime(teamLeadDeadlineScheduledTime ? (() => {
+                          const date = new Date(teamLeadDeadlineScheduledTime);
+                          const year = date.getFullYear();
+                          const month = String(date.getMonth() + 1).padStart(2, '0');
+                          const day = String(date.getDate()).padStart(2, '0');
+                          const hours = String(date.getHours()).padStart(2, '0');
+                          const minutes = String(date.getMinutes()).padStart(2, '0');
+                          return `${year}-${month}-${day}T${hours}:${minutes}`;
+                        })() : '');
+                      }}
+                      className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  {teamLeadDeadlineScheduledTime && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm('Are you sure you want to clear the scheduled activation?')) {
+                          onSetTeamLeadDeadlineScheduled(null);
+                          setTeamLeadScheduleDateTime('');
+                          setShowTeamLeadScheduleSettings(false);
+                        }
+                      }}
+                      className="w-full rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+                    >
+                      Clear Schedule
+                    </button>
+                  )}
+                </div>
               ) : (
                 <form onSubmit={(e) => {
                   e.preventDefault();
@@ -12401,6 +12840,7 @@ interface SetterPanelProps {
   deadlineActive: boolean;
   deadlineStartTime: number | null;
   deadlineDuration: { days: number; hours: number; minutes: number };
+  deadlineScheduledTime?: number | null;
   currentUserCourseUnit?: string;
   currentUserCampus?: string;
   mySubmissions: SetterSubmission[];
@@ -12412,6 +12852,7 @@ function SetterPanel({
   deadlineActive,
   deadlineStartTime,
   deadlineDuration,
+  deadlineScheduledTime,
   currentUserCourseUnit,
   currentUserCampus,
   mySubmissions,
@@ -12419,13 +12860,14 @@ function SetterPanel({
   const [currentTime, setCurrentTime] = useState(Date.now());
 
   useEffect(() => {
-    if (deadlineActive && deadlineStartTime) {
+    // Update time every second if deadline is active OR scheduled
+    if ((deadlineActive && deadlineStartTime) || deadlineScheduledTime) {
       const timer = setInterval(() => {
         setCurrentTime(Date.now());
       }, 1000);
       return () => clearInterval(timer);
     }
-  }, [deadlineActive, deadlineStartTime]);
+  }, [deadlineActive, deadlineStartTime, deadlineScheduledTime]);
 
   const calculateTimeRemaining = () => {
     if (!deadlineActive || !deadlineStartTime) {
@@ -12464,7 +12906,55 @@ function SetterPanel({
         description="Countdown timer showing the time remaining to submit your paper draft."
       >
         <div className="rounded-xl border border-slate-200 bg-white p-6">
-          {!deadlineActive ? (
+          {!deadlineActive && deadlineScheduledTime ? (
+            <div className="text-center py-8">
+              <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-amber-500/20 border-2 border-amber-500/50 mb-4">
+                <span className="text-2xl">📅</span>
+              </div>
+              <p className="text-lg font-semibold text-amber-700">Deadline Scheduled</p>
+              <p className="text-sm text-slate-600 mt-2">
+                The submission deadline will activate automatically on:
+              </p>
+              <p className="text-base font-semibold text-amber-800 mt-2">
+                {new Date(deadlineScheduledTime).toLocaleString()}
+              </p>
+              {deadlineScheduledTime > currentTime && (
+                <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4">
+                  <p className="text-xs font-semibold text-amber-800 mb-2">Time Until Activation</p>
+                  <div className="grid grid-cols-4 gap-2">
+                    {(() => {
+                      const remaining = deadlineScheduledTime - currentTime;
+                      const hours = Math.floor(remaining / (60 * 60 * 1000));
+                      const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+                      const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
+                      const days = Math.floor(hours / 24);
+                      const displayHours = hours % 24;
+                      return (
+                        <>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(days).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Days</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(displayHours).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Hours</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(minutes).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Minutes</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(seconds).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Seconds</p>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : !deadlineActive ? (
             <div className="text-center py-8">
               <p className="text-sm text-slate-600">Deadlines are not currently active.</p>
               <p className="text-xs text-slate-500 mt-2">Waiting for Chief Examiner to activate deadlines.</p>
@@ -12598,6 +13088,7 @@ interface TeamLeadPanelProps {
   deadlinesActive: boolean;
   deadlineStartTime: number | null;
   deadlineDuration: { days: number; hours: number; minutes: number };
+  deadlineScheduledTime?: number | null;
   repositoriesActive: boolean;
   onTeamLeadCompile: () => void;
   submittedPapers: SubmittedPaper[];
@@ -12619,6 +13110,7 @@ function TeamLeadPanel({
   deadlinesActive,
   deadlineStartTime,
   deadlineDuration,
+  deadlineScheduledTime,
   repositoriesActive,
   onTeamLeadCompile: _onTeamLeadCompile,
   submittedPapers,
@@ -12960,7 +13452,55 @@ function TeamLeadPanel({
         description="Countdown timer showing the time remaining to submit papers as set by the Chief Examiner."
       >
         <div className="rounded-xl border border-slate-200 bg-white p-6">
-          {!deadlinesActive ? (
+          {!deadlinesActive && deadlineScheduledTime ? (
+            <div className="text-center py-8">
+              <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-amber-500/20 border-2 border-amber-500/50 mb-4">
+                <span className="text-2xl">📅</span>
+              </div>
+              <p className="text-lg font-semibold text-amber-700">Deadline Scheduled</p>
+              <p className="text-sm text-slate-600 mt-2">
+                The submission deadline will activate automatically on:
+              </p>
+              <p className="text-base font-semibold text-amber-800 mt-2">
+                {new Date(deadlineScheduledTime).toLocaleString()}
+              </p>
+              {deadlineScheduledTime > currentTime && (
+                <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4">
+                  <p className="text-xs font-semibold text-amber-800 mb-2">Time Until Activation</p>
+                  <div className="grid grid-cols-4 gap-2">
+                    {(() => {
+                      const remaining = deadlineScheduledTime - currentTime;
+                      const hours = Math.floor(remaining / (60 * 60 * 1000));
+                      const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+                      const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
+                      const days = Math.floor(hours / 24);
+                      const displayHours = hours % 24;
+                      return (
+                        <>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(days).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Days</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(displayHours).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Hours</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(minutes).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Minutes</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(seconds).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Seconds</p>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : !deadlinesActive ? (
             <div className="text-center py-8">
               <p className="text-sm text-slate-600">Deadlines are not currently active.</p>
               <p className="text-xs text-slate-500 mt-2">Waiting for Chief Examiner to activate deadlines.</p>
@@ -13306,6 +13846,7 @@ interface TeamLeadDashboardPanelProps {
   teamLeadDeadlineActive?: boolean;
   teamLeadDeadlineStartTime?: number | null;
   teamLeadDeadlineDuration?: { days: number; hours: number; minutes: number };
+  repositoryPapers?: RepositoryPaper[];
 }
 
 function TeamLeadDashboardPanel({
@@ -13316,6 +13857,7 @@ function TeamLeadDashboardPanel({
   teamLeadDeadlineActive = false,
   teamLeadDeadlineStartTime = null,
   teamLeadDeadlineDuration = { days: 7, hours: 0, minutes: 0 },
+  repositoryPapers = [],
 }: TeamLeadDashboardPanelProps) {
   // Cache for user names fetched from database (using object for React state updates)
   const [userNameCache, setUserNameCache] = useState<Record<string, string>>({});
@@ -13518,7 +14060,7 @@ function TeamLeadDashboardPanel({
       'Approved',
     ];
 
-    const currentIndex = orderedStages.indexOf(effectiveStage as WorkflowStage);
+    const currentIndex = effectiveStage ? orderedStages.indexOf(effectiveStage as WorkflowStage) : -1;
     const lastIndex = currentIndex === -1 ? 0 : currentIndex;
 
     return orderedStages.slice(0, lastIndex + 1).map((stage, index) => ({
@@ -13568,10 +14110,9 @@ function TeamLeadDashboardPanel({
   };
 
   const timeRemaining = calculateTimeRemaining();
-  // Check for rejection - either stage is Rejected, or lastDecision is Rejected, or stage is Submitted to Team Lead with Rejected decision
+  // Check for rejection - either stage is Rejected, or lastDecision is Rejected
   const hasRejection = workflow.stage === 'Rejected' || 
-    workflow.lastDecision?.type === 'Rejected' || 
-    (workflow.stage === 'Submitted to Team Lead' && workflow.lastDecision?.type === 'Rejected');
+    workflow.lastDecision?.type === 'Rejected';
   // Show countdown if there's a rejection AND deadline is active
   const showCountdown = hasRejection && teamLeadDeadlineActive && teamLeadDeadlineStartTime;
 
@@ -13752,6 +14293,9 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
   const [showDetails, setShowDetails] = useState<string | null>(null);
   const [scanCompleted, setScanCompleted] = useState(false);
 
+  // Create a Set of repository paper IDs for efficient lookup
+  const repositoryPaperIds = useMemo(() => new Set(repositoryPapers.map(rp => rp.id)), [repositoryPapers]);
+
   // Helper functions for paper cards
   const _getStatusColor = (status: string) => {
     switch (status) {
@@ -13931,8 +14475,12 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
     setTimeout(() => {
       const [courseCode] = selectedCourse.split(' - ');
       
-      // Get submitted papers for this course (including Team Lead submissions)
-      const papersToScan = submittedPapers.filter(p => p.courseCode && p.courseCode === courseCode);
+      // Get submitted papers for this course that exist in the repository (Team Lead submissions only)
+      const papersToScan = submittedPapers.filter(p => {
+        if (!p.courseCode || p.courseCode !== courseCode) return false;
+        // Only scan papers that exist in the repository
+        return repositoryPapers.some(rp => rp.id === p.id);
+      });
       
       // Get ALL repository papers for this course (both current and historical)
       const repositoryPapersForCourse = allRepositoryPapers.filter(p => p.courseCode === courseCode);
@@ -14067,6 +14615,10 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                   if (!p.courseCode) return false;
                   // Only show Team Lead submissions in similarity detection
                   if (p.submittedRole !== 'Team Lead') return false;
+                  // Exclude checklists - they shouldn't be in similarity detection
+                  if (isChecklist(p.fileName)) return false;
+                  // Only show papers that exist in the repository (must be in repositoryPapers)
+                  if (!repositoryPaperIds.has(p.id)) return false;
                   return selectedCourse.includes(p.courseCode);
                 })
                 .map((paper) => {
@@ -14497,12 +15049,18 @@ interface RepositoryPapersPanelProps {
   repositoryPapers: RepositoryPaper[];
   submittedPapers: SubmittedPaper[];
   users: User[];
+  onDeletePaper: (paperId: string) => Promise<void>;
 }
 
-function RepositoryPapersPanel({ repositoryPapers, submittedPapers, users }: RepositoryPapersPanelProps) {
-  // Filter out papers that have been sent to vetting or beyond
-  // Only show papers that are still in the repository (not yet sent to vetting)
+function RepositoryPapersPanel({ repositoryPapers, submittedPapers, users, onDeletePaper }: RepositoryPapersPanelProps) {
+  // Filter out checklists and papers that have been sent to vetting or beyond
+  // Only show exam papers that are still in the repository (not yet sent to vetting)
   const papersReadyForAnalysis = repositoryPapers.filter((repoPaper) => {
+    // First, exclude checklists
+    if (isChecklist(repoPaper.fileName)) {
+      return false;
+    }
+    
     const submittedPaper = submittedPapers.find(sp => sp.id === repoPaper.id);
     // If paper is not in submittedPapers, it's still in repository
     if (!submittedPaper) return true;
@@ -14714,6 +15272,20 @@ function RepositoryPapersPanel({ repositoryPapers, submittedPapers, users }: Rep
                       >
                         View PDF
                       </button>
+                      <button
+                        type="button"
+                        className="px-3 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-xs font-medium text-white transition flex items-center justify-center gap-1"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          await onDeletePaper(paper.id);
+                        }}
+                        title="Delete paper from repository"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                        Delete
+                      </button>
                     </div>
                   </div>
                 )}
@@ -14894,6 +15466,9 @@ interface ChiefExaminerDashboardPanelProps {
   setterSubmissions: SetterSubmission[];
   annotations: Annotation[];
   users: User[];
+  repositoryPapers: RepositoryPaper[];
+  moderationSchedule?: ModerationSchedule;
+  moderationStartCountdown?: string | null;
 }
 
 function ChiefExaminerDashboardPanel({
@@ -14902,8 +15477,14 @@ function ChiefExaminerDashboardPanel({
   setterSubmissions,
   annotations,
   users,
+  repositoryPapers,
+  moderationSchedule,
+  moderationStartCountdown,
 }: ChiefExaminerDashboardPanelProps) {
-  const effectiveStage = getEffectiveWorkflowStage(submittedPapers, workflow.stage);
+  const effectiveStage = getEffectiveWorkflowStage(submittedPapers, workflow.stage) || 'Awaiting Setter';
+  
+  // Create a Set of repository paper IDs for efficient lookup
+  const repositoryPaperIds = useMemo(() => new Set(repositoryPapers.map(rp => rp.id)), [repositoryPapers]);
   
   // Cache for user names fetched from database (using object for React state updates)
   const [userNameCache, setUserNameCache] = useState<Record<string, string>>({});
@@ -15235,6 +15816,42 @@ function ChiefExaminerDashboardPanel({
           )}
         </div>
 
+        {/* Scheduled Vetting Time Display */}
+        {moderationSchedule?.scheduled && moderationSchedule.startDateTime && (
+          <div className="rounded-2xl border-2 border-amber-300 bg-gradient-to-r from-amber-50 via-yellow-50 to-orange-50 px-5 py-4 shadow-lg">
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  className="h-6 w-6 text-amber-600"
+                  fill="currentColor"
+                >
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.31-8.86c-1.77-.45-2.34-.94-2.34-1.67 0-.84.79-1.43 2.1-1.43 1.38 0 1.9.66 1.94 1.64h1.71c-.05-1.34-.87-2.57-2.49-2.97V5H10.9v1.69c-1.51.32-2.72 1.3-2.72 2.81 0 1.79 1.49 2.69 3.66 3.21 1.95.46 2.34 1.15 2.34 1.87 0 .53-.39 1.39-2.1 1.39-1.6 0-2.23-.72-2.32-1.64H8.04c.1 1.7 1.36 2.66 2.86 2.97V19h2.34v-1.67c1.52-.29 2.72-1.16 2.72-2.77 0-1.9-1.49-2.61-3.66-3.21z" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h3 className="text-sm font-bold text-amber-900 mb-1">
+                  Scheduled Vetting Session
+                </h3>
+                <p className="text-xs text-amber-700 mb-2">
+                  Start Time: <span className="font-semibold">{new Date(moderationSchedule.startDateTime).toLocaleString()}</span>
+                </p>
+                {moderationStartCountdown && (
+                  <p className="text-xs font-semibold text-amber-800">
+                    Starts in: {moderationStartCountdown}
+                  </p>
+                )}
+                {!moderationStartCountdown && moderationSchedule.scheduledStartTime && Date.now() >= moderationSchedule.scheduledStartTime && (
+                  <p className="text-xs font-semibold text-green-700">
+                    ✓ Scheduled time reached - Session can be started
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="grid gap-6 lg:grid-cols-3">
           {/* Workflow pulse */}
           <div className="space-y-4 rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50 via-sky-50 to-indigo-50 p-5 shadow-sm">
@@ -15387,7 +16004,11 @@ function ChiefExaminerDashboardPanel({
       </div>
 
       {/* Team Lead Submissions Section - Added to Dashboard for visibility */}
-      {submittedPapers.filter((p) => p.submittedRole === 'Team Lead').length > 0 && (
+      {submittedPapers.filter((p) => {
+        if (p.submittedRole !== 'Team Lead') return false;
+        // Only show papers that exist in the repository
+        return repositoryPaperIds.has(p.id);
+      }).length > 0 && (
         <div className="mt-6">
           <SectionCard
             title="Submissions from Team Lead"
@@ -15395,7 +16016,11 @@ function ChiefExaminerDashboardPanel({
             description="View all papers compiled and submitted by Team Lead. These papers are ready for Chief Examiner AI similarity analysis before vetting."
           >
             <CompactPaperCards 
-              papers={submittedPapers.filter((p) => p.submittedRole === 'Team Lead')}
+              papers={submittedPapers.filter((p) => {
+                if (p.submittedRole !== 'Team Lead') return false;
+                // Only show papers that exist in the repository
+                return repositoryPaperIds.has(p.id);
+              })}
               getSubmitterName={getSubmitterName}
               getStatusLabel={getStatusLabel}
               getStatusColor={getStatusColor}
@@ -15412,13 +16037,27 @@ function ChiefExaminerDashboardPanel({
 interface PaperTrackingPanelProps {
   workflow: WorkflowState;
   submittedPapers: SubmittedPaper[];
+  repositoryPapers: RepositoryPaper[];
 }
 
 function PaperTrackingPanel({
   workflow,
   submittedPapers,
+  repositoryPapers,
 }: PaperTrackingPanelProps) {
-  const effectiveStage = getEffectiveWorkflowStage(submittedPapers, workflow.stage);
+  // Create a Set of repository paper IDs for efficient lookup
+  const repositoryPaperIds = useMemo(() => new Set(repositoryPapers.map(rp => rp.id)), [repositoryPapers]);
+  
+  // Filter out demo papers and papers not in repository for accurate counts FIRST
+  const realPapers = submittedPapers.filter(p => {
+    if (p.id === 'demo-paper-id') return false;
+    // Only include papers that exist in the repository
+    return repositoryPaperIds.has(p.id);
+  });
+  const hasNoPapers = realPapers.length === 0;
+  
+  // Only get effective stage if there are real papers
+  const effectiveStage = hasNoPapers ? null : getEffectiveWorkflowStage(realPapers, workflow.stage);
 
   const stages: Array<{ id: WorkflowStage | 'Printing'; label: string }> = [
     { id: 'Awaiting Setter', label: 'Paper is being set' },
@@ -15430,15 +16069,25 @@ function PaperTrackingPanel({
     { id: 'Printing', label: 'Released for secure printing' },
   ];
 
-  const currentIndex = stages.findIndex((s) => s.id === effectiveStage);
+  // Only calculate index if we have an effective stage
+  const currentIndex = effectiveStage ? stages.findIndex((s) => s.id === effectiveStage) : -1;
   const effectiveIndex =
+    !effectiveStage ? -1 :
     currentIndex === -1 && effectiveStage === 'Vetted & Returned to Chief Examiner'
       ? 4
       : currentIndex;
 
-  const totalApproved = submittedPapers.filter(
+  const totalApproved = realPapers.filter(
     (p) => p.status === 'approved'
   ).length;
+
+  // Filter timeline events to only show events for papers that still exist
+  const validTimelineEvents = workflow.timeline.filter(event => {
+    // If there are no papers, don't show any timeline events
+    if (hasNoPapers) return false;
+    // Keep events that don't reference specific papers, or events for papers that still exist
+    return true; // For now, show all events, but we could filter by paper ID if needed
+  });
 
   return (
     <SectionCard
@@ -15446,6 +16095,44 @@ function PaperTrackingPanel({
       kicker="From Setting to Printing"
       description="Visual trace of where the current semester paper is in the moderation pipeline."
     >
+      {hasNoPapers ? (
+        <div className="space-y-6">
+          <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center">
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-slate-100 mb-4">
+              <svg className="h-8 w-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+            </div>
+            <p className="text-lg font-semibold text-slate-700 mb-2">No Papers in Progress</p>
+            <p className="text-sm text-slate-500">
+              There are currently no papers being tracked in the moderation pipeline.
+            </p>
+            <p className="text-xs text-slate-400 mt-2">
+              Papers will appear here once they are submitted by Team Leads or Setters.
+            </p>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="rounded-2xl border border-slate-100 bg-white p-4">
+              <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
+                Approved and Ready
+              </p>
+              <p className="mt-1 text-2xl font-bold text-indigo-600">0</p>
+              <p className="mt-1 text-xs text-slate-500">
+                papers marked as ready for secure printing.
+              </p>
+            </div>
+            <div className="rounded-2xl border border-slate-100 bg-white p-4">
+              <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
+                Timeline Events
+              </p>
+              <p className="mt-1 text-2xl font-bold text-slate-800">0</p>
+              <p className="mt-1 text-xs text-slate-500">
+                recorded checkpoints for this paper&apos;s journey.
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : effectiveStage ? (
       <div className="space-y-6">
         <div className="rounded-2xl border border-blue-100 bg-gradient-to-r from-blue-50 via-indigo-50 to-sky-50 p-4">
           <p className="text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">
@@ -15501,7 +16188,7 @@ function PaperTrackingPanel({
               Timeline Events
             </p>
             <p className="mt-1 text-2xl font-bold text-slate-800">
-              {workflow.timeline.length}
+              {validTimelineEvents.length}
             </p>
             <p className="mt-1 text-xs text-slate-500">
               recorded checkpoints for this paper&apos;s journey.
@@ -15509,6 +16196,19 @@ function PaperTrackingPanel({
           </div>
         </div>
       </div>
+      ) : (
+        <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-slate-100 mb-4">
+            <svg className="h-8 w-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+          </div>
+          <p className="text-lg font-semibold text-slate-700 mb-2">No Active Workflow</p>
+          <p className="text-sm text-slate-500">
+            There are papers in the system, but no active workflow stage could be determined.
+          </p>
+        </div>
+      )}
     </SectionCard>
   );
 }
@@ -16101,7 +16801,7 @@ function LecturerMonthlyReportPanel() {
 }
 
 function LecturerAccountSettingsPanel() {
-  const [activeTab, setActiveTab] = useState<'password' | 'profile' | 'notifications'>('password');
+  const [activeTab, setActiveTab] = useState<'password' | 'profile' | 'notifications' | 'scheduling'>('password');
   const [passwordForm, setPasswordForm] = useState({ current: '', new: '', confirm: '' });
   const [profileForm, setProfileForm] = useState({ email: 'lecturer@ucu.ac.ug', phone: '+256 700 000000' });
   const [notifications, setNotifications] = useState({
@@ -16111,6 +16811,42 @@ function LecturerAccountSettingsPanel() {
     gradeUpdates: true,
   });
   const [saved, setSaved] = useState(false);
+  
+  // Scheduling state
+  const loadSchedule = (): ModerationSchedule => {
+    try {
+      const saved = localStorage.getItem('ucu-moderation-schedule');
+      if (saved) {
+        const parsed = JSON.parse(saved) as ModerationSchedule;
+        return parsed;
+      }
+    } catch (error) {
+      console.error('Error loading schedule:', error);
+    }
+    return { scheduled: false };
+  };
+  const [schedule, setSchedule] = useState<ModerationSchedule>(loadSchedule());
+  const [scheduleDateTime, setScheduleDateTime] = useState(() => {
+    const saved = loadSchedule();
+    if (saved.startDateTime) {
+      // Convert to local datetime-local format (YYYY-MM-DDTHH:mm)
+      const date = new Date(saved.startDateTime);
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      const hours = String(date.getHours()).padStart(2, '0');
+      const minutes = String(date.getMinutes()).padStart(2, '0');
+      return `${year}-${month}-${day}T${hours}:${minutes}`;
+    }
+    // Default to 1 hour from now
+    const defaultDate = new Date(Date.now() + 60 * 60 * 1000);
+    const year = defaultDate.getFullYear();
+    const month = String(defaultDate.getMonth() + 1).padStart(2, '0');
+    const day = String(defaultDate.getDate()).padStart(2, '0');
+    const hours = String(defaultDate.getHours()).padStart(2, '0');
+    const minutes = String(defaultDate.getMinutes()).padStart(2, '0');
+    return `${year}-${month}-${day}T${hours}:${minutes}`;
+  });
 
   const handlePasswordChange = (e: FormEvent) => {
     e.preventDefault();
@@ -16147,7 +16883,7 @@ function LecturerAccountSettingsPanel() {
     >
       <div className="space-y-4">
         <div className="flex gap-2 border-b border-slate-200">
-          {(['password', 'profile', 'notifications'] as const).map((tab) => (
+          {(['password', 'profile', 'notifications', 'scheduling'] as const).map((tab) => (
             <button
               key={tab}
               type="button"
@@ -16161,7 +16897,7 @@ function LecturerAccountSettingsPanel() {
                   : 'text-slate-600 hover:text-slate-700'
               }`}
             >
-              {tab === 'password' ? 'Password' : tab === 'profile' ? 'Profile' : 'Notifications'}
+              {tab === 'password' ? 'Password' : tab === 'profile' ? 'Profile' : tab === 'notifications' ? 'Notifications' : 'Scheduling'}
             </button>
           ))}
         </div>
@@ -16280,6 +17016,101 @@ function LecturerAccountSettingsPanel() {
             {saved && (
               <div className="rounded-lg border border-blue-500/50 bg-blue-500/10 p-3 text-sm text-blue-700">
                 Notification preferences saved!
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'scheduling' && (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-800 mb-4">Vetting Session Scheduling</h3>
+                <p className="text-xs text-slate-600 mb-4">
+                  Set a scheduled time for vetting sessions. The session will be available to start at the scheduled time.
+                </p>
+                
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs text-slate-600 mb-2">Scheduled Start Date & Time</label>
+                    <input
+                      type="datetime-local"
+                      value={scheduleDateTime}
+                      onChange={(e) => setScheduleDateTime(e.target.value)}
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none"
+                      min={new Date().toISOString().slice(0, 16)}
+                    />
+                  </div>
+                  
+                  {schedule.scheduled && schedule.startDateTime && (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+                      <p className="text-xs font-semibold text-amber-800 mb-1">Current Schedule</p>
+                      <p className="text-xs text-amber-700">
+                        Scheduled for: <span className="font-medium">{new Date(schedule.startDateTime).toLocaleString()}</span>
+                      </p>
+                      {schedule.scheduledStartTime && Date.now() < schedule.scheduledStartTime && (
+                        <p className="text-xs text-amber-600 mt-1">
+                          Time remaining: {Math.floor((schedule.scheduledStartTime - Date.now()) / (60 * 60 * 1000))} hours
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!scheduleDateTime) {
+                          alert('Please select a date and time');
+                          return;
+                        }
+                        const scheduledStartTime = new Date(scheduleDateTime).getTime();
+                        if (scheduledStartTime < Date.now()) {
+                          alert('Start time must be in the future');
+                          return;
+                        }
+                        const newSchedule: ModerationSchedule = {
+                          scheduled: true,
+                          startDateTime: scheduleDateTime,
+                          endDateTime: undefined,
+                          scheduledStartTime,
+                          scheduledEndTime: undefined,
+                        };
+                        setSchedule(newSchedule);
+                        localStorage.setItem('ucu-moderation-schedule', JSON.stringify(newSchedule));
+                        setSaved(true);
+                        setTimeout(() => setSaved(false), 3000);
+                        alert('Schedule saved successfully!');
+                      }}
+                      className="flex-1 rounded-lg bg-blue-500/20 px-4 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-500/30"
+                    >
+                      Save Schedule
+                    </button>
+                    {schedule.scheduled && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (confirm('Are you sure you want to clear the scheduled time?')) {
+                            const clearedSchedule: ModerationSchedule = { scheduled: false };
+                            setSchedule(clearedSchedule);
+                            localStorage.setItem('ucu-moderation-schedule', JSON.stringify(clearedSchedule));
+                            setSaved(true);
+                            setTimeout(() => setSaved(false), 3000);
+                            alert('Schedule cleared');
+                          }
+                        }}
+                        className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+                      >
+                        Clear Schedule
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+            {saved && (
+              <div className="rounded-lg border border-blue-500/50 bg-blue-500/10 p-3 text-sm text-blue-700">
+                Schedule saved successfully!
               </div>
             )}
           </div>
