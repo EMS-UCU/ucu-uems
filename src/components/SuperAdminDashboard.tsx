@@ -7,6 +7,7 @@ import { motion } from 'framer-motion';
 import RecordingReviewPanel from './RecordingReviewPanel';
 import type { RecordingEntry } from '../types/recordings';
 import ConsentAcceptancesReport from './ConsentAcceptancesReport';
+import ApprovedPapersRepository from './ApprovedPapersRepository';
 
 interface SuperAdminDashboardProps {
   currentUserId: string;
@@ -33,7 +34,7 @@ export default function SuperAdminDashboard({
   });
   const [loading, setLoading] = useState(true);
   const [hoveredCard, setHoveredCard] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'recordings' | 'consents'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'recordings' | 'consents' | 'repository'>('overview');
 
   useEffect(() => {
     loadData();
@@ -199,11 +200,12 @@ export default function SuperAdminDashboard({
             { id: 'overview', label: 'Overview' },
             { id: 'recordings', label: 'Recordings' },
             { id: 'consents', label: 'Consent Reports' },
+            { id: 'repository', label: 'Approved Papers' },
           ].map((tab) => (
             <button
               key={tab.id}
               type="button"
-              onClick={() => setActiveTab(tab.id as 'overview' | 'recordings' | 'consents')}
+              onClick={() => setActiveTab(tab.id as 'overview' | 'recordings' | 'consents' | 'repository')}
               className={`px-3 py-1.5 rounded-full transition ${
                 activeTab === tab.id ? 'bg-blue-600 text-white' : 'hover:bg-blue-50'
               }`}
@@ -221,6 +223,8 @@ export default function SuperAdminDashboard({
         />
       ) : activeTab === 'consents' ? (
         <ConsentAcceptancesReport />
+      ) : activeTab === 'repository' ? (
+        <ApprovedPapersRepository currentUserId={currentUserId} />
       ) : (
         <>
 

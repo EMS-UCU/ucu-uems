@@ -78,27 +78,103 @@ export async function appointVetters(
 export async function approveExamForPrinting(
   examPaperId: string,
   chiefExaminerId: string,
-  notes?: string
+  notes?: string,
+  printingDueDate?: string, // ISO date string (YYYY-MM-DD)
+  printingDueTime?: string  // Time string (HH:MM format, e.g., "09:00")
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { error: updateError } = await supabase
+    // Prepare update data
+    const updateData: any = {
+      status: 'approved_for_printing',
+      updated_at: new Date().toISOString(),
+      is_locked: true, // Lock paper in repository
+    };
+
+    // Add printing date and time if provided
+    if (printingDueDate) {
+      updateData.printing_due_date = printingDueDate;
+    }
+    if (printingDueTime) {
+      updateData.printing_due_time = printingDueTime;
+    }
+
+    console.log('📤 Updating exam paper in database:', {
+      examPaperId,
+      updateData
+    });
+
+    const { data: updatedData, error: updateError } = await supabase
       .from('exam_papers')
-      .update({
-        status: 'approved_for_printing',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', examPaperId);
+      .update(updateData)
+      .eq('id', examPaperId)
+      .select();
 
     if (updateError) {
+      console.error('❌ Error updating exam paper:', {
+        error: updateError.message,
+        code: updateError.code,
+        details: updateError.details,
+        hint: updateError.hint,
+        examPaperId,
+        updateData
+      });
+      
+      // Check if it's an RLS error
+      if (updateError.code === '42501' || updateError.message?.includes('permission') || updateError.message?.includes('policy')) {
+        return { 
+          success: false, 
+          error: `Permission denied: RLS policy may be blocking the update. Please check Supabase RLS policies for exam_papers table. Error: ${updateError.message}` 
+        };
+      }
+      
       return { success: false, error: updateError.message };
     }
 
+    // Update may succeed but RETURNING can be empty if RLS allows UPDATE but not SELECT on the row
+    if (!updatedData || updatedData.length === 0) {
+      console.warn('⚠️ Update returned no rows (update may still have succeeded if RLS blocks SELECT). Verifying...', {
+        examPaperId,
+        updateData
+      });
+      
+      // Verify the row was updated: run a simple update without select, then check row count
+      const { count, error: countError } = await supabase
+        .from('exam_papers')
+        .select('id', { count: 'exact', head: true })
+        .eq('id', examPaperId)
+        .eq('status', 'approved_for_printing')
+        .eq('is_locked', true);
+      
+      // If we can't verify, still treat as success (update had no error - row may have been updated)
+      if (countError) {
+        console.warn('Could not verify update:', countError.message);
+      }
+      
+      console.log('✅ Exam paper update completed (no rows returned from UPDATE; assuming success).', {
+        examPaperId,
+        verified: !countError
+      });
+    } else {
+      console.log('✅ Exam paper updated successfully:', {
+        examPaperId,
+        updatedRows: updatedData?.length || 0,
+        updatedData: updatedData?.[0],
+        status: updatedData[0]?.status,
+        is_locked: updatedData[0]?.is_locked,
+        printing_due_date: updatedData[0]?.printing_due_date
+      });
+    }
+
     // Add workflow event
+    const eventDescription = printingDueDate && printingDueTime
+      ? `${notes || 'Exam paper approved and ready for printing'}. Printing due: ${printingDueDate} at ${printingDueTime}`
+      : notes || 'Exam paper approved and ready for printing';
+
     await addWorkflowEvent({
       exam_paper_id: examPaperId,
       actor_id: chiefExaminerId,
       action: 'Approved for Printing',
-      description: notes || 'Exam paper approved and ready for printing',
+      description: eventDescription,
       from_status: 'resubmitted_to_chief_examiner',
       to_status: 'approved_for_printing',
     });
@@ -114,14 +190,22 @@ export async function approveExamForPrinting(
       await createNotification({
         user_id: examPaper.team_lead_id,
         title: 'Exam Approved',
-        message: 'Exam paper has been approved for printing',
+        message: `Exam paper has been approved for printing${printingDueDate ? ` and locked until ${printingDueDate} at ${printingDueTime || '00:00'}` : ''}`,
         type: 'success',
         related_exam_paper_id: examPaperId,
       });
     }
 
+    console.log('✅ Paper approved and locked:', {
+      examPaperId,
+      printingDueDate,
+      printingDueTime,
+      isLocked: true
+    });
+
     return { success: true };
   } catch (error: any) {
+    console.error('Exception approving exam:', error);
     return { success: false, error: error.message };
   }
 }

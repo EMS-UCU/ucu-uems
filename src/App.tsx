@@ -1969,15 +1969,15 @@ function App() {
             submittedAt: paper.submitted_at || paper.created_at,
             fileSize: paper.file_size || undefined,
             // Map backend workflow states into the simplified UI statuses.
-            // NOTE: A paper that has only been integrated by the Team Lead
-            // has NOT yet been vetted, so we must not surface it as "vetted"
-            // in the Chief Examiner dashboard.
+            // vetted_with_comments / resubmitted_to_chief_examiner = ready for Chief Examiner to approve → 'vetted'
             status:
               paper.status === 'approved_for_printing'
                 ? 'approved'
+                : paper.status === 'vetted_with_comments' ||
+                  paper.status === 'resubmitted_to_chief_examiner'
+                ? 'vetted'
                 : paper.status === 'appointed_for_vetting' ||
-                  paper.status === 'vetting_in_progress' ||
-                  paper.status === 'vetted_with_comments'
+                  paper.status === 'vetting_in_progress'
                 ? 'in-vetting'
                 : paper.status === 'integrated_by_team_lead'
                 ? 'submitted'
@@ -4032,9 +4032,11 @@ function App() {
             status:
               paper.status === 'approved_for_printing'
                 ? 'approved'
+                : paper.status === 'vetted_with_comments' ||
+                  paper.status === 'resubmitted_to_chief_examiner'
+                ? 'vetted'
                 : paper.status === 'appointed_for_vetting' ||
-                  paper.status === 'vetting_in_progress' ||
-                  paper.status === 'vetted_with_comments'
+                  paper.status === 'vetting_in_progress'
                 ? 'in-vetting'
                 : paper.status === 'integrated_by_team_lead'
                 ? 'submitted'
@@ -5424,7 +5426,7 @@ function App() {
     );
   };
 
-  const handleApprove = (notes: string) => {
+  const handleApprove = async (notes: string, printingDueDate?: string, printingDueTime?: string) => {
     if (!currentUserHasRole('Chief Examiner')) {
       return;
     }
@@ -5435,8 +5437,178 @@ function App() {
     const actor = currentUser?.name ?? 'Unknown';
     const timestamp = new Date().toISOString();
     
-    // Find vetted papers
+    // Find vetted papers - get the first one (should be the current paper)
     const vettedPapers = submittedPapers.filter(p => p.status === 'vetted');
+    const currentPaper = vettedPapers[0];
+    
+    // Call backend service to approve and lock paper
+    if (!currentPaper?.id) {
+      console.error('No vetted paper found to approve');
+      alert('Error: No paper found to approve. Please ensure a paper is in vetted status.');
+      return;
+    }
+    
+    if (!currentUser?.id) {
+      console.error('No current user ID');
+      alert('Error: User not authenticated. Please log in again.');
+      return;
+    }
+    
+    if (!printingDueDate || !printingDueTime) {
+      console.error('Missing printing due date/time');
+      alert('Error: Please provide both printing due date and time.');
+      return;
+    }
+    
+    console.log('📝 Approving paper:', {
+      paperId: currentPaper.id,
+      paperName: currentPaper.fileName,
+      userId: currentUser.id,
+      printingDueDate,
+      printingDueTime
+    });
+    
+    const { approveExamForPrinting } = await import('./lib/examServices/chiefExaminerService');
+    
+    console.log('📤 Calling approveExamForPrinting with:', {
+      examPaperId: currentPaper.id,
+      paperFileName: currentPaper.fileName,
+      paperCourseCode: currentPaper.courseCode,
+      chiefExaminerId: currentUser.id,
+      notes,
+      printingDueDate,
+      printingDueTime
+    });
+    
+    // Verify paper exists in database before approval
+    const { data: paperCheck, error: checkError } = await supabase
+      .from('exam_papers')
+      .select('id, status, course_code, course_name')
+      .eq('id', currentPaper.id)
+      .single();
+    
+    console.log('🔍 Paper check before approval:', {
+      found: !!paperCheck,
+      currentStatus: paperCheck?.status,
+      paperId: currentPaper.id,
+      paperFromDB: paperCheck,
+      error: checkError?.message,
+      errorCode: checkError?.code,
+      errorDetails: checkError?.details,
+      errorHint: checkError?.hint
+    });
+    
+    if (checkError) {
+      console.error('❌ Error checking paper in database:', {
+        paperId: currentPaper.id,
+        error: checkError.message,
+        code: checkError.code,
+        details: checkError.details,
+        hint: checkError.hint
+      });
+      
+      // If it's an RLS error, provide helpful message
+      if (checkError.code === '42501' || checkError.message?.includes('permission') || checkError.message?.includes('policy')) {
+        throw new Error(`Permission denied: RLS policy may be blocking access to this paper. Error: ${checkError.message}`);
+      }
+      
+      throw new Error(`Paper not found in database: ${checkError.message || 'Unknown error'}`);
+    }
+    
+    if (!paperCheck) {
+      console.error('❌ Paper not found in database:', {
+        paperId: currentPaper.id,
+        paperFileName: currentPaper.fileName,
+        paperCourseCode: currentPaper.courseCode
+      });
+      throw new Error(`Paper not found in database. Paper ID: ${currentPaper.id}`);
+    }
+    
+    // Log the current state
+    console.log('📋 Paper current state:', {
+      id: paperCheck.id,
+      status: paperCheck.status,
+      course_code: paperCheck.course_code,
+      course_name: paperCheck.course_name
+    });
+    
+    const result = await approveExamForPrinting(
+      currentPaper.id,
+      currentUser.id,
+      notes,
+      printingDueDate,
+      printingDueTime
+    );
+    
+    console.log('📥 Approval result:', result);
+    
+    // Verify paper was updated after approval
+    if (result.success) {
+      const { data: verifyPaper, error: verifyError } = await supabase
+        .from('exam_papers')
+        .select('id, status, is_locked, printing_due_date, printing_due_time')
+        .eq('id', currentPaper.id)
+        .single();
+      
+      console.log('✅ Verification after approval:', {
+        found: !!verifyPaper,
+        status: verifyPaper?.status,
+        is_locked: verifyPaper?.is_locked,
+        printing_due_date: verifyPaper?.printing_due_date,
+        error: verifyError?.message
+      });
+    }
+    
+    if (!result.success) {
+      console.error('❌ Error approving paper:', result.error);
+      throw new Error(result.error || 'Failed to approve paper');
+    }
+    
+    console.log('✅ Paper approved successfully:', currentPaper.id);
+    
+    // Create success notification for Chief Examiner
+    await createNotification({
+      user_id: currentUser.id,
+      title: 'Paper Approved',
+      message: `Paper "${currentPaper.fileName || currentPaper.courseCode}" has been approved and locked. Printing due: ${printingDueDate} at ${printingDueTime}`,
+      type: 'success',
+      related_exam_paper_id: currentPaper.id,
+    });
+    
+    // Reload papers from database to get updated status
+    try {
+      const { data: updatedPapers, error: reloadError } = await supabase
+        .from('exam_papers')
+        .select('*')
+        .order('created_at', { ascending: false });
+      
+      if (!reloadError && updatedPapers) {
+        const updated = updatedPapers.map((paper: any) => ({
+          id: paper.id,
+          fileName: paper.file_name || paper.course_name || 'Exam Paper',
+          submittedBy: paper.team_lead_id || paper.setter_id || paper.chief_examiner_id || 'Unknown',
+          submittedAt: paper.submitted_at || paper.created_at,
+          fileSize: paper.file_size || undefined,
+          status: paper.status === 'approved_for_printing' ? 'approved' as const
+            : paper.status === 'vetted_with_comments' || paper.status === 'resubmitted_to_chief_examiner'
+            ? 'vetted' as const
+            : paper.status === 'appointed_for_vetting' || paper.status === 'vetting_in_progress'
+            ? 'in-vetting' as const
+            : paper.status === 'integrated_by_team_lead' ? 'submitted' as const
+            : 'submitted' as const,
+          courseCode: paper.course_code,
+          courseUnit: paper.course_name,
+          semester: paper.semester,
+          year: paper.academic_year,
+          fileUrl: paper.file_url || undefined,
+          submittedRole: paper.team_lead_id ? 'Team Lead' as const : paper.setter_id ? 'Setter' as const : 'Unknown' as const,
+        }));
+        setSubmittedPapers(updated);
+        console.log('✅ Reloaded papers from database');
+      }
+    } catch (error) {
+      console.error('⚠️ Error reloading papers:', error);
+    }
     
     // Update submitted papers status to 'approved' and add to archive
     setSubmittedPapers(prev => {
@@ -5469,7 +5641,11 @@ function App() {
       });
     });
     
-    pushWorkflowEvent('Approved for printing.', actor, {
+    const approvalDescription = printingDueDate && printingDueTime
+      ? `Approved for printing. Printing due: ${printingDueDate} at ${printingDueTime}`
+      : 'Approved for printing.';
+    
+    pushWorkflowEvent(approvalDescription, actor, {
       stage: 'Approved',
       mutate: () => ({
         portalOpen: false,
@@ -5485,8 +5661,8 @@ function App() {
     appendVersionHistory(
       actor,
       notes
-        ? `Approved for printing with note: ${notes}`
-        : 'Approved for printing.'
+        ? `${approvalDescription} Notes: ${notes}`
+        : approvalDescription
     );
     
     // Notify Team Lead (without forwarding comments - vetting was positive)
@@ -5497,7 +5673,7 @@ function App() {
           void createNotification({
             user_id: teamLead.id,
             title: 'Paper Approved',
-            message: `Paper has been approved for printing by ${actor}. Vetting was positive - no comments to address.${notes ? ` Notes: ${notes}` : ''}`,
+            message: `Paper has been approved for printing by ${actor}. Vetting was positive - no comments to address.${notes ? ` Notes: ${notes}` : ''}${printingDueDate ? ` Printing due: ${printingDueDate} at ${printingDueTime || '00:00'}` : ''}`,
             type: 'success',
           });
         }
@@ -16193,7 +16369,7 @@ interface WorkflowOrchestrationProps {
   onSanitizeAndForward: () => void;
   onRevisionIntegrated: () => void;
   onOpenApprovalPortal: () => void;
-  onApprove: (notes: string) => void;
+  onApprove: (notes: string, printingDueDate?: string, printingDueTime?: string) => void | Promise<void>;
   onReject: (notes: string) => Promise<void>;
   onRestartWorkflow: () => void;
   sectionId?: string;
@@ -16216,6 +16392,9 @@ function WorkflowOrchestration({
   sectionId,
 }: WorkflowOrchestrationProps) {
   const [approvalNotes, setApprovalNotes] = useState('');
+  const [showApprovalModal, setShowApprovalModal] = useState(false);
+  const [printingDueDate, setPrintingDueDate] = useState('');
+  const [printingDueTime, setPrintingDueTime] = useState('09:00');
 
   const canSetterSubmit =
     userHasRole('Setter') && workflow.stage === 'Awaiting Setter';
@@ -16310,8 +16489,7 @@ function WorkflowOrchestration({
                 type="button"
                 disabled={!canDrawDecision}
                 onClick={() => {
-                  onApprove(approvalNotes);
-                  setApprovalNotes('');
+                  setShowApprovalModal(true);
                 }}
                 className="rounded-xl bg-blue-500/90 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-blue-500/40 disabled:text-emerald-900"
               >
@@ -16329,6 +16507,86 @@ function WorkflowOrchestration({
                 Reject & Trigger Recycling
               </button>
             </div>
+            {/* Approval Modal with Date/Time Picker */}
+            {showApprovalModal && (
+              <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 p-4">
+                <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+                  <h3 className="text-lg font-bold text-blue-900 mb-4">Approve Paper for Printing</h3>
+                  <p className="text-sm text-slate-600 mb-4">
+                    Set the printing due date and time. A password will be automatically generated on this date/time and sent to Super Admin.
+                  </p>
+                  
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-2">
+                        Printing Due Date *
+                      </label>
+                      <input
+                        type="date"
+                        value={printingDueDate}
+                        onChange={(e) => setPrintingDueDate(e.target.value)}
+                        min={new Date().toISOString().split('T')[0]}
+                        className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                        required
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-2">
+                        Printing Due Time *
+                      </label>
+                      <input
+                        type="time"
+                        value={printingDueTime}
+                        onChange={(e) => setPrintingDueTime(e.target.value)}
+                        className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                        required
+                      />
+                    </div>
+                  </div>
+                  
+                      <div className="mt-6 flex gap-3">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!printingDueDate || !printingDueTime) {
+                              alert('Please select both date and time');
+                              return;
+                            }
+                            try {
+                              await onApprove(approvalNotes, printingDueDate, printingDueTime);
+                              // Show success message
+                              alert(`✅ Paper approved successfully!\n\nPrinting due: ${printingDueDate} at ${printingDueTime}\n\nThe paper has been locked in the Approved Papers Repository.\n\nYou can view it in Super Admin Dashboard → Approved Papers tab.`);
+                              setApprovalNotes('');
+                              setPrintingDueDate('');
+                              setPrintingDueTime('09:00');
+                              setShowApprovalModal(false);
+                            } catch (error: any) {
+                              console.error('❌ Approval error:', error);
+                              alert(`❌ Failed to approve paper: ${error.message || 'Unknown error'}\n\nPlease check the browser console for details.`);
+                              // Don't close modal on error so user can try again
+                            }
+                          }}
+                          className="flex-1 rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600"
+                        >
+                          Confirm Approval
+                        </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowApprovalModal(false);
+                        setPrintingDueDate('');
+                        setPrintingDueTime('09:00');
+                      }}
+                      className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            
             {lastDecision ? (
               <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
                 <p className="font-semibold uppercase tracking-wide text-slate-700">
@@ -16532,7 +16790,7 @@ interface VettingAndAnnotationsProps {
   onRemovePaperFromVetting?: (paperId: string) => void;
   onEndSession?: () => void;
   onCheckForSession?: () => void | Promise<void>;
-  onApprove?: (notes: string) => void;
+  onApprove?: (notes: string, printingDueDate?: string, printingDueTime?: string) => void | Promise<void>;
   onReject?: (notes: string, newDeadline?: { days: number; hours: number; minutes: number }) => Promise<void>;
   onForwardChecklist?: (decision: 'approved' | 'rejected', notes: string) => void;
   onDownloadChecklistPacket?: () => void;
@@ -16632,6 +16890,10 @@ function VettingAndAnnotations({
   const [showChecklistPreview, setShowChecklistPreview] = useState(false);
   const [showRejectionModal, setShowRejectionModal] = useState(false);
   const [chiefRejectionComment, setChiefRejectionComment] = useState('');
+  const [showApprovalModal, setShowApprovalModal] = useState(false);
+  const [approvalNotes, setApprovalNotes] = useState('');
+  const [printingDueDate, setPrintingDueDate] = useState('');
+  const [printingDueTime, setPrintingDueTime] = useState('09:00');
   const [showDeadlineRejectionModal, setShowDeadlineRejectionModal] = useState(false);
   const [rejectionNotes, setRejectionNotes] = useState('');
   const [deadlineDays, setDeadlineDays] = useState(3);
@@ -17436,10 +17698,7 @@ function VettingAndAnnotations({
                     <button
                       type="button"
                       onClick={() => {
-                        const notes = prompt('Optional notes for approval:') || '';
-                        if (onApprove) {
-                          onApprove(notes);
-                        }
+                        setShowApprovalModal(true);
                       }}
                       className="flex-1 rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
                     >
@@ -17455,6 +17714,101 @@ function VettingAndAnnotations({
                     >
                       ✗ Rejected
                     </button>
+                  </div>
+                )}
+                
+                {/* Approval Modal with Date/Time Picker */}
+                {showApprovalModal && (
+                  <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 p-4">
+                    <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+                      <h3 className="text-lg font-bold text-blue-900 mb-4">Approve Paper for Printing</h3>
+                      <p className="text-sm text-slate-600 mb-4">
+                        Set the printing due date and time. A password will be automatically generated on this date/time and sent to Super Admin.
+                      </p>
+                      
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-2">
+                            Decision Notes (Optional)
+                          </label>
+                          <textarea
+                            value={approvalNotes}
+                            onChange={(e) => setApprovalNotes(e.target.value)}
+                            placeholder="Optional notes for approval..."
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                            rows={3}
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-2">
+                            Printing Due Date *
+                          </label>
+                          <input
+                            type="date"
+                            value={printingDueDate}
+                            onChange={(e) => setPrintingDueDate(e.target.value)}
+                            min={new Date().toISOString().split('T')[0]}
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                            required
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-2">
+                            Printing Due Time *
+                          </label>
+                          <input
+                            type="time"
+                            value={printingDueTime}
+                            onChange={(e) => setPrintingDueTime(e.target.value)}
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                            required
+                          />
+                        </div>
+                      </div>
+                      
+                      <div className="mt-6 flex gap-3">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!printingDueDate || !printingDueTime) {
+                              alert('Please select both date and time');
+                              return;
+                            }
+                            try {
+                              if (onApprove) {
+                                await onApprove(approvalNotes, printingDueDate, printingDueTime);
+                              }
+                              // Show success message
+                              alert(`✅ Paper approved successfully!\n\nPrinting due: ${printingDueDate} at ${printingDueTime}\n\nThe paper has been locked in the Approved Papers Repository.`);
+                              setApprovalNotes('');
+                              setPrintingDueDate('');
+                              setPrintingDueTime('09:00');
+                              setShowApprovalModal(false);
+                            } catch (error: any) {
+                              alert(`❌ Failed to approve paper: ${error.message || 'Unknown error'}`);
+                              console.error('Approval error:', error);
+                            }
+                          }}
+                          className="flex-1 rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600"
+                        >
+                          Confirm Approval
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowApprovalModal(false);
+                            setPrintingDueDate('');
+                            setPrintingDueTime('09:00');
+                            setApprovalNotes('');
+                          }}
+                          className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -19087,10 +19441,8 @@ function VettingAndAnnotations({
                     onClick={() => {
                       const notesEl = document.getElementById('decision-notes') as HTMLTextAreaElement;
                       const notes = notesEl?.value || '';
-                      if (onApprove) {
-                        onApprove(notes);
-                        if (notesEl) notesEl.value = '';
-                      }
+                      setApprovalNotes(notes);
+                      setShowApprovalModal(true);
                     }}
                     className="flex-1 rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
                   >
@@ -19118,6 +19470,103 @@ function VettingAndAnnotations({
                     ✗ Reject & Return to Team Lead
                   </button>
                 </div>
+                
+                {/* Approval Modal with Date/Time Picker */}
+                {showApprovalModal && (
+                  <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 p-4">
+                    <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+                      <h3 className="text-lg font-bold text-blue-900 mb-4">Approve Paper for Printing</h3>
+                      <p className="text-sm text-slate-600 mb-4">
+                        Set the printing due date and time. A password will be automatically generated on this date/time and sent to Super Admin.
+                      </p>
+                      
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-2">
+                            Decision Notes (Optional)
+                          </label>
+                          <textarea
+                            value={approvalNotes}
+                            onChange={(e) => setApprovalNotes(e.target.value)}
+                            placeholder="Optional notes for approval..."
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                            rows={3}
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-2">
+                            Printing Due Date *
+                          </label>
+                          <input
+                            type="date"
+                            value={printingDueDate}
+                            onChange={(e) => setPrintingDueDate(e.target.value)}
+                            min={new Date().toISOString().split('T')[0]}
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                            required
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-2">
+                            Printing Due Time *
+                          </label>
+                          <input
+                            type="time"
+                            value={printingDueTime}
+                            onChange={(e) => setPrintingDueTime(e.target.value)}
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                            required
+                          />
+                        </div>
+                      </div>
+                      
+                      <div className="mt-6 flex gap-3">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!printingDueDate || !printingDueTime) {
+                              alert('Please select both date and time');
+                              return;
+                            }
+                            try {
+                              const notesEl = document.getElementById('decision-notes') as HTMLTextAreaElement;
+                              if (onApprove) {
+                                await onApprove(approvalNotes, printingDueDate, printingDueTime);
+                              }
+                              // Show success message
+                              alert(`✅ Paper approved successfully!\n\nPrinting due: ${printingDueDate} at ${printingDueTime}\n\nThe paper has been locked in the Approved Papers Repository.`);
+                              if (notesEl) notesEl.value = '';
+                              setApprovalNotes('');
+                              setPrintingDueDate('');
+                              setPrintingDueTime('09:00');
+                              setShowApprovalModal(false);
+                            } catch (error: any) {
+                              alert(`❌ Failed to approve paper: ${error.message || 'Unknown error'}`);
+                              console.error('Approval error:', error);
+                            }
+                          }}
+                          className="flex-1 rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600"
+                        >
+                          Confirm Approval
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowApprovalModal(false);
+                            setPrintingDueDate('');
+                            setPrintingDueTime('09:00');
+                            setApprovalNotes('');
+                          }}
+                          className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>

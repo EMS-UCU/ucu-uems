@@ -92,6 +92,15 @@ export interface ExamPaper {
   deadline?: string;
   created_at: string;
   updated_at: string;
+  // Approved Papers Repository fields
+  printing_due_date?: string;
+  printing_due_time?: string;
+  is_locked?: boolean;
+  unlock_password_hash?: string;
+  password_generated_at?: string;
+  unlocked_at?: string;
+  unlocked_by?: string;
+  unlock_expires_at?: string;
 }
 
 export type ExamPaperStatus =
