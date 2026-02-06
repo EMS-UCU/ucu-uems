@@ -83,7 +83,8 @@ export interface ExamPaper {
   setter_id?: string;
   team_lead_id?: string;
   chief_examiner_id?: string;
-  status: ExamPaperStatus;
+  status: ExamPaperStatus; // Workflow/vetting status (e.g., vetted_with_comments, vetting_in_progress)
+  approval_status?: string; // Approval status (e.g., approved_for_printing) - separate from workflow status
   version_number: number;
   file_url?: string;
   file_name?: string;

@@ -30,18 +30,18 @@ export async function getApprovedPapersRepository(): Promise<ApprovedPaper[]> {
     // First, let's check all papers to see what statuses exist
     const { data: allPapers, error: allError } = await supabase
       .from('exam_papers')
-      .select('id, status, course_code, course_name, is_locked')
+      .select('id, status, approval_status, course_code, course_name, is_locked')
       .order('created_at', { ascending: false })
       .limit(10);
     
     console.log('📊 All papers (first 10):', allPapers);
     console.log('📊 Statuses found:', allPapers?.map(p => ({ id: p.id, status: p.status, is_locked: p.is_locked })));
     
-    // Now fetch approved papers
+    // Now fetch approved papers using approval_status (not status)
     const { data, error } = await supabase
       .from('exam_papers')
       .select('*')
-      .eq('status', 'approved_for_printing')
+      .eq('approval_status', 'approved_for_printing')
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -59,7 +59,8 @@ export async function getApprovedPapersRepository(): Promise<ApprovedPaper[]> {
       papers: data?.map(p => ({
         id: p.id,
         course_code: p.course_code,
-        status: p.status,
+        workflow_status: p.status,
+        approval_status: p.approval_status,
         is_locked: p.is_locked,
         printing_due_date: p.printing_due_date
       }))
@@ -80,18 +81,23 @@ export async function getApprovedPapersRepository(): Promise<ApprovedPaper[]> {
         console.log('📋 All papers in database (last 20):', allStatuses);
         console.log('📊 Status breakdown:', {
           total: allStatuses?.length || 0,
-          statuses: allStatuses?.reduce((acc: any, p: any) => {
+          workflow_statuses: allStatuses?.reduce((acc: any, p: any) => {
             acc[p.status] = (acc[p.status] || 0) + 1;
+            return acc;
+          }, {}),
+          approval_statuses: allStatuses?.reduce((acc: any, p: any) => {
+            const approvalStatus = p.approval_status || 'none';
+            acc[approvalStatus] = (acc[approvalStatus] || 0) + 1;
             return acc;
           }, {}),
           locked_count: allStatuses?.filter((p: any) => p.is_locked === true).length || 0
         });
       }
       
-      // Check specifically for papers that might be approved but with different status
+      // Check specifically for papers that might be approved but with different approval_status
       const { data: lockedPapers, error: lockedError } = await supabase
         .from('exam_papers')
-        .select('id, status, course_code, course_name, is_locked, printing_due_date')
+        .select('id, status, approval_status, course_code, course_name, is_locked, printing_due_date')
         .eq('is_locked', true)
         .order('created_at', { ascending: false });
       
@@ -101,17 +107,17 @@ export async function getApprovedPapersRepository(): Promise<ApprovedPaper[]> {
         console.log('🔒 Papers with is_locked=true:', lockedPapers);
       }
       
-      // Also check for papers with status containing "approved" or "print"
+      // Also check for papers with approval_status containing "approved" or "print"
       const { data: approvedLike, error: approvedLikeError } = await supabase
         .from('exam_papers')
-        .select('id, status, course_code, course_name, is_locked')
-        .or('status.ilike.%approved%,status.ilike.%print%')
+        .select('id, status, approval_status, course_code, course_name, is_locked')
+        .or('approval_status.ilike.%approved%,approval_status.ilike.%print%')
         .order('created_at', { ascending: false });
       
       if (approvedLikeError) {
         console.error('❌ Error fetching approved-like papers:', approvedLikeError);
       } else {
-        console.log('📄 Papers with "approved" or "print" in status:', approvedLike);
+        console.log('📄 Papers with "approved" or "print" in approval_status:', approvedLike);
       }
     }
 
@@ -160,9 +166,12 @@ export async function getPapersNeedingPasswordGeneration(): Promise<ApprovedPape
 
 /**
  * Generate password for a paper and notify Super Admin
+ * @param examPaperId - The paper ID
+ * @param force - If true, generate password even if due date hasn't passed (for testing)
  */
 export async function generatePasswordForPaper(
-  examPaperId: string
+  examPaperId: string,
+  force: boolean = false
 ): Promise<{ success: boolean; error?: string; password?: string }> {
   try {
     // Get paper details
@@ -177,8 +186,24 @@ export async function generatePasswordForPaper(
     }
 
     // Check if password already generated
-    if (paper.unlock_password_hash) {
+    if (paper.unlock_password_hash && !force) {
       return { success: false, error: 'Password already generated for this paper' };
+    }
+
+    // Check if paper is approved and locked
+    if (paper.approval_status !== 'approved_for_printing' || !paper.is_locked) {
+      return { success: false, error: 'Paper must be approved and locked before generating password' };
+    }
+
+    // Check if due date has passed (unless forcing)
+    if (!force && paper.printing_due_date && paper.printing_due_time) {
+      const dueDate = new Date(paper.printing_due_date);
+      const [hours, minutes] = paper.printing_due_time.split(':').map(Number);
+      dueDate.setHours(hours, minutes, 0, 0);
+      const now = new Date();
+      if (dueDate > now) {
+        return { success: false, error: `Paper is not due yet. Due: ${dueDate.toLocaleString()}` };
+      }
     }
 
     // Generate password and hash

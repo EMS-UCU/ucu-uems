@@ -84,8 +84,9 @@ export async function approveExamForPrinting(
 ): Promise<{ success: boolean; error?: string }> {
   try {
     // Prepare update data
+    // Note: We set approval_status (not status) to separate approval from workflow/vetting status
     const updateData: any = {
-      status: 'approved_for_printing',
+      approval_status: 'approved_for_printing',
       updated_at: new Date().toISOString(),
       is_locked: true, // Lock paper in repository
     };
@@ -142,7 +143,7 @@ export async function approveExamForPrinting(
         .from('exam_papers')
         .select('id', { count: 'exact', head: true })
         .eq('id', examPaperId)
-        .eq('status', 'approved_for_printing')
+        .eq('approval_status', 'approved_for_printing')
         .eq('is_locked', true);
       
       // If we can't verify, still treat as success (update had no error - row may have been updated)

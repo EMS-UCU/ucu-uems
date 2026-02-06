@@ -46,6 +46,7 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // Get papers that need password generation
+    // Note: The RPC function check_and_generate_passwords uses approval_status (not status)
     const { data: papersNeedingPassword, error: checkError } = await supabase.rpc(
       'check_and_generate_passwords'
     );

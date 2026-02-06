@@ -5,6 +5,8 @@ import {
   getApprovedPapersRepository,
   unlockPaper,
   reLockPaper,
+  getPapersNeedingPasswordGeneration,
+  generatePasswordForPaper,
   type ApprovedPaper,
 } from '../lib/examServices/repositoryService';
 import { supabase } from '../lib/supabase';
@@ -24,6 +26,7 @@ export default function ApprovedPapersRepository({
   const [unlockPassword, setUnlockPassword] = useState('');
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [selectedPaper, setSelectedPaper] = useState<ApprovedPaper | null>(null);
+  const [generatingPasswords, setGeneratingPasswords] = useState(false);
 
   useEffect(() => {
     loadPapers();
@@ -88,6 +91,10 @@ export default function ApprovedPapersRepository({
       if (result.success) {
         setUnlockPassword('');
         setSelectedPaper(null);
+        // Clear search query so the unlocked paper is visible
+        setSearchQuery('');
+        // Ensure unlocked filter is active to show the unlocked paper
+        setFilterStatus('unlocked');
         await loadPapers();
       } else {
         setUnlockError(result.error || 'Failed to unlock paper');
@@ -112,8 +119,79 @@ export default function ApprovedPapersRepository({
     }
   };
 
+  const handleGeneratePasswords = async () => {
+    // Check if there are locked papers without passwords
+    const lockedPapersWithoutPasswords = papers.filter(
+      p => p.is_locked && !p.unlock_password_hash && p.approval_status === 'approved_for_printing'
+    );
+
+    if (lockedPapersWithoutPasswords.length === 0) {
+      alert('No locked papers found that need password generation.');
+      return;
+    }
+
+    const force = confirm(
+      `Found ${lockedPapersWithoutPasswords.length} locked paper(s) without passwords.\n\n` +
+      `Click OK to generate passwords for all of them (even if due date hasn't passed).\n` +
+      `Click Cancel to only generate for papers that are due.`
+    );
+
+    setGeneratingPasswords(true);
+    try {
+      let papersToProcess: ApprovedPaper[];
+      
+      if (force) {
+        // Generate for all locked papers without passwords
+        papersToProcess = lockedPapersWithoutPasswords;
+      } else {
+        // Only generate for papers that are due
+        papersToProcess = await getPapersNeedingPasswordGeneration();
+        if (papersToProcess.length === 0) {
+          alert('No papers are currently due for password generation. Papers need to have a printing due date/time that has passed.');
+          setGeneratingPasswords(false);
+          return;
+        }
+      }
+
+      // Generate passwords for each paper
+      const results = [];
+      for (const paper of papersToProcess) {
+        const result = await generatePasswordForPaper(paper.id, force);
+        results.push({
+          paperId: paper.id,
+          courseCode: paper.course_code,
+          success: result.success,
+          error: result.error,
+          password: result.password
+        });
+      }
+
+      // Show results
+      const successful = results.filter(r => r.success);
+      const failed = results.filter(r => !r.success);
+      
+      if (successful.length > 0) {
+        const passwordList = successful
+          .map(r => r.password ? `${r.courseCode}: ${r.password}` : r.courseCode)
+          .join('\n');
+        alert(`✅ Generated passwords for ${successful.length} paper(s):\n\n${passwordList}\n\nCheck your notifications for details.${failed.length > 0 ? `\n\n⚠️ Failed for ${failed.length} paper(s).` : ''}`);
+      } else {
+        alert(`❌ Failed to generate passwords:\n${failed.map(f => `${f.courseCode}: ${f.error}`).join('\n')}`);
+      }
+
+      // Reload papers to show updated password status
+      await loadPapers();
+    } catch (error: any) {
+      console.error('Error generating passwords:', error);
+      alert(`Error generating passwords: ${error.message}`);
+    } finally {
+      setGeneratingPasswords(false);
+    }
+  };
+
   const filteredPapers = papers.filter((paper) => {
-    const matchesSearch =
+    // If search query is empty, show all papers (match everything)
+    const matchesSearch = !searchQuery.trim() ||
       paper.course_code?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       paper.course_name?.toLowerCase().includes(searchQuery.toLowerCase());
 
@@ -180,6 +258,15 @@ export default function ApprovedPapersRepository({
           <div className="flex items-center gap-3">
             <button
               type="button"
+              onClick={handleGeneratePasswords}
+              disabled={generatingPasswords}
+              className="rounded-lg border border-green-300 bg-green-50 px-3 py-1.5 text-sm font-semibold text-green-700 transition hover:bg-green-100 disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Generate passwords for papers that are due for printing"
+            >
+              {generatingPasswords ? 'Generating...' : 'Generate Passwords'}
+            </button>
+            <button
+              type="button"
               onClick={loadPapers}
               className="rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-sm font-semibold text-blue-700 transition hover:bg-blue-50"
             >
@@ -204,8 +291,18 @@ export default function ApprovedPapersRepository({
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search by course code or name..."
-            className="w-full rounded-lg border border-slate-200 bg-white pl-10 pr-4 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+            className="w-full rounded-lg border border-slate-200 bg-white pl-10 pr-10 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
           />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+              title="Clear search"
+            >
+              ✕
+            </button>
+          )}
         </div>
         <div className="flex gap-2">
           <button

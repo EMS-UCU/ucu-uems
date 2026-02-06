@@ -2047,15 +2047,13 @@ function App() {
             };
           });
 
-        // Merge Supabase papers with persisted papers, prioritizing Supabase data but keeping persisted statuses
+        // Merge Supabase papers with persisted papers, prioritizing Supabase data
         // IMPORTANT: Only merge papers that exist in Supabase - don't add back deleted papers from localStorage
+        // IMPORTANT: Always use Supabase status - don't preserve old localStorage statuses that might be stale
         const persistedPapers = loadPersistedPapers();
         const mergedPapers: SubmittedPaper[] = submitted.map(supabasePaper => {
-          const persisted = persistedPapers.find(p => p.id === supabasePaper.id);
-          // If paper exists in persisted and has "in-vetting" status, keep that status
-          if (persisted && persisted.status === 'in-vetting') {
-            return { ...supabasePaper, status: 'in-vetting' as const };
-          }
+          // Always use Supabase status - it's the source of truth
+          // Only merge other fields from persisted if needed (but status comes from Supabase)
           return supabasePaper;
         });
         // Only add persisted papers that aren't in Supabase if they're truly new (not deleted)
@@ -2158,14 +2156,18 @@ function App() {
                 return prev;
               }
 
-              // Map backend status to UI status
+              // Map backend status to UI status (must match loadExamPapersFromSupabase mapping)
               let status: 'submitted' | 'in-vetting' | 'vetted' | 'approved' = 'submitted';
               if (updatedPaper.status === 'approved_for_printing') {
                 status = 'approved';
               } else if (
+                updatedPaper.status === 'vetted_with_comments' ||
+                updatedPaper.status === 'resubmitted_to_chief_examiner'
+              ) {
+                status = 'vetted';
+              } else if (
                 updatedPaper.status === 'appointed_for_vetting' ||
-                updatedPaper.status === 'vetting_in_progress' ||
-                updatedPaper.status === 'vetted_with_comments'
+                updatedPaper.status === 'vetting_in_progress'
               ) {
                 status = 'in-vetting';
               } else if (updatedPaper.status === 'integrated_by_team_lead') {
@@ -5082,25 +5084,28 @@ function App() {
     }
     
     if (confirm(`Are you sure you want to remove "${paper.fileName}" from vetting? This will change its status back to "submitted".`)) {
-      // Sync status change to Supabase first
-      try {
-        const { error } = await supabase
-          .from('exam_papers')
-          .update({ status: 'integrated_by_team_lead' })
-          .eq('id', paperId);
-        
-        if (error) {
-          console.error('Error updating paper status in Supabase:', error);
-          alert(`Failed to sync status change to database: ${error.message}`);
+      // Skip DB sync for demo/sample papers (they don't exist in exam_papers)
+      const isDemoOrInvalidId = paperId === DEMO_PAPER_ID || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(paperId);
+      if (!isDemoOrInvalidId) {
+        try {
+          const { error } = await supabase
+            .from('exam_papers')
+            .update({ status: 'integrated_by_team_lead' })
+            .eq('id', paperId);
+          
+          if (error) {
+            console.error('Error updating paper status in Supabase:', error);
+            alert(`Failed to sync status change to database: ${error.message}`);
+            return;
+          }
+        } catch (error: any) {
+          console.error('Unexpected error syncing paper status:', error);
+          alert(`Failed to sync status change: ${error?.message || 'Unknown error'}`);
           return;
         }
-      } catch (error: any) {
-        console.error('Unexpected error syncing paper status:', error);
-        alert(`Failed to sync status change: ${error?.message || 'Unknown error'}`);
-        return;
       }
 
-      // Update local state
+      // Update local state - remove from vetting by setting status to 'submitted'
       setSubmittedPapers(prev => {
         const updated = prev.map(p => 
           p.id === paperId 
@@ -5115,6 +5120,9 @@ function App() {
         }
         return updated;
       });
+      
+      // Note: The realtime UPDATE handler will also update the paper when the DB change propagates,
+      // but since we're setting status to 'submitted', it will be filtered out of the vetting view
       alert(`Paper "${paper.fileName}" has been removed from vetting and returned to submitted status.`);
     }
   };
@@ -5277,12 +5285,37 @@ function App() {
                 });
                 if (syncResult.success) {
                   console.log('✅ Recording synced to vetting_sessions for Chief Examiner dashboard');
+                  // Update localStorage record with recordingUrl after successful sync
+                  setVettingSessionRecords(prev => {
+                    const updated = prev.map(record => 
+                      record.paperId === vettedPaper.id && !record.recordingUrl
+                        ? { ...record, recordingUrl }
+                        : record
+                    );
+                    // Persist updated records
+                    try {
+                      const toSave = updated.map(r => ({
+                        ...r,
+                        checklistComments: r.checklistComments instanceof Map 
+                          ? Object.fromEntries(r.checklistComments) 
+                          : r.checklistComments
+                      }));
+                      localStorage.setItem('ucu-vetting-records', JSON.stringify(toSave.slice(0, 50)));
+                    } catch (error) {
+                      console.error('Error updating localStorage with recordingUrl:', error);
+                    }
+                    return updated;
+                  });
                 } else {
-                  console.warn('Recording upload OK but DB sync failed:', syncResult.error);
+                  console.error('❌ Recording upload OK but DB sync failed:', syncResult.error);
+                  // Show user-friendly error
+                  alert(`Recording uploaded but failed to sync to database: ${syncResult.error}\n\nPlease check Supabase RLS policies for vetting_sessions table.`);
                 }
               }
             } else {
-              console.error('Failed to upload recording:', uploadResult.error);
+              const errorMsg = uploadResult.error || 'Unknown upload error';
+              console.error('❌ Failed to upload recording:', errorMsg);
+              alert(`Failed to upload recording: ${errorMsg}\n\nPlease check:\n1. Supabase Storage bucket 'vetting_recordings' exists\n2. Storage policies allow uploads\n3. Browser console for details`);
             }
           }
         } catch (error) {
@@ -8989,6 +9022,11 @@ const statToneClasses: Record<
 
 const syncPaperStatusToSupabase = async (paperId: string, status: ExamPaperStatus) => {
   if (!paperId) {
+    return;
+  }
+  // Skip DB sync for demo/sample papers (id is not a UUID)
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(paperId);
+  if (!isUuid || paperId === DEMO_PAPER_ID) {
     return;
   }
   try {

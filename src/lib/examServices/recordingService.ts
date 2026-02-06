@@ -25,6 +25,13 @@ export async function uploadVettingRecording(
     const fileName = `${examPaperId}/${sessionId}-${timestamp}.webm`;
     const filePath = fileName;
 
+    console.log('📤 Uploading recording to storage:', {
+      bucket: STORAGE_BUCKET,
+      filePath,
+      fileSize: videoBlob.size,
+      contentType: 'video/webm'
+    });
+
     // Upload to Supabase Storage
     const { data, error } = await supabase.storage
       .from(STORAGE_BUCKET)
@@ -34,9 +41,28 @@ export async function uploadVettingRecording(
       });
 
     if (error) {
-      console.error('Error uploading recording:', error);
-      return { error: error.message };
+      console.error('❌ Error uploading recording:', {
+        error: error.message,
+        statusCode: error.statusCode,
+        errorCode: error.error,
+        bucket: STORAGE_BUCKET,
+        filePath
+      });
+      
+      // Provide helpful error messages
+      if (error.message?.includes('not found') || error.statusCode === 404) {
+        return { error: `Storage bucket '${STORAGE_BUCKET}' not found. Please create it in Supabase Dashboard → Storage.` };
+      }
+      if (error.message?.includes('permission') || error.message?.includes('policy') || error.statusCode === 403) {
+        return { error: `Permission denied: Storage policies may be blocking uploads. Please check Supabase Storage → Policies for bucket '${STORAGE_BUCKET}'.` };
+      }
+      return { error: error.message || 'Failed to upload recording' };
     }
+
+    console.log('✅ Recording uploaded successfully:', {
+      path: data.path,
+      id: data.id
+    });
 
     // Get public URL for the uploaded file
     const { data: urlData } = supabase.storage

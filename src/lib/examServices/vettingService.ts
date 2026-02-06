@@ -149,6 +149,12 @@ export async function syncVettingRecordingToSession(
   }
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    console.log('🔄 Syncing recording to vetting_sessions:', {
+      examPaperId,
+      recordingUrl: recordingData.recordingUrl,
+      filePath: recordingData.recordingFilePath
+    });
+
     // Find existing vetting session for this exam paper (most recent first)
     const { data: sessions, error: findError } = await supabase
       .from('vetting_sessions')
@@ -158,7 +164,13 @@ export async function syncVettingRecordingToSession(
       .limit(1);
 
     if (findError) {
-      return { success: false, error: findError.message };
+      console.error('❌ Error finding vetting session:', {
+        error: findError.message,
+        code: findError.code,
+        details: findError.details,
+        hint: findError.hint
+      });
+      return { success: false, error: `Failed to find vetting session: ${findError.message}` };
     }
 
     const updateData = {
@@ -185,11 +197,16 @@ export async function syncVettingRecordingToSession(
     }
 
     // No existing session: create one so recording appears in Chief's dashboard
-    const { data: examPaper } = await supabase
+    console.log('➕ No existing session found, creating new vetting session');
+    const { data: examPaper, error: examPaperError } = await supabase
       .from('exam_papers')
       .select('chief_examiner_id')
       .eq('id', examPaperId)
       .single();
+
+    if (examPaperError) {
+      console.warn('⚠️ Could not fetch exam paper for chief_examiner_id:', examPaperError.message);
+    }
 
     const { error: insertError } = await supabase
       .from('vetting_sessions')
@@ -203,8 +220,19 @@ export async function syncVettingRecordingToSession(
       });
 
     if (insertError) {
-      return { success: false, error: insertError.message };
+      console.error('❌ Error creating vetting session:', {
+        error: insertError.message,
+        code: insertError.code,
+        details: insertError.details,
+        hint: insertError.hint
+      });
+      // Check if it's an RLS error
+      if (insertError.code === '42501' || insertError.message?.includes('permission') || insertError.message?.includes('policy')) {
+        return { success: false, error: `Permission denied: RLS policy may be blocking the insert. Please check Supabase RLS policies for vetting_sessions table. Error: ${insertError.message}` };
+      }
+      return { success: false, error: `Failed to create vetting session: ${insertError.message}` };
     }
+    console.log('✅ Vetting session created successfully');
     return { success: true };
   } catch (error: any) {
     return { success: false, error: error?.message ?? 'Failed to sync recording' };
