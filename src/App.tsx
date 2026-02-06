@@ -1994,9 +1994,10 @@ function App() {
             submittedAt: paper.submitted_at || paper.created_at,
             fileSize: paper.file_size || undefined,
             // Map backend workflow states into the simplified UI statuses.
+            // approval_status = 'approved_for_printing' → 'approved' (separate from workflow status)
             // vetted_with_comments / resubmitted_to_chief_examiner = ready for Chief Examiner to approve → 'vetted'
             status:
-              paper.status === 'approved_for_printing'
+              paper.approval_status === 'approved_for_printing'
                 ? 'approved'
                 : paper.status === 'vetted_with_comments' ||
                   paper.status === 'resubmitted_to_chief_examiner'
@@ -2157,8 +2158,9 @@ function App() {
               }
 
               // Map backend status to UI status (must match loadExamPapersFromSupabase mapping)
+              // Check approval_status first (separate from workflow status)
               let status: 'submitted' | 'in-vetting' | 'vetted' | 'approved' = 'submitted';
-              if (updatedPaper.status === 'approved_for_printing') {
+              if (updatedPaper.approval_status === 'approved_for_printing') {
                 status = 'approved';
               } else if (
                 updatedPaper.status === 'vetted_with_comments' ||
@@ -2289,7 +2291,7 @@ function App() {
               submittedAt: paper.submitted_at || paper.created_at,
               fileSize: paper.file_size || undefined,
               status:
-                paper.status === 'approved_for_printing'
+                paper.approval_status === 'approved_for_printing'
                   ? 'approved'
                   : paper.status === 'appointed_for_vetting' ||
                     paper.status === 'vetting_in_progress' ||
@@ -4366,7 +4368,7 @@ function App() {
             submittedAt: paper.submitted_at || paper.created_at,
             fileSize: paper.file_size || undefined,
             status:
-              paper.status === 'approved_for_printing'
+              paper.approval_status === 'approved_for_printing'
                 ? 'approved'
                 : paper.status === 'vetted_with_comments' ||
                   paper.status === 'resubmitted_to_chief_examiner'
@@ -6106,7 +6108,7 @@ function App() {
           submittedBy: paper.team_lead_id || paper.setter_id || paper.chief_examiner_id || 'Unknown',
           submittedAt: paper.submitted_at || paper.created_at,
           fileSize: paper.file_size || undefined,
-          status: paper.status === 'approved_for_printing' ? 'approved' as const
+          status: paper.approval_status === 'approved_for_printing' ? 'approved' as const
             : paper.status === 'vetted_with_comments' || paper.status === 'resubmitted_to_chief_examiner'
             ? 'vetted' as const
             : paper.status === 'appointed_for_vetting' || paper.status === 'vetting_in_progress'
@@ -6127,16 +6129,8 @@ function App() {
       console.error('⚠️ Error reloading papers:', error);
     }
     
-    // Update submitted papers status to 'approved' and add to archive
-    setSubmittedPapers(prev => {
-      const base = stripDemoPaper(prev);
-      const updated = base.map(paper =>
-        paper.status === 'vetted'
-          ? { ...paper, status: 'approved' as const }
-          : paper
-      );
-      return ensureDemoPaper(updated);
-    });
+    // Note: State is updated via database reload above and real-time subscription
+    // No need for redundant local state update - the reload already maps approval_status correctly
     
     // Add approved papers to archive for AI similarity checking
     vettedPapers.forEach(paper => {
