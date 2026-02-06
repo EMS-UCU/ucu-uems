@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Lock, Unlock, Calendar, Clock, Search, Filter, Key } from 'lucide-react';
+import { Lock, Unlock, Calendar, Clock, Search, Filter, Key, Eye, Printer, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import {
   getApprovedPapersRepository,
   unlockPaper,
@@ -27,6 +27,15 @@ export default function ApprovedPapersRepository({
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [selectedPaper, setSelectedPaper] = useState<ApprovedPaper | null>(null);
   const [generatingPasswords, setGeneratingPasswords] = useState(false);
+  const [viewingPaper, setViewingPaper] = useState<ApprovedPaper | null>(null);
+  const [paperViewerUrl, setPaperViewerUrl] = useState<string | null>(null);
+  const [isBlurred, setIsBlurred] = useState(false);
+  const [screenshotWarning, setScreenshotWarning] = useState(false);
+  const [pdfPages, setPdfPages] = useState<string[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
+  const [loadingPdf, setLoadingPdf] = useState(false);
+  const [expandedPaperId, setExpandedPaperId] = useState<string | null>(null);
 
   useEffect(() => {
     loadPapers();
@@ -46,6 +55,14 @@ export default function ApprovedPapersRepository({
       clearInterval(unlockInterval);
     };
   }, []);
+
+  // Setup screenshot detection when viewer is open
+  useEffect(() => {
+    if (!viewingPaper) return;
+
+    const cleanup = setupScreenshotDetection();
+    return cleanup;
+  }, [viewingPaper]);
 
   const loadPapers = async () => {
     setLoading(true);
@@ -117,6 +134,311 @@ export default function ApprovedPapersRepository({
     } catch (error: any) {
       alert(`Error: ${error.message}`);
     }
+  };
+
+  // Lazy load PDF.js to avoid breaking the app on initial load
+  const loadPdfJs = async () => {
+    const pdfjs = await import('pdfjs-dist');
+    // Set up PDF.js worker - use unpkg CDN which works better with Vite
+    if (typeof window !== 'undefined' && pdfjs.GlobalWorkerOptions) {
+      // Use unpkg.com CDN which is more reliable for dynamic imports
+      pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+    }
+    return pdfjs;
+  };
+
+  const resolvePaperUrl = async (fileUrl?: string | null): Promise<string | null> => {
+    if (!fileUrl) return null;
+    
+    // If it's already a direct URL (http/https/data), return it
+    const directFileUrlPattern = /^(https?:\/\/|\/|data:)/i;
+    if (directFileUrlPattern.test(fileUrl)) {
+      return fileUrl;
+    }
+
+    // Otherwise, get signed URL from Supabase Storage
+    try {
+      const { data, error } = await supabase.storage
+        .from('exam_papers')
+        .createSignedUrl(fileUrl, 3600); // 1 hour expiry
+
+      if (error) {
+        console.error('Error creating signed URL:', error);
+        return null;
+      }
+
+      return data.signedUrl;
+    } catch (error) {
+      console.error('Error resolving paper URL:', error);
+      return null;
+    }
+  };
+
+  const loadPdfPages = async (url: string) => {
+    setLoadingPdf(true);
+    try {
+      // Load PDF.js library if not already loaded
+      const pdfjs = await loadPdfJs();
+      
+      // Fetch PDF as array buffer
+      const response = await fetch(url);
+      const arrayBuffer = await response.arrayBuffer();
+      
+      // Load PDF document
+      const loadingTask = pdfjs.getDocument({ data: arrayBuffer });
+      const pdf = await loadingTask.promise;
+      
+      setTotalPages(pdf.numPages);
+      
+      // Render all pages to canvas and convert to data URLs
+      const pagePromises = [];
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        pagePromises.push(
+          pdf.getPage(pageNum).then(async (page) => {
+            const viewport = page.getViewport({ scale: 2.0 }); // Higher scale for better quality
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            
+            if (!context) {
+              throw new Error('Could not get canvas context');
+            }
+            
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+            
+            const renderContext = {
+              canvasContext: context,
+              viewport: viewport,
+            };
+            
+            await page.render(renderContext).promise;
+            
+            // Convert canvas to data URL (image)
+            return canvas.toDataURL('image/png');
+          })
+        );
+      }
+      
+      const pageImages = await Promise.all(pagePromises);
+      setPdfPages(pageImages);
+      setCurrentPage(1);
+      setLoadingPdf(false);
+    } catch (error: any) {
+      console.error('Error loading PDF:', error);
+      alert(`Error loading PDF: ${error.message || 'Unknown error'}`);
+      setLoadingPdf(false);
+    }
+  };
+
+  const handleViewPaper = async (paper: ApprovedPaper) => {
+    // If already expanded, collapse it
+    if (expandedPaperId === paper.id) {
+      setExpandedPaperId(null);
+      setViewingPaper(null);
+      setPaperViewerUrl(null);
+      setIsBlurred(false);
+      setScreenshotWarning(false);
+      setPdfPages([]);
+      setCurrentPage(1);
+      setTotalPages(0);
+      return;
+    }
+
+    if (!paper.file_url) {
+      alert('Paper file URL not available. The paper may not have been uploaded yet.');
+      return;
+    }
+
+    try {
+      const url = await resolvePaperUrl(paper.file_url);
+      if (!url) {
+        alert('Failed to load paper. The file may not be accessible. Please contact support.');
+        return;
+      }
+
+      setPaperViewerUrl(url);
+      setViewingPaper(paper);
+      setExpandedPaperId(paper.id);
+      setIsBlurred(false);
+      setScreenshotWarning(false);
+      setPdfPages([]);
+      setCurrentPage(1);
+      setTotalPages(0);
+      
+      // Load PDF pages
+      await loadPdfPages(url);
+    } catch (error: any) {
+      console.error('Error loading paper:', error);
+      alert(`Error loading paper: ${error.message || 'Unknown error'}`);
+    }
+  };
+
+  const setupScreenshotDetection = () => {
+    // Detect Print Screen key
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Print Screen (Windows/Linux)
+      if (e.key === 'PrintScreen' || e.code === 'PrintScreen') {
+        e.preventDefault();
+        triggerBlur('Print Screen detected');
+        return false;
+      }
+      
+      // Windows Snipping Tool shortcut (Win + Shift + S)
+      if (e.key === 's' || e.key === 'S') {
+        if ((e.metaKey || e.ctrlKey) && e.shiftKey) {
+          e.preventDefault();
+          triggerBlur('Screenshot shortcut detected');
+          return false;
+        }
+      }
+      
+      // Mac screenshot shortcuts (Cmd + Shift + 3/4/5)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey) {
+        if (e.key === '3' || e.key === '4' || e.key === '5') {
+          e.preventDefault();
+          triggerBlur('Screenshot shortcut detected');
+          return false;
+        }
+      }
+      
+      // F12 (DevTools) - often used for screenshots
+      if (e.key === 'F12') {
+        e.preventDefault();
+        triggerBlur('Developer tools detected');
+        return false;
+      }
+    };
+
+    // Detect right-click (context menu often used for saving images)
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      triggerBlur('Right-click detected');
+      return false;
+    };
+
+    // Detect visibility change (tab switching, alt+tab)
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        triggerBlur('Tab switch detected');
+      }
+    };
+
+    // Detect window blur (alt+tab, clicking away)
+    const handleBlur = () => {
+      triggerBlur('Window focus lost');
+    };
+
+    // Monitor for dev tools opening
+    let devToolsOpen = false;
+    const checkDevTools = setInterval(() => {
+      const widthThreshold = window.outerWidth - window.innerWidth > 160;
+      const heightThreshold = window.outerHeight - window.innerHeight > 160;
+      
+      if ((widthThreshold || heightThreshold) && !devToolsOpen) {
+        devToolsOpen = true;
+        triggerBlur('Developer tools detected');
+      } else if (!widthThreshold && !heightThreshold) {
+        devToolsOpen = false;
+      }
+    }, 500);
+
+    // Add event listeners
+    window.addEventListener('keydown', handleKeyDown, true);
+    document.addEventListener('contextmenu', handleContextMenu, true);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleBlur);
+
+    // Cleanup function
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+      document.removeEventListener('contextmenu', handleContextMenu, true);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleBlur);
+      clearInterval(checkDevTools);
+    };
+  };
+
+  const triggerBlur = (reason: string) => {
+    setIsBlurred(true);
+    setScreenshotWarning(true);
+    console.warn('⚠️ Screenshot attempt detected:', reason);
+    
+    // Show warning message
+    setTimeout(() => {
+      alert('⚠️ Screenshot detection triggered. Content has been blurred for security.');
+    }, 100);
+
+    // Auto-unblur after 3 seconds
+    setTimeout(() => {
+      setIsBlurred(false);
+      setScreenshotWarning(false);
+    }, 3000);
+  };
+
+  const handlePrintPaper = () => {
+    if (!pdfPages.length || !viewingPaper) return;
+    
+    // Create a new window for printing
+    const printWindow = window.open('', '_blank', 'width=800,height=600');
+    if (!printWindow) {
+      alert('Please allow pop-ups to print the paper.');
+      return;
+    }
+
+    // Create HTML with all PDF pages as images
+    const imagesHtml = pdfPages.map((pageDataUrl, index) => 
+      `<img src="${pageDataUrl}" style="width: 100%; page-break-after: always; display: block;" alt="Page ${index + 1}" />`
+    ).join('');
+
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Print - ${viewingPaper.course_code}</title>
+          <style>
+            @media print {
+              body { margin: 0; padding: 0; }
+              img { max-width: 100%; height: auto; page-break-after: always; }
+            }
+            body {
+              margin: 0;
+              padding: 20px;
+              font-family: Arial, sans-serif;
+            }
+            img {
+              width: 100%;
+              height: auto;
+              margin-bottom: 20px;
+              display: block;
+            }
+          </style>
+        </head>
+        <body oncontextmenu="return false" onselectstart="return false" ondragstart="return false">
+          <div style="text-align: center; margin-bottom: 20px;">
+            <h2>${viewingPaper.course_code} - ${viewingPaper.course_name}</h2>
+          </div>
+          ${imagesHtml}
+          <script>
+            window.onload = function() {
+              setTimeout(function() {
+                window.print();
+              }, 500);
+            };
+            document.addEventListener('keydown', function(e) {
+              if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+                e.preventDefault();
+                return false;
+              }
+            });
+            document.addEventListener('contextmenu', function(e) {
+              e.preventDefault();
+              return false;
+            });
+          </script>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
   };
 
   const handleGeneratePasswords = async () => {
@@ -427,18 +749,566 @@ export default function ApprovedPapersRepository({
                       Unlock Paper
                     </button>
                   ) : (
-                    <button
-                      type="button"
-                      onClick={() => handleReLock(paper)}
-                      className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                    >
-                      Re-lock
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => handleViewPaper(paper)}
+                        className="flex items-center justify-center gap-2 rounded-lg bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600"
+                      >
+                        {expandedPaperId === paper.id ? (
+                          <>
+                            <X className="h-4 w-4" />
+                            Close
+                          </>
+                        ) : (
+                          <>
+                            <Eye className="h-4 w-4" />
+                            View Paper
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleReLock(paper)}
+                        className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                      >
+                        Re-lock
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
+
+              {/* Expanded Paper Viewer - Shows inside the card when expanded */}
+              {expandedPaperId === paper.id && viewingPaper?.id === paper.id && paperViewerUrl && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className="mt-6 border-t border-slate-200 pt-6"
+                  style={{
+                    filter: isBlurred ? 'blur(20px)' : 'none',
+                    transition: 'filter 0.3s ease',
+                  }}
+                >
+                  {/* Screenshot Warning Banner */}
+                  {screenshotWarning && (
+                    <div className="mb-4 bg-red-600 text-white px-6 py-3 text-center font-semibold rounded-lg">
+                      ⚠️ Screenshot attempt detected! Content has been blurred for security.
+                    </div>
+                  )}
+
+                  {/* Exam Paper Card - Full Width */}
+                    <div className="w-full rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md">
+                      <div className="mb-3 flex items-center justify-between border-b border-blue-100 pb-2">
+                        <div className="flex items-center gap-2">
+                          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow-sm">
+                            <span className="text-white text-xs">🪟</span>
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-slate-800">Secure In-Window Viewer</p>
+                            <p className="text-[0.65rem] text-slate-600">Document stays inside the Safe Browser</p>
+                          </div>
+                        </div>
+                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.65rem] font-semibold text-emerald-700">
+                          Live Preview
+                        </span>
+                      </div>
+
+                      {/* Paper Info */}
+                      <div className="mb-3 space-y-2">
+                        <div>
+                          <label className="text-[0.65rem] font-semibold text-slate-500">File</label>
+                          <input
+                            type="text"
+                            value={paper.file_name || `${paper.course_code}_Exam_Paper.pdf`}
+                            readOnly
+                            className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[0.65rem] font-semibold text-slate-500">Course</label>
+                          <input
+                            type="text"
+                            value={paper.course_code}
+                            readOnly
+                            className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700"
+                          />
+                        </div>
+                      </div>
+
+                      {/* PDF Viewer - Full Width */}
+                      <div className="mt-3 w-full overflow-auto rounded-lg border-2 border-slate-200 bg-slate-50 shadow-inner" style={{
+                        maxHeight: '800px',
+                        minHeight: '600px',
+                      }}>
+                        {loadingPdf ? (
+                          <div className="flex items-center justify-center h-full min-h-[400px]">
+                            <div className="text-center">
+                              <div className="inline-block h-6 w-6 animate-spin rounded-full border-3 border-solid border-blue-500 border-r-transparent"></div>
+                              <p className="mt-2 text-xs text-slate-600">Loading PDF pages...</p>
+                            </div>
+                          </div>
+                        ) : pdfPages.length > 0 ? (
+                          <div className="p-4 space-y-4">
+                            {/* Page Navigation */}
+                            {totalPages > 1 && (
+                              <div className="sticky top-0 z-10 bg-white border border-slate-200 rounded-lg px-3 py-1.5 flex items-center justify-between shadow-sm mb-4">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const newPage = Math.max(1, currentPage - 1);
+                                    setCurrentPage(newPage);
+                                  }}
+                                  disabled={currentPage === 1}
+                                  className="flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  <ChevronLeft className="h-3 w-3" />
+                                  Prev
+                                </button>
+                                <span className="text-xs font-semibold text-slate-700">
+                                  Page {currentPage} of {totalPages}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const newPage = Math.min(totalPages, currentPage + 1);
+                                    setCurrentPage(newPage);
+                                  }}
+                                  disabled={currentPage === totalPages}
+                                  className="flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  Next
+                                  <ChevronRight className="h-3 w-3" />
+                                </button>
+                              </div>
+                            )}
+
+                            {/* PDF Pages - Full Width */}
+                            {pdfPages.map((pageDataUrl, index) => (
+                              <div
+                                key={index}
+                                data-page={index + 1}
+                                className={`bg-white rounded shadow-sm flex justify-center ${index + 1 === currentPage ? 'ring-2 ring-blue-500' : ''}`}
+                                style={{ display: totalPages > 1 && index + 1 !== currentPage ? 'none' : 'block' }}
+                              >
+                                <img
+                                  src={pageDataUrl}
+                                  alt={`Page ${index + 1}`}
+                                  className="max-w-full h-auto"
+                                  style={{
+                                    userSelect: 'none',
+                                    WebkitUserSelect: 'none',
+                                    pointerEvents: 'none',
+                                    draggable: false,
+                                    width: '100%',
+                                    maxWidth: '100%',
+                                  }}
+                                  onContextMenu={(e) => {
+                                    e.preventDefault();
+                                    triggerBlur('Right-click detected');
+                                    return false;
+                                  }}
+                                  onDragStart={(e) => e.preventDefault()}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-center h-full min-h-[400px]">
+                            <p className="text-xs text-slate-600">No PDF content available</p>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Description and Actions */}
+                      <p className="mt-3 text-[0.65rem] text-slate-500 text-center">
+                        Zoom, scroll, and view from here. Document stays inside the Safe Browser.
+                      </p>
+                      
+                      {/* Print Button */}
+                      <div className="mt-3 flex justify-center">
+                        <button
+                          type="button"
+                          onClick={handlePrintPaper}
+                          className="flex items-center gap-2 rounded-lg bg-blue-500 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-600"
+                        >
+                          <Printer className="h-3 w-3" />
+                          Print Paper
+                        </button>
+                      </div>
+                    </div>
+                </motion.div>
+              )}
             </motion.div>
           ))}
+        </div>
+      )}
+
+      {/* Old Separate Viewer - Removed */}
+      {false && viewingPaper && paperViewerUrl && (
+        <div className="mt-6" style={{
+          filter: isBlurred ? 'blur(20px)' : 'none',
+          transition: 'filter 0.3s ease',
+        }}>
+          {/* Screenshot Warning Banner */}
+          {screenshotWarning && (
+            <div className="mb-4 bg-red-600 text-white px-6 py-3 text-center font-semibold rounded-lg">
+              ⚠️ Screenshot attempt detected! Content has been blurred for security.
+            </div>
+          )}
+
+          {/* Exam Paper Card - Full Width */}
+            <div className="rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md">
+              <div className="mb-3 flex items-center justify-between border-b border-blue-100 pb-2">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow-sm">
+                    <span className="text-white text-xs">🪟</span>
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-slate-800">Secure In-Window Viewer</p>
+                    <p className="text-[0.65rem] text-slate-600">Document stays inside the Safe Browser</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.65rem] font-semibold text-emerald-700">
+                    Live Preview
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setViewingPaper(null);
+                      setPaperViewerUrl(null);
+                      setIsBlurred(false);
+                      setScreenshotWarning(false);
+                      setPdfPages([]);
+                      setCurrentPage(1);
+                      setTotalPages(0);
+                    }}
+                    className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Paper Info */}
+              <div className="mb-3 space-y-2">
+                <div>
+                  <label className="text-[0.65rem] font-semibold text-slate-500">File</label>
+                  <input
+                    type="text"
+                    value={viewingPaper.file_name || `${viewingPaper.course_code}_Exam_Paper.pdf`}
+                    readOnly
+                    className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700"
+                  />
+                </div>
+                <div>
+                  <label className="text-[0.65rem] font-semibold text-slate-500">Course</label>
+                  <input
+                    type="text"
+                    value={viewingPaper.course_code}
+                    readOnly
+                    className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700"
+                  />
+                </div>
+              </div>
+
+              {/* PDF Viewer */}
+              <div className="mt-3 aspect-[210/297] overflow-auto rounded-lg border-2 border-slate-200 bg-slate-50 shadow-inner" style={{
+                filter: isBlurred ? 'blur(20px)' : 'none',
+                transition: 'filter 0.3s ease',
+                maxHeight: '600px',
+              }}>
+                {loadingPdf ? (
+                  <div className="flex items-center justify-center h-full min-h-[400px]">
+                    <div className="text-center">
+                      <div className="inline-block h-6 w-6 animate-spin rounded-full border-3 border-solid border-blue-500 border-r-transparent"></div>
+                      <p className="mt-2 text-xs text-slate-600">Loading PDF pages...</p>
+                    </div>
+                  </div>
+                ) : pdfPages.length > 0 ? (
+                  <div className="p-4 space-y-4">
+                    {/* Page Navigation */}
+                    {totalPages > 1 && (
+                      <div className="sticky top-0 z-10 bg-white border border-slate-200 rounded-lg px-3 py-1.5 flex items-center justify-between shadow-sm mb-4">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const newPage = Math.max(1, currentPage - 1);
+                            setCurrentPage(newPage);
+                          }}
+                          disabled={currentPage === 1}
+                          className="flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <ChevronLeft className="h-3 w-3" />
+                          Prev
+                        </button>
+                        <span className="text-xs font-semibold text-slate-700">
+                          Page {currentPage} of {totalPages}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const newPage = Math.min(totalPages, currentPage + 1);
+                            setCurrentPage(newPage);
+                          }}
+                          disabled={currentPage === totalPages}
+                          className="flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Next
+                          <ChevronRight className="h-3 w-3" />
+                        </button>
+                      </div>
+                    )}
+
+                    {/* PDF Pages */}
+                    {pdfPages.map((pageDataUrl, index) => (
+                      <div
+                        key={index}
+                        data-page={index + 1}
+                        className={`bg-white rounded shadow-sm ${index + 1 === currentPage ? 'ring-2 ring-blue-500' : ''}`}
+                        style={{ display: totalPages > 1 && index + 1 !== currentPage ? 'none' : 'block' }}
+                      >
+                        <img
+                          src={pageDataUrl}
+                          alt={`Page ${index + 1}`}
+                          className="w-full h-auto"
+                          style={{
+                            userSelect: 'none',
+                            WebkitUserSelect: 'none',
+                            pointerEvents: 'none',
+                            draggable: false,
+                          }}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            triggerBlur('Right-click detected');
+                            return false;
+                          }}
+                          onDragStart={(e) => e.preventDefault()}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-center h-full min-h-[400px]">
+                    <p className="text-xs text-slate-600">No PDF content available</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Description and Actions */}
+              <p className="mt-3 text-[0.65rem] text-slate-500 text-center">
+                Zoom, scroll, and view from here. Document stays inside the Safe Browser.
+              </p>
+              
+              {/* Print Button */}
+              <div className="mt-3 flex justify-center">
+                <button
+                  type="button"
+                  onClick={handlePrintPaper}
+                  className="flex items-center gap-2 rounded-lg bg-blue-500 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-600"
+                >
+                  <Printer className="h-3 w-3" />
+                  Print Paper
+                </button>
+              </div>
+            </div>
+
+        </div>
+      )}
+
+      {/* Old Full-Screen Modal - Removed */}
+      {false && viewingPaper && paperViewerUrl && (
+        <div 
+          className="fixed inset-0 z-[300] flex flex-col bg-slate-900"
+          onContextMenu={(e) => {
+            e.preventDefault();
+            triggerBlur('Right-click detected');
+            return false;
+          }}
+          onDragStart={(e) => e.preventDefault()}
+          style={{
+            filter: isBlurred ? 'blur(20px)' : 'none',
+            transition: 'filter 0.3s ease',
+          }}
+        >
+          {/* Screenshot Warning Banner */}
+          {screenshotWarning && (
+            <div className="absolute top-0 left-0 right-0 z-[400] bg-red-600 text-white px-6 py-3 text-center font-semibold">
+              ⚠️ Screenshot attempt detected! Content has been blurred for security.
+            </div>
+          )}
+
+          {/* Viewer Header */}
+          <div className="flex items-center justify-between bg-white border-b border-slate-200 px-6 py-4">
+            <div>
+              <h3 className="text-lg font-bold text-blue-900">
+                {viewingPaper.course_code} - {viewingPaper.course_name}
+              </h3>
+              <p className="text-sm text-slate-600">
+                View Only - Printing Enabled • Download & Screenshots Disabled
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handlePrintPaper}
+                className="flex items-center gap-2 rounded-lg bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600"
+              >
+                <Printer className="h-4 w-4" />
+                Print
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setViewingPaper(null);
+                  setPaperViewerUrl(null);
+                  setIsBlurred(false);
+                  setScreenshotWarning(false);
+                }}
+                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+          </div>
+
+          {/* PDF Viewer - Secure In-Window Viewer Style */}
+          <div className="flex-1 overflow-auto relative bg-slate-50 p-6" style={{
+            filter: isBlurred ? 'blur(20px)' : 'none',
+            transition: 'filter 0.3s ease',
+          }}>
+            {loadingPdf ? (
+              <div className="flex items-center justify-center h-full">
+                <div className="text-center">
+                  <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-blue-500 border-r-transparent"></div>
+                  <p className="mt-4 text-sm text-slate-600">Loading PDF pages...</p>
+                </div>
+              </div>
+            ) : pdfPages.length > 0 ? (
+              <div className="max-w-4xl mx-auto">
+                {/* Secure Viewer Container - Matching Vetting Dashboard Style */}
+                <div className="rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md">
+                  {/* Page Navigation */}
+                  {totalPages > 1 && (
+                    <div className="mb-3 bg-white border border-slate-200 rounded-lg px-4 py-2 flex items-center justify-between shadow-sm">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newPage = Math.max(1, currentPage - 1);
+                        setCurrentPage(newPage);
+                        // Scroll to page
+                        setTimeout(() => {
+                          const pageElement = document.querySelector(`[data-page="${newPage}"]`);
+                          pageElement?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }, 100);
+                      }}
+                      disabled={currentPage === 1}
+                      className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                      Previous
+                    </button>
+                    <span className="text-sm font-semibold text-slate-700">
+                      Page {currentPage} of {totalPages}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newPage = Math.min(totalPages, currentPage + 1);
+                        setCurrentPage(newPage);
+                        // Scroll to page
+                        setTimeout(() => {
+                          const pageElement = document.querySelector(`[data-page="${newPage}"]`);
+                          pageElement?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }, 100);
+                      }}
+                      disabled={currentPage === totalPages}
+                      className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Next
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                    </div>
+                  )}
+
+                  {/* PDF Pages as Images - Framed like Secure Viewer */}
+                  <div className="mt-3 aspect-[210/297] overflow-auto rounded-lg border-2 border-slate-200 bg-slate-50 shadow-inner min-h-[600px]">
+                    <div className="space-y-4 p-4">
+                      {pdfPages.map((pageDataUrl, index) => (
+                        <div
+                          key={index}
+                          data-page={index + 1}
+                          className={`bg-white rounded shadow-sm ${index + 1 === currentPage ? 'ring-2 ring-blue-500' : ''}`}
+                          style={{ display: totalPages > 1 && index + 1 !== currentPage ? 'none' : 'block' }}
+                        >
+                          <img
+                            src={pageDataUrl}
+                            alt={`Page ${index + 1}`}
+                            className="w-full h-auto"
+                            style={{
+                              userSelect: 'none',
+                              WebkitUserSelect: 'none',
+                              pointerEvents: 'none',
+                              draggable: false,
+                            }}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              triggerBlur('Right-click detected');
+                              return false;
+                            }}
+                            onDragStart={(e) => e.preventDefault()}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* Description text matching vetting dashboard */}
+                  <p className="mt-3 text-xs text-slate-500 text-center">
+                    Zoom, scroll, and view from here. Document stays inside the Safe Browser.
+                  </p>
+                </div>
+
+                {/* Show all pages option for printing */}
+                {totalPages > 1 && (
+                  <div className="text-center pt-4">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // Show all pages
+                        const allPages = document.querySelectorAll('[data-page]');
+                        allPages.forEach((page, idx) => {
+                          (page as HTMLElement).style.display = 'block';
+                        });
+                      }}
+                      className="text-sm text-blue-600 hover:text-blue-700 underline"
+                    >
+                      Show all pages for printing
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex items-center justify-center h-full">
+                <p className="text-slate-600">No PDF content available</p>
+              </div>
+            )}
+
+            {/* Download Prevention Overlay - blocks interactions */}
+            <div 
+              className="absolute inset-0 pointer-events-none"
+              style={{ zIndex: 1 }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                triggerBlur('Right-click detected');
+                return false;
+              }}
+              onDragStart={(e) => e.preventDefault()}
+            />
+          </div>
         </div>
       )}
 
