@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  background-color: #ffffff;
+}
+
+body {
+  @apply bg-white text-slate-900;
+}
+
+/* Fullscreen vetter mode - hide everything except vetting window */
+.fullscreen-vetter-mode {
+  overflow: hidden;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 9999;
+}
+
+.fullscreen-vetter-mode aside {
+  display: none !important;
+}
+
+.fullscreen-vetter-mode > div > header {
+  display: none !important;
+}
+
+.fullscreen-vetter-mode main {
+  width: 100vw !important;
+  height: 100vh !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow-y: auto;
+}
+
+.fullscreen-vetter-mode main > div {
+  width: 100%;
+  height: 100%;
+  padding: 1rem;
+}
