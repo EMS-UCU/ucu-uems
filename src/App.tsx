@@ -1276,6 +1276,7 @@ function App() {
     minutes: number;
   }>({ days: 0, hours: 0, minutes: 7 });
   const [setterDeadlineScheduledTime, setSetterDeadlineScheduledTime] = useState<number | null>(null);
+  const [setterDeadlineOriginalScheduledTime, setSetterDeadlineOriginalScheduledTime] = useState<number | null>(null);
   
   const [teamLeadDeadlineActive, setTeamLeadDeadlineActive] = useState(false);
   const [teamLeadDeadlineStartTime, setTeamLeadDeadlineStartTime] = useState<number | null>(null);
@@ -1283,7 +1284,7 @@ function App() {
     days: number;
     hours: number;
     minutes: number;
-  }>({ days: 7, hours: 0, minutes: 0 });
+  }>({ days: 0, hours: 0, minutes: 2 });
   const [teamLeadDeadlineScheduledTime, setTeamLeadDeadlineScheduledTime] = useState<number | null>(null);
   
   const [repositoriesActive, setRepositoriesActive] = useState(false);
@@ -1709,6 +1710,16 @@ function App() {
           }
           return next;
         });
+      } else if (type === 'comments_cleared') {
+        // Clear all comments when a new vetting session starts
+        setChecklistComments(new Map());
+        setChecklistDraftText(new Map());
+        setChecklistTypingState(new Map());
+        try {
+          localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+        } catch (error) {
+          console.error('Error clearing checklist comments from localStorage:', error);
+        }
       }
     };
     return () => {
@@ -4590,6 +4601,27 @@ function App() {
       switchingLocked: true,
     });
 
+      // Clear all comments from previous vetting session to start fresh
+      setChecklistComments(new Map());
+      setChecklistDraftText(new Map());
+      setChecklistTypingState(new Map());
+      
+      // Clear localStorage to ensure comments don't persist across sessions
+      try {
+        localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+        // Broadcast clear to other tabs/windows
+        if (checklistCommentsChannelRef.current) {
+          checklistCommentsChannelRef.current.postMessage({
+            type: 'comments_cleared',
+            payload: {
+              sourceUserId: currentUser?.id,
+            },
+          });
+        }
+      } catch (error) {
+        console.error('Error clearing checklist comments from localStorage:', error);
+      }
+
       // Update workflow stage to 'Vetting in Progress'
     const actor = currentUser?.name ?? 'Unknown';
     pushWorkflowEvent(
@@ -4980,6 +5012,26 @@ function App() {
     if (confirm('Are you sure you want to remove the checklist from vetting? This will clear the uploaded checklist PDF/template.')) {
       setCustomChecklistPdf(null);
       setCustomChecklist(null);
+      
+      // Clear all comments when checklist is removed
+      setChecklistComments(new Map());
+      setChecklistDraftText(new Map());
+      setChecklistTypingState(new Map());
+      try {
+        localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+        // Broadcast clear to other tabs/windows
+        if (checklistCommentsChannelRef.current) {
+          checklistCommentsChannelRef.current.postMessage({
+            type: 'comments_cleared',
+            payload: {
+              sourceUserId: currentUser?.id,
+            },
+          });
+        }
+      } catch (error) {
+        console.error('Error clearing checklist comments from localStorage:', error);
+      }
+      
       alert('Checklist removed from vetting. Default checklist will be used.');
     }
   };
@@ -5143,6 +5195,26 @@ function App() {
         // Store the file info - we'll display an editable Word-like interface
         setCustomChecklist(null);
         setCustomChecklistPdf({ url: '', name: file.name, isWordDoc: true });
+        
+        // Clear all comments from previous checklist to start fresh
+        setChecklistComments(new Map());
+        setChecklistDraftText(new Map());
+        setChecklistTypingState(new Map());
+        try {
+          localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+          // Broadcast clear to other tabs/windows
+          if (checklistCommentsChannelRef.current) {
+            checklistCommentsChannelRef.current.postMessage({
+              type: 'comments_cleared',
+              payload: {
+                sourceUserId: currentUser?.id,
+              },
+            });
+          }
+        } catch (error) {
+          console.error('Error clearing checklist comments from localStorage:', error);
+        }
+        
         alert('Word document uploaded! You can now edit the checklist directly in the editable document below.');
       };
       reader.onerror = () => {
@@ -5158,6 +5230,26 @@ function App() {
         const pdfUrl = event.target?.result as string;
         setCustomChecklist(null);
         setCustomChecklistPdf({ url: pdfUrl, name: file.name, isWordDoc: false });
+        
+        // Clear all comments from previous checklist to start fresh
+        setChecklistComments(new Map());
+        setChecklistDraftText(new Map());
+        setChecklistTypingState(new Map());
+        try {
+          localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+          // Broadcast clear to other tabs/windows
+          if (checklistCommentsChannelRef.current) {
+            checklistCommentsChannelRef.current.postMessage({
+              type: 'comments_cleared',
+              payload: {
+                sourceUserId: currentUser?.id,
+              },
+            });
+          }
+        } catch (error) {
+          console.error('Error clearing checklist comments from localStorage:', error);
+        }
+        
         alert('Checklist PDF uploaded. For better editing, consider uploading a Word document (.docx) instead.');
       };
       reader.onerror = () => {
@@ -5182,6 +5274,26 @@ function App() {
         }
         setCustomChecklist(parsed);
         setCustomChecklistPdf(null);
+        
+        // Clear all comments from previous checklist to start fresh
+        setChecklistComments(new Map());
+        setChecklistDraftText(new Map());
+        setChecklistTypingState(new Map());
+        try {
+          localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+          // Broadcast clear to other tabs/windows
+          if (checklistCommentsChannelRef.current) {
+            checklistCommentsChannelRef.current.postMessage({
+              type: 'comments_cleared',
+              payload: {
+                sourceUserId: currentUser?.id,
+              },
+            });
+          }
+        } catch (error) {
+          console.error('Error clearing checklist comments from localStorage:', error);
+        }
+        
         alert('Checklist uploaded successfully. Vetters will now use the new template.');
       } catch (error) {
         const lines = text
@@ -5200,6 +5312,26 @@ function App() {
         };
         setCustomChecklist(fallbackChecklist);
         setCustomChecklistPdf(null);
+        
+        // Clear all comments from previous checklist to start fresh
+        setChecklistComments(new Map());
+        setChecklistDraftText(new Map());
+        setChecklistTypingState(new Map());
+        try {
+          localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+          // Broadcast clear to other tabs/windows
+          if (checklistCommentsChannelRef.current) {
+            checklistCommentsChannelRef.current.postMessage({
+              type: 'comments_cleared',
+              payload: {
+                sourceUserId: currentUser?.id,
+              },
+            });
+          }
+        } catch (error) {
+          console.error('Error clearing checklist comments from localStorage:', error);
+        }
+        
         alert('Checklist uploaded as plain text. All sections will use the provided list.');
       }
     };
@@ -6094,6 +6226,12 @@ function App() {
       related_exam_paper_id: currentPaper.id,
     });
     
+    // Update workflow stage to 'Approved' immediately
+    setWorkflow((prev) => ({
+      ...prev,
+      stage: 'Approved',
+    }));
+    
     // Reload papers from database to get updated status
     try {
       const { data: updatedPapers, error: reloadError } = await supabase
@@ -6123,7 +6261,9 @@ function App() {
           submittedRole: paper.team_lead_id ? 'Team Lead' as const : paper.setter_id ? 'Setter' as const : 'Unknown' as const,
         }));
         setSubmittedPapers(updated);
-        console.log('✅ Reloaded papers from database');
+        console.log('✅ Reloaded papers from database after approval');
+      } else if (reloadError) {
+        console.error('❌ Error reloading papers:', reloadError);
       }
     } catch (error) {
       console.error('⚠️ Error reloading papers:', error);
@@ -6175,6 +6315,25 @@ function App() {
         ? `${approvalDescription} Notes: ${notes}`
         : approvalDescription
     );
+    
+    // Clear vetting dashboard comments after successful approval
+    setChecklistComments(new Map());
+    setChecklistDraftText(new Map());
+    setChecklistTypingState(new Map());
+    try {
+      localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+      // Broadcast clear to other tabs/windows
+      if (checklistCommentsChannelRef.current) {
+        checklistCommentsChannelRef.current.postMessage({
+          type: 'comments_cleared',
+          payload: {
+            sourceUserId: currentUser?.id,
+          },
+        });
+      }
+    } catch (error) {
+      console.error('Error clearing checklist comments after approval:', error);
+    }
     
     // Notify Team Lead (without forwarding comments - vetting was positive)
     users
@@ -6630,7 +6789,7 @@ function App() {
       // Scheduled time reached - activate Setter deadline automatically
       setSetterDeadlineActive(true);
       setSetterDeadlineStartTime(Date.now());
-      setSetterDeadlineScheduledTime(null); // Clear scheduled time after activation
+      setSetterDeadlineScheduledTime(null); // Clear scheduled time after activation (original scheduled time is preserved in setterDeadlineOriginalScheduledTime)
       
       const actor = currentUser?.name ?? 'System';
       const durationText = `${setterDeadlineDuration.days} day${setterDeadlineDuration.days !== 1 ? 's' : ''}, ${setterDeadlineDuration.hours} hour${setterDeadlineDuration.hours !== 1 ? 's' : ''}, ${setterDeadlineDuration.minutes} minute${setterDeadlineDuration.minutes !== 1 ? 's' : ''}`;
@@ -6708,6 +6867,10 @@ function App() {
       const now = Date.now();
       setTeamLeadDeadlineActive(true);
       setTeamLeadDeadlineStartTime(now);
+      // Automatically open repositories when Team Lead deadline activates
+      if (!repositoriesActive) {
+        setRepositoriesActive(true);
+      }
 
       const actor = currentUser?.name ?? 'System';
       const durationText = `${teamLeadDeadlineDuration.days} day${teamLeadDeadlineDuration.days !== 1 ? 's' : ''}, ${teamLeadDeadlineDuration.hours} hour${teamLeadDeadlineDuration.hours !== 1 ? 's' : ''}, ${teamLeadDeadlineDuration.minutes} minute${teamLeadDeadlineDuration.minutes !== 1 ? 's' : ''}`;
@@ -6715,6 +6878,20 @@ function App() {
         `Setter submission window closed. Activated Team Lead submission deadline (${durationText}).`,
         actor
       );
+      
+      // Notify all Team Leads that their deadline has started
+      const teamLeads = users.filter((u) => u.roles.includes('Team Lead'));
+      const message = `Setter deadline has expired. Your submission deadline has been activated. You have ${durationText} to submit your compiled papers.`;
+      teamLeads.forEach((teamLead) => {
+        if (teamLead.id) {
+          void createNotification({
+            user_id: teamLead.id,
+            title: 'Team Lead Deadline Activated',
+            message,
+            type: 'deadline',
+          });
+        }
+      });
     }
   }, [
     currentTime,
@@ -6728,6 +6905,8 @@ function App() {
     teamLeadDeadlineDuration.days,
     teamLeadDeadlineDuration.hours,
     teamLeadDeadlineDuration.minutes,
+    repositoriesActive,
+    users,
     currentUser?.name,
   ]);
 
@@ -7406,7 +7585,15 @@ function App() {
           setterDeadlineDuration={setterDeadlineDuration}
           setterDeadlineStartTime={setterDeadlineStartTime}
           setterDeadlineScheduledTime={setterDeadlineScheduledTime}
-          onSetSetterDeadlineScheduled={(scheduledTime: number | null) => setSetterDeadlineScheduledTime(scheduledTime)}
+          setterDeadlineOriginalScheduledTime={setterDeadlineOriginalScheduledTime}
+          onSetSetterDeadlineScheduled={(scheduledTime: number | null) => {
+            setSetterDeadlineScheduledTime(scheduledTime);
+            if (scheduledTime) {
+              setSetterDeadlineOriginalScheduledTime(scheduledTime);
+            } else {
+              setSetterDeadlineOriginalScheduledTime(null);
+            }
+          }}
           teamLeadDeadlineActive={teamLeadDeadlineActive}
           teamLeadDeadlineDuration={teamLeadDeadlineDuration}
           teamLeadDeadlineStartTime={teamLeadDeadlineStartTime}
@@ -7585,6 +7772,11 @@ function App() {
           checklistForwarded={checklistForwardedToTeamLead}
           vettingSessionRecords={vettingSessionRecords}
           customChecklistPdf={customChecklistPdf}
+          setterDeadlineScheduledTime={setterDeadlineScheduledTime}
+          setterDeadlineActive={setterDeadlineActive}
+          setterDeadlineStartTime={setterDeadlineStartTime}
+          setterDeadlineDuration={setterDeadlineDuration}
+          currentTime={currentTime}
         />
       ),
     });
@@ -11449,6 +11641,7 @@ interface ChiefExaminerConsoleProps {
   setterDeadlineDuration: { days: number; hours: number; minutes: number };
   setterDeadlineStartTime: number | null;
   setterDeadlineScheduledTime: number | null;
+  setterDeadlineOriginalScheduledTime: number | null;
   onSetSetterDeadlineScheduled: (scheduledTime: number | null) => void;
   teamLeadDeadlineActive: boolean;
   teamLeadDeadlineDuration: { days: number; hours: number; minutes: number };
@@ -11522,6 +11715,36 @@ function CountdownPill({ startTime, duration }: CountdownPillProps) {
   );
 }
 
+interface ScheduledCountdownProps {
+  scheduledTime: number;
+  className?: string;
+}
+
+function ScheduledCountdown({ scheduledTime, className = '' }: ScheduledCountdownProps) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const remaining = Math.max(scheduledTime - now, 0);
+  const hours = Math.floor(remaining / (60 * 60 * 1000));
+  const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+  const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
+
+  const expired = remaining <= 0;
+
+  return (
+    <span className={`inline-flex items-center justify-center rounded-full px-3 py-1 text-xs font-semibold ${className}`}>
+      {expired ? 'Activated' : `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`}
+    </span>
+  );
+}
+
 function ChiefExaminerConsole({
   users,
   currentUser,
@@ -11539,6 +11762,7 @@ function ChiefExaminerConsole({
   setterDeadlineDuration,
   setterDeadlineStartTime,
   setterDeadlineScheduledTime,
+  setterDeadlineOriginalScheduledTime,
   onSetSetterDeadlineScheduled,
   teamLeadDeadlineActive,
   teamLeadDeadlineDuration,
@@ -11579,19 +11803,6 @@ function ChiefExaminerConsole({
   });
   const [showTeamLeadDurationSettings, setShowTeamLeadDurationSettings] = useState(false);
   const [teamLeadDurationForm, setTeamLeadDurationForm] = useState(teamLeadDeadlineDuration);
-  const [showTeamLeadScheduleSettings, setShowTeamLeadScheduleSettings] = useState(false);
-  const [teamLeadScheduleDateTime, setTeamLeadScheduleDateTime] = useState(() => {
-    if (teamLeadDeadlineScheduledTime) {
-      const date = new Date(teamLeadDeadlineScheduledTime);
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const day = String(date.getDate()).padStart(2, '0');
-      const hours = String(date.getHours()).padStart(2, '0');
-      const minutes = String(date.getMinutes()).padStart(2, '0');
-      return `${year}-${month}-${day}T${hours}:${minutes}`;
-    }
-    return '';
-  });
 
   const awardableRoles: Role[] = ['Team Lead', 'Vetter', 'Setter', 'Lecturer'];
 
@@ -12189,16 +12400,11 @@ function ChiefExaminerConsole({
                 <p className="text-sm text-amber-900 font-medium">
                   Will activate on: {new Date(setterDeadlineScheduledTime).toLocaleString()}
                 </p>
-                {setterDeadlineScheduledTime > currentTime && (
-                  <p className="text-xs text-amber-700">
-                    Time until activation: {(() => {
-                      const remaining = setterDeadlineScheduledTime - currentTime;
-                      const hours = Math.floor(remaining / (60 * 60 * 1000));
-                      const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
-                      const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
-                      return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-                    })()}
-                  </p>
+                {setterDeadlineScheduledTime > Date.now() && (
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs text-amber-700">Time until activation:</p>
+                    <ScheduledCountdown scheduledTime={setterDeadlineScheduledTime} className="bg-amber-100 text-amber-800" />
+                  </div>
                 )}
               </div>
             )}
@@ -12208,6 +12414,11 @@ function ChiefExaminerConsole({
                 <p className="text-sm text-pink-800 font-medium">
                   {setterDeadlineDuration.days} day{setterDeadlineDuration.days !== 1 ? 's' : ''}, {setterDeadlineDuration.hours} hour{setterDeadlineDuration.hours !== 1 ? 's' : ''}, {setterDeadlineDuration.minutes} minute{setterDeadlineDuration.minutes !== 1 ? 's' : ''}
                 </p>
+                {setterDeadlineOriginalScheduledTime && (
+                  <div className="mt-2 rounded border border-pink-300 bg-pink-100/50 p-2">
+                    <p className="text-xs text-pink-700">Scheduled activation completed at: {new Date(setterDeadlineOriginalScheduledTime).toLocaleString()}</p>
+                  </div>
+                )}
                 <p className="text-xs font-semibold text-pink-700 mt-2">Time Remaining</p>
                 <CountdownPill
                   startTime={setterDeadlineStartTime}
@@ -12435,25 +12646,6 @@ function ChiefExaminerConsole({
               />
             </div>
 
-            {teamLeadDeadlineScheduledTime && !teamLeadDeadlineActive && (
-              <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4 flex flex-col gap-2">
-                <p className="text-xs font-semibold text-amber-800">Scheduled Activation</p>
-                <p className="text-sm text-amber-900 font-medium">
-                  Will activate on: {new Date(teamLeadDeadlineScheduledTime).toLocaleString()}
-                </p>
-                {teamLeadDeadlineScheduledTime > currentTime && (
-                  <p className="text-xs text-amber-700">
-                    Time until activation: {(() => {
-                      const remaining = teamLeadDeadlineScheduledTime - currentTime;
-                      const hours = Math.floor(remaining / (60 * 60 * 1000));
-                      const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
-                      const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
-                      return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-                    })()}
-                  </p>
-                )}
-              </div>
-            )}
             {teamLeadDeadlineActive && teamLeadDeadlineStartTime && (
               <div className="mb-4 rounded-lg border border-violet-200 bg-violet-50 p-4 flex flex-col gap-1">
                 <p className="text-xs font-semibold text-violet-700">Current Deadline Duration</p>
@@ -12468,8 +12660,52 @@ function ChiefExaminerConsole({
               </div>
             )}
 
+            {/* Display Setter Scheduled Activation Info for Team Lead - Show when scheduled but not yet active */}
+            {setterDeadlineScheduledTime && !setterDeadlineActive && (
+              <div className="mb-4 rounded-lg border border-blue-300 bg-blue-50 p-4 flex flex-col gap-2">
+                <p className="text-xs font-semibold text-blue-800">Setter Deadline Scheduled Activation</p>
+                <p className="text-sm text-blue-900 font-medium">
+                  Setter deadline will activate on: {new Date(setterDeadlineScheduledTime).toLocaleString()}
+                </p>
+                {setterDeadlineScheduledTime > Date.now() && (
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs text-blue-700">Time until Setter activation:</p>
+                    <ScheduledCountdown scheduledTime={setterDeadlineScheduledTime} className="bg-blue-100 text-blue-800" />
+                  </div>
+                )}
+                <p className="text-xs text-blue-600 mt-1">
+                  ⚠️ Team Lead deadline will start automatically when Setter deadline expires
+                </p>
+              </div>
+            )}
+
+            {/* Display Setter Active Deadline Info for Team Lead - Show when active, including scheduled activation info if it was scheduled */}
+            {setterDeadlineActive && setterDeadlineStartTime && (
+              <div className="mb-4 rounded-lg border border-pink-200 bg-pink-50 p-4 flex flex-col gap-2">
+                <p className="text-xs font-semibold text-pink-800">Setter Deadline Status</p>
+                <p className="text-sm text-pink-900 font-medium">
+                  Setter deadline is currently active
+                </p>
+                {setterDeadlineOriginalScheduledTime && (
+                  <div className="mt-1 rounded border border-pink-300 bg-pink-100/50 p-2">
+                    <p className="text-xs text-pink-700">Scheduled activation completed at: {new Date(setterDeadlineOriginalScheduledTime).toLocaleString()}</p>
+                  </div>
+                )}
+                <div className="flex items-center gap-2 mt-1">
+                  <p className="text-xs text-pink-700">Setter time remaining:</p>
+                  <CountdownPill
+                    startTime={setterDeadlineStartTime}
+                    duration={setterDeadlineDuration}
+                  />
+                </div>
+                <p className="text-xs text-pink-600 mt-1">
+                  ⚠️ Team Lead deadline will start automatically when Setter deadline expires
+                </p>
+              </div>
+            )}
+
             <div className="space-y-4">
-              {!showTeamLeadDurationSettings && !showTeamLeadScheduleSettings ? (
+              {!showTeamLeadDurationSettings ? (
                 <>
                   <button
                     type="button"
@@ -12477,18 +12713,6 @@ function ChiefExaminerConsole({
                     className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
                   >
                     {teamLeadDeadlineActive ? 'Update Deadline Duration' : 'Set Deadline Duration'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowTeamLeadScheduleSettings(true)}
-                    disabled={Boolean(setterDeadlineActive && setterDeadlineStartTime)}
-                    className={`w-full rounded-xl border px-4 py-3 text-sm font-semibold transition ${
-                      setterDeadlineActive && setterDeadlineStartTime
-                        ? 'border-slate-300 bg-slate-100 text-slate-500 cursor-not-allowed'
-                        : 'border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100'
-                    }`}
-                  >
-                    {teamLeadDeadlineScheduledTime ? 'Update Scheduled Activation' : 'Schedule Activation'}
                   </button>
                   <button
                     type="button"
@@ -12510,80 +12734,6 @@ function ChiefExaminerConsole({
                     </p>
                   )}
                 </>
-              ) : showTeamLeadScheduleSettings ? (
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-3">
-                      Schedule Automatic Activation
-                    </label>
-                    <input
-                      type="datetime-local"
-                      value={teamLeadScheduleDateTime}
-                      onChange={(e) => setTeamLeadScheduleDateTime(e.target.value)}
-                      min={new Date().toISOString().slice(0, 16)}
-                      className="w-full rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
-                    />
-                    <p className="mt-2 text-xs text-slate-500">
-                      The deadline will automatically activate at the scheduled time.
-                    </p>
-                  </div>
-                  <div className="flex gap-3">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (teamLeadScheduleDateTime) {
-                          const scheduledTime = new Date(teamLeadScheduleDateTime).getTime();
-                          if (scheduledTime < Date.now()) {
-                            alert('Scheduled time must be in the future');
-                            return;
-                          }
-                          onSetTeamLeadDeadlineScheduled(scheduledTime);
-                          setShowTeamLeadScheduleSettings(false);
-                          alert('Schedule saved! Deadline will activate automatically at the scheduled time.');
-                        } else {
-                          onSetTeamLeadDeadlineScheduled(null);
-                          setShowTeamLeadScheduleSettings(false);
-                        }
-                      }}
-                      className="flex-1 rounded-xl bg-blue-500/90 px-4 py-3 text-sm font-semibold text-blue-950 transition hover:bg-blue-400"
-                    >
-                      Save Schedule
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowTeamLeadScheduleSettings(false);
-                        setTeamLeadScheduleDateTime(teamLeadDeadlineScheduledTime ? (() => {
-                          const date = new Date(teamLeadDeadlineScheduledTime);
-                          const year = date.getFullYear();
-                          const month = String(date.getMonth() + 1).padStart(2, '0');
-                          const day = String(date.getDate()).padStart(2, '0');
-                          const hours = String(date.getHours()).padStart(2, '0');
-                          const minutes = String(date.getMinutes()).padStart(2, '0');
-                          return `${year}-${month}-${day}T${hours}:${minutes}`;
-                        })() : '');
-                      }}
-                      className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                  {teamLeadDeadlineScheduledTime && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (confirm('Are you sure you want to clear the scheduled activation?')) {
-                          onSetTeamLeadDeadlineScheduled(null);
-                          setTeamLeadScheduleDateTime('');
-                          setShowTeamLeadScheduleSettings(false);
-                        }
-                      }}
-                      className="w-full rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700 transition hover:bg-red-100"
-                    >
-                      Clear Schedule
-                    </button>
-                  )}
-                </div>
               ) : (
                 <form onSubmit={(e) => {
                   e.preventDefault();
@@ -13312,6 +13462,11 @@ interface TeamLeadPanelProps {
   vettingSessionRecords?: VettingSessionRecord[];
   customChecklistPdf?: { url: string; name: string; isWordDoc?: boolean } | null;
   checklistForwarded?: boolean;
+  setterDeadlineScheduledTime?: number | null;
+  setterDeadlineActive?: boolean;
+  setterDeadlineStartTime?: number | null;
+  setterDeadlineDuration?: { days: number; hours: number; minutes: number };
+  currentTime?: number;
 }
 
 function TeamLeadPanel({
@@ -13328,8 +13483,13 @@ function TeamLeadPanel({
   vettingSessionRecords = [],
   customChecklistPdf,
   checklistForwarded = false,
+  setterDeadlineScheduledTime,
+  setterDeadlineActive = false,
+  setterDeadlineStartTime,
+  setterDeadlineDuration,
+  currentTime: propCurrentTime,
 }: TeamLeadPanelProps) {
-  const [currentTime, setCurrentTime] = useState(Date.now());
+  const [currentTime, setCurrentTime] = useState(propCurrentTime ?? Date.now());
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [courseUnit, setCourseUnit] = useState('');
   const [courseCode, setCourseCode] = useState('');
@@ -13420,13 +13580,21 @@ function TeamLeadPanel({
   }, [submittedPapers]);
 
   useEffect(() => {
-    if (deadlinesActive && deadlineStartTime) {
+    // Sync with prop currentTime if provided
+    if (propCurrentTime) {
+      setCurrentTime(propCurrentTime);
+    }
+  }, [propCurrentTime]);
+
+  useEffect(() => {
+    // Update timer if Team Lead deadline is active OR if Setter deadline is scheduled OR if Setter deadline is active
+    if ((deadlinesActive && deadlineStartTime) || (setterDeadlineScheduledTime && !setterDeadlineActive) || (setterDeadlineActive && setterDeadlineStartTime)) {
       const timer = setInterval(() => {
         setCurrentTime(Date.now());
       }, 1000);
       return () => clearInterval(timer);
     }
-  }, [deadlinesActive, deadlineStartTime]);
+  }, [deadlinesActive, deadlineStartTime, setterDeadlineScheduledTime, setterDeadlineActive, setterDeadlineStartTime]);
 
   // Auto-populate metadata from the most recent submitted paper
   // so the Team Lead does not have to type course details again.
@@ -13439,6 +13607,46 @@ function TeamLeadPanel({
     setSemester((prev) => prev || latest.semester || '');
     setYear((prev) => prev || latest.year || '');
   }, [submittedPapers]);
+
+  // Calculate combined countdown: time until setter activation + setter duration
+  const calculateCombinedCountdown = () => {
+    if (!setterDeadlineScheduledTime && !setterDeadlineActive) {
+      return null;
+    }
+
+    let totalRemainingMs = 0;
+
+    if (setterDeadlineScheduledTime && !setterDeadlineActive) {
+      // Setter deadline is scheduled but not yet active
+      // Calculate: time until activation + setter duration
+      const timeUntilActivation = Math.max(setterDeadlineScheduledTime - currentTime, 0);
+      const setterDurationMs = setterDeadlineDuration
+        ? (setterDeadlineDuration.days * 24 * 60 * 60 * 1000 +
+           setterDeadlineDuration.hours * 60 * 60 * 1000 +
+           setterDeadlineDuration.minutes * 60 * 1000)
+        : 0;
+      totalRemainingMs = timeUntilActivation + setterDurationMs;
+    } else if (setterDeadlineActive && setterDeadlineStartTime && setterDeadlineDuration) {
+      // Setter deadline is active - show remaining setter time
+      const setterDurationMs =
+        setterDeadlineDuration.days * 24 * 60 * 60 * 1000 +
+        setterDeadlineDuration.hours * 60 * 60 * 1000 +
+        setterDeadlineDuration.minutes * 60 * 1000;
+      const elapsed = currentTime - setterDeadlineStartTime;
+      totalRemainingMs = Math.max(setterDurationMs - elapsed, 0);
+    }
+
+    if (totalRemainingMs <= 0) {
+      return { days: 0, hours: 0, minutes: 0, seconds: 0, expired: true };
+    }
+
+    const days = Math.floor(totalRemainingMs / (24 * 60 * 60 * 1000));
+    const hours = Math.floor((totalRemainingMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+    const minutes = Math.floor((totalRemainingMs % (60 * 60 * 1000)) / (60 * 1000));
+    const seconds = Math.floor((totalRemainingMs % (60 * 1000)) / 1000);
+
+    return { days, hours, minutes, seconds, expired: false };
+  };
 
   const calculateTimeRemaining = () => {
     if (!deadlinesActive || !deadlineStartTime) {
@@ -13466,7 +13674,11 @@ function TeamLeadPanel({
   };
 
   const timeRemaining = calculateTimeRemaining();
-  const canSubmit = deadlinesActive && repositoriesActive && !timeRemaining?.expired;
+  const combinedCountdown = calculateCombinedCountdown();
+  // Team Lead can submit when: deadline is active, repositories are open, and deadline hasn't expired
+  // If deadline is active and has a start time, allow submission unless timeRemaining explicitly shows expired
+  // Also allow submission if deadline is active but timeRemaining is null (initial state)
+  const canSubmit = deadlinesActive && deadlineStartTime && repositoriesActive && (timeRemaining === null || !timeRemaining.expired);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -13708,6 +13920,64 @@ function TeamLeadPanel({
                 </div>
               )}
             </div>
+          ) : (setterDeadlineScheduledTime && !setterDeadlineActive) || (setterDeadlineActive && setterDeadlineStartTime) ? (
+            // Show combined countdown: time until setter activation + setter duration
+            combinedCountdown ? (
+              combinedCountdown.expired ? (
+                <div className="text-center py-8">
+                  <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-rose-500/20 border-2 border-rose-500/50 mb-4">
+                    <span className="text-2xl">⏰</span>
+                  </div>
+                  <p className="text-lg font-semibold text-rose-300">Setter Deadline Expired</p>
+                  <p className="text-sm text-slate-600 mt-2">Team Lead deadline will start automatically.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="text-center mb-4">
+                    <p className="text-sm font-semibold text-blue-700 mb-1">
+                      {setterDeadlineScheduledTime && !setterDeadlineActive
+                        ? 'Combined Countdown: Setter Activation + Setter Duration'
+                        : 'Setter Deadline Active - Time Remaining'}
+                    </p>
+                    <p className="text-xs text-slate-600">
+                      {setterDeadlineScheduledTime && !setterDeadlineActive
+                        ? 'Time until Setter deadline activates plus Setter submission duration'
+                        : 'Team Lead deadline will start automatically when Setter deadline expires'}
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-4 gap-4">
+                    <div className="text-center">
+                      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                        <p className="text-3xl font-bold text-blue-700">{String(combinedCountdown.days).padStart(2, '0')}</p>
+                        <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Days</p>
+                      </div>
+                    </div>
+                    <div className="text-center">
+                      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                        <p className="text-3xl font-bold text-blue-700">{String(combinedCountdown.hours).padStart(2, '0')}</p>
+                        <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Hours</p>
+                      </div>
+                    </div>
+                    <div className="text-center">
+                      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                        <p className="text-3xl font-bold text-blue-700">{String(combinedCountdown.minutes).padStart(2, '0')}</p>
+                        <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Minutes</p>
+                      </div>
+                    </div>
+                    <div className="text-center">
+                      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                        <p className="text-3xl font-bold text-blue-700">{String(combinedCountdown.seconds).padStart(2, '0')}</p>
+                        <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Seconds</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            ) : (
+              <div className="text-center py-8">
+                <p className="text-sm text-slate-600">Calculating countdown...</p>
+              </div>
+            )
           ) : !deadlinesActive ? (
             <div className="text-center py-8">
               <p className="text-sm text-slate-600">Deadlines are not currently active.</p>
@@ -14862,8 +15132,17 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                               </span>
                             </p>
                           )}
-                          {/* Send to Vetting Button - appears when similarity <= 30% OR scan completed with no results */}
-                          {((maxSimilarity !== null && maxSimilarity <= 30) || (scanCompleted && maxSimilarity === null && similarityResults.length === 0)) && paper.status !== 'in-vetting' && (
+                          {/* Rejection Message - appears when similarity >= 86% */}
+                          {maxSimilarity !== null && maxSimilarity >= 86 && (
+                            <div className="mt-3 px-3 py-2 rounded-lg bg-gradient-to-r from-red-100 to-rose-100 border-2 border-red-400 shadow-md">
+                              <p className="text-xs font-bold text-red-800 flex items-center gap-1.5">
+                                <span className="text-base">🚫</span>
+                                <span>Paper Rejected: Similarity {maxSimilarity.toFixed(1)}% exceeds threshold (86%). Cannot proceed to vetting.</span>
+                              </p>
+                            </div>
+                          )}
+                          {/* Send to Vetting Button - appears when similarity < 86% OR scan completed with no results */}
+                          {((maxSimilarity !== null && maxSimilarity < 86) || (scanCompleted && maxSimilarity === null && similarityResults.length === 0)) && paper.status !== 'in-vetting' && (
                             <button
                               type="button"
                               onClick={(e) => {
@@ -15007,6 +15286,30 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                         </span>
                       </div>
 
+                      {/* Repository Match Summary - Always Visible */}
+                      {historicalPaper && (
+                        <div className="mb-3 p-2 rounded-lg bg-white/70 backdrop-blur-sm border border-white/60 shadow-sm">
+                          <p className="text-[0.65rem] font-bold text-slate-700 mb-1.5 flex items-center gap-1">
+                            <span>📚</span> Matched with Repository Paper
+                          </p>
+                          <div className="space-y-1 text-[0.6rem]">
+                            <p className="text-slate-800 font-semibold truncate">{historicalPaper.fileName}</p>
+                            <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+                              <span className="text-slate-600">{historicalPaper.semester} {historicalPaper.year}</span>
+                              {historicalPaper.submittedBy && (
+                                <span className="text-slate-600">By: <span className="font-semibold text-slate-700">{historicalPaper.submittedBy}</span></span>
+                              )}
+                              {historicalPaper.submittedAt && (
+                                <span className="text-slate-600">On: <span className="font-semibold text-slate-700">{formatTimestamp(historicalPaper.submittedAt)}</span></span>
+                              )}
+                            </div>
+                            {historicalPaper.submittedRole && (
+                              <p className="text-slate-500">Submitted as: {historicalPaper.submittedRole}</p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
                       {/* File Names */}
                       <div className="space-y-2 mb-4">
                         <div className="flex items-start gap-2 p-2 rounded-lg bg-white/60 backdrop-blur-sm border border-white/50 group-hover:bg-white/80 transition-all duration-300">
@@ -15016,6 +15319,12 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                               {currentPaper?.fileName}
                             </p>
                             <p className="text-[0.65rem] text-slate-600 font-medium">Current</p>
+                            {currentPaper?.submittedBy && (
+                              <p className="text-[0.6rem] text-slate-500 mt-0.5">Submitted by: {currentPaper.submittedBy}</p>
+                            )}
+                            {currentPaper?.submittedAt && (
+                              <p className="text-[0.6rem] text-slate-500">Submitted: {formatTimestamp(currentPaper.submittedAt)}</p>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-start gap-2 p-2 rounded-lg bg-white/60 backdrop-blur-sm border border-white/50 group-hover:bg-white/80 transition-all duration-300">
@@ -15025,14 +15334,32 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                               {historicalPaper?.fileName}
                             </p>
                             <p className="text-[0.65rem] text-slate-600 font-medium">{historicalPaper?.semester} {historicalPaper?.year}</p>
+                            {historicalPaper?.submittedBy && (
+                              <p className="text-[0.6rem] text-slate-500 mt-0.5 font-semibold">Submitted by: {historicalPaper.submittedBy}</p>
+                            )}
+                            {historicalPaper?.submittedAt && (
+                              <p className="text-[0.6rem] text-slate-500 font-semibold">Submitted: {formatTimestamp(historicalPaper.submittedAt)}</p>
+                            )}
+                            {historicalPaper?.submittedRole && (
+                              <p className="text-[0.6rem] text-slate-500">Role: {historicalPaper.submittedRole}</p>
+                            )}
                           </div>
                         </div>
                       </div>
 
                       {/* Action Buttons */}
                       <div className="space-y-2 relative z-10">
-                        {/* Send to Vetting Button - appears when similarity <= 30% */}
-                        {result.similarityScore <= 30 && currentPaper && currentPaper.status !== 'in-vetting' && (
+                        {/* Rejection Message - appears when similarity >= 86% */}
+                        {result.similarityScore >= 86 && (
+                          <div className="w-full px-3 py-2.5 rounded-xl bg-gradient-to-r from-red-100 to-rose-100 border-2 border-red-400 shadow-md">
+                            <p className="text-[0.65rem] font-bold text-red-800 flex items-center justify-center gap-1.5">
+                              <span className="text-base">🚫</span>
+                              <span>Paper Rejected: Similarity {result.similarityScore}% exceeds threshold (86%). Cannot proceed to vetting.</span>
+                            </p>
+                          </div>
+                        )}
+                        {/* Send to Vetting Button - appears when similarity < 86% */}
+                        {result.similarityScore < 86 && currentPaper && currentPaper.status !== 'in-vetting' && (
                           <button
                             type="button"
                             className="w-full rounded-xl bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 px-3 py-2.5 text-[0.7rem] font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.03] transition-all duration-300 flex items-center justify-center gap-1.5 relative overflow-hidden group"
@@ -15085,14 +15412,57 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                         <div className="grid grid-cols-2 gap-2 text-[0.65rem]">
                           <div className="p-2 rounded-lg bg-white/60 border border-slate-200/50">
                             <p className="font-semibold text-slate-600 mb-0.5">Current Paper</p>
-                            <p className="text-slate-800">{currentPaper?.courseCode}</p>
+                            <p className="text-slate-800 font-medium">{currentPaper?.courseCode}</p>
                             <p className="text-slate-600">{currentPaper?.semester} {currentPaper?.year}</p>
+                            {currentPaper?.submittedBy && (
+                              <p className="text-slate-500 mt-1 text-[0.6rem]">By: {currentPaper.submittedBy}</p>
+                            )}
+                            {currentPaper?.submittedAt && (
+                              <p className="text-slate-500 text-[0.6rem]">{formatTimestamp(currentPaper.submittedAt)}</p>
+                            )}
                           </div>
                           <div className="p-2 rounded-lg bg-white/60 border border-slate-200/50">
-                            <p className="font-semibold text-slate-600 mb-0.5">Historical Paper</p>
-                            <p className="text-slate-800">{historicalPaper?.courseCode}</p>
+                            <p className="font-semibold text-slate-600 mb-0.5">Repository Match</p>
+                            <p className="text-slate-800 font-medium">{historicalPaper?.courseCode}</p>
                             <p className="text-slate-600">{historicalPaper?.semester} {historicalPaper?.year}</p>
+                            {historicalPaper?.submittedBy && (
+                              <p className="text-slate-500 mt-1 text-[0.6rem] font-semibold">By: {historicalPaper.submittedBy}</p>
+                            )}
+                            {historicalPaper?.submittedAt && (
+                              <p className="text-slate-500 text-[0.6rem] font-semibold">{formatTimestamp(historicalPaper.submittedAt)}</p>
+                            )}
+                            {historicalPaper?.submittedRole && (
+                              <p className="text-slate-500 text-[0.6rem]">Role: {historicalPaper.submittedRole}</p>
+                            )}
                           </div>
+                        </div>
+                        {/* Additional Highlights */}
+                        <div className="mt-2 space-y-2">
+                          <div className="p-2 rounded-lg bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200/50">
+                            <p className="text-[0.65rem] font-semibold text-blue-800 mb-1 flex items-center gap-1">
+                              <span>📊</span> Similarity Analysis
+                            </p>
+                            <div className="grid grid-cols-2 gap-2 text-[0.6rem]">
+                              <div>
+                                <p className="text-slate-600">Match Score</p>
+                                <p className="text-blue-700 font-bold">{result.similarityScore}%</p>
+                              </div>
+                              <div>
+                                <p className="text-slate-600">Sections Matched</p>
+                                <p className="text-blue-700 font-bold">{result.matchedSections.length}</p>
+                              </div>
+                            </div>
+                          </div>
+                          {historicalPaper?.fileSize && (
+                            <div className="p-2 rounded-lg bg-white/60 border border-slate-200/50">
+                              <p className="text-[0.65rem] font-semibold text-slate-600 mb-0.5">File Size</p>
+                              <p className="text-[0.6rem] text-slate-700">
+                                {historicalPaper.fileSize > 1024 * 1024
+                                  ? `${(historicalPaper.fileSize / (1024 * 1024)).toFixed(2)} MB`
+                                  : `${(historicalPaper.fileSize / 1024).toFixed(2)} KB`}
+                              </p>
+                            </div>
+                          )}
                         </div>
                         {result.similarityScore >= 70 && (
                           <div className="mt-2 p-2 rounded-lg bg-gradient-to-r from-amber-100 to-orange-100 border-2 border-amber-300/50 shadow-sm">
