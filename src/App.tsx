@@ -1952,6 +1952,141 @@ function App() {
     }
   }, [vettingSession]);
 
+  // ---- Multi-browser sync: moderation_state in Supabase ----
+  // Load vetting_session and moderation_schedule from Supabase when user context is ready
+  useEffect(() => {
+    const loadModerationState = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('moderation_state')
+          .select('key, value')
+          .in('key', ['vetting_session', 'moderation_schedule']);
+
+        if (error) {
+          console.warn('Moderation state load failed (table may not exist yet):', error.message);
+          return;
+        }
+        if (!data || data.length === 0) return;
+
+        for (const row of data) {
+          const value = row.value as Record<string, unknown>;
+          if (row.key === 'vetting_session' && value && typeof value === 'object') {
+            const vs = value as Record<string, unknown>;
+            const startedAt = vs.startedAt != null ? Number(vs.startedAt) : undefined;
+            const expiresAt = vs.expiresAt != null ? Number(vs.expiresAt) : undefined;
+            setVettingSession({
+              active: Boolean(vs.active),
+              startedAt,
+              durationMinutes: typeof vs.durationMinutes === 'number' ? vs.durationMinutes : undefined,
+              expiresAt,
+              safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
+              cameraOn: Boolean(vs.cameraOn),
+              screenshotBlocked: Boolean(vs.screenshotBlocked),
+              switchingLocked: Boolean(vs.switchingLocked),
+              lastClosedReason: vs.lastClosedReason as 'completed' | 'expired' | 'cancelled' | undefined,
+            });
+          }
+          if (row.key === 'moderation_schedule' && value && typeof value === 'object') {
+            const ms = value as Record<string, unknown>;
+            setModerationSchedule({
+              scheduled: Boolean(ms.scheduled),
+              startDateTime: typeof ms.startDateTime === 'string' ? ms.startDateTime : undefined,
+              endDateTime: typeof ms.endDateTime === 'string' ? ms.endDateTime : undefined,
+              scheduledStartTime: ms.scheduledStartTime != null ? Number(ms.scheduledStartTime) : undefined,
+              scheduledEndTime: ms.scheduledEndTime != null ? Number(ms.scheduledEndTime) : undefined,
+            });
+          }
+        }
+      } catch (err) {
+        console.error('Error loading moderation state:', err);
+      }
+    };
+    loadModerationState();
+  }, [authUserId]);
+
+  // Persist vettingSession to Supabase for multi-browser sync
+  useEffect(() => {
+    const payload = {
+      active: vettingSession.active,
+      startedAt: vettingSession.startedAt,
+      durationMinutes: vettingSession.durationMinutes,
+      expiresAt: vettingSession.expiresAt,
+      safeBrowserEnabled: vettingSession.safeBrowserEnabled,
+      cameraOn: vettingSession.cameraOn,
+      screenshotBlocked: vettingSession.screenshotBlocked,
+      switchingLocked: vettingSession.switchingLocked,
+      lastClosedReason: vettingSession.lastClosedReason,
+    };
+    supabase
+      .from('moderation_state')
+      .upsert({ key: 'vetting_session', value: payload, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+      .then(({ error }) => {
+        if (error) console.warn('Failed to persist vetting_session to Supabase:', error.message);
+      });
+  }, [vettingSession]);
+
+  // Persist moderationSchedule to Supabase for multi-browser sync
+  useEffect(() => {
+    const payload = {
+      scheduled: moderationSchedule.scheduled,
+      startDateTime: moderationSchedule.startDateTime,
+      endDateTime: moderationSchedule.endDateTime,
+      scheduledStartTime: moderationSchedule.scheduledStartTime,
+      scheduledEndTime: moderationSchedule.scheduledEndTime,
+    };
+    supabase
+      .from('moderation_state')
+      .upsert({ key: 'moderation_schedule', value: payload, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+      .then(({ error }) => {
+        if (error) console.warn('Failed to persist moderation_schedule to Supabase:', error.message);
+      });
+  }, [moderationSchedule]);
+
+  // Real-time subscription: sync vetting_session and moderation_schedule across all browsers/tabs
+  useEffect(() => {
+    const channel = supabase
+      .channel('moderation_state_changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'moderation_state' },
+        (payload) => {
+          const row = (payload as { new?: { key: string; value: Record<string, unknown> } }).new;
+          if (!row?.key) return;
+          if (row.key === 'vetting_session' && row.value && typeof row.value === 'object') {
+            const vs = row.value as Record<string, unknown>;
+            setVettingSession({
+              active: Boolean(vs.active),
+              startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
+              durationMinutes: typeof vs.durationMinutes === 'number' ? vs.durationMinutes : undefined,
+              expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
+              safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
+              cameraOn: Boolean(vs.cameraOn),
+              screenshotBlocked: Boolean(vs.screenshotBlocked),
+              switchingLocked: Boolean(vs.switchingLocked),
+              lastClosedReason: vs.lastClosedReason as 'completed' | 'expired' | 'cancelled' | undefined,
+            });
+          }
+          if (row.key === 'moderation_schedule' && row.value && typeof row.value === 'object') {
+            const ms = row.value as Record<string, unknown>;
+            setModerationSchedule({
+              scheduled: Boolean(ms.scheduled),
+              startDateTime: typeof ms.startDateTime === 'string' ? ms.startDateTime : undefined,
+              endDateTime: typeof ms.endDateTime === 'string' ? ms.endDateTime : undefined,
+              scheduledStartTime: ms.scheduledStartTime != null ? Number(ms.scheduledStartTime) : undefined,
+              scheduledEndTime: ms.scheduledEndTime != null ? Number(ms.scheduledEndTime) : undefined,
+            });
+          }
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') console.log('✅ Real-time moderation_state subscription active');
+        else if (status === 'CHANNEL_ERROR') console.warn('❌ moderation_state real-time error');
+      });
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
   useEffect(() => {
     try {
       if (customChecklist) {
@@ -2262,7 +2397,7 @@ function App() {
     return () => {
       supabase.removeChannel(examPapersChannel);
     };
-  }, []);
+  }, [authUserId]);
 
   // Refresh papers when window gains focus to catch any deletions that might have been missed
   useEffect(() => {
