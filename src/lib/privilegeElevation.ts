@@ -11,7 +11,6 @@ export async function elevateToChiefExaminer(
     category?: 'Undergraduate' | 'Postgraduate';
     faculty?: string;
     department?: string;
-    course?: string;
     semester?: string;
     year?: string;
   }
@@ -58,7 +57,6 @@ export async function elevateToChiefExaminer(
             category: assignmentDetails.category,
             faculty: assignmentDetails.faculty,
             department: assignmentDetails.department,
-            course: assignmentDetails.course,
             semester: assignmentDetails.semester,
             year: assignmentDetails.year,
           }

@@ -22,11 +22,10 @@ export default function PrivilegeElevationPanel({
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   
-  // Chief Examiner assignment details
-  const [category, setCategory] = useState<'Undergraduate' | 'Postgraduate' | ''>('');
+  // Chief Examiner assignment details - ordered: Faculty → Department → Program Category → Lecturer → Semester → Year
   const [faculty, setFaculty] = useState<string>('');
   const [department, setDepartment] = useState<string>('');
-  const [course, setCourse] = useState<string>('');
+  const [category, setCategory] = useState<'Undergraduate' | 'Postgraduate' | ''>('');
   const [semester, setSemester] = useState<string>('');
   const [year, setYear] = useState<string>('');
   
@@ -35,22 +34,26 @@ export default function PrivilegeElevationPanel({
   // Keep track of optimistic updates separately
   const optimisticUpdatesRef = useRef<Map<string, any>>(new Map());
 
-  // Dropdown options
-  const faculties = [
-    'Faculty of Engineering, Design and Technology'
+  // Dropdown options with filtering hierarchy
+  const allFaculties = [
+    'Faculty of Engineering, Design and Technology',
+    'Faculty of Nursing and Midwifery'
   ];
 
-  const departments = [
-    'Computing and Technology'
-  ];
+  // Departments filtered by Faculty
+  const allDepartments: Record<string, string[]> = {
+    'Faculty of Engineering, Design and Technology': [
+      'Department of Computing and Technology',
+      'Department of Civil and Environmental Engineering'
+    ],
+    'Faculty of Nursing and Midwifery': [
+      'Department of Nursing',
+      'Department of Midwifery'
+    ]
+  };
 
-  const courses = [
-    'Bachelors of Science in Information Technology',
-    'Bachelors of Science in Computer Science',
-    'Bachelors of Science in Data Science and Analytics',
-    'Diploma in Information Technology and Entrepreneurship',
-    'Bachelors of Science in Electronics and Communications Engineering'
-  ];
+  // Filtered departments based on selected faculty
+  const departments = faculty ? (allDepartments[faculty] || []) : [];
 
   const semesters = [
     'Trinity',
@@ -70,13 +73,32 @@ export default function PrivilegeElevationPanel({
     }
   }, [isSuperAdmin, isChiefExaminer]);
 
-  // Filter lecturers based on selected category
+  // Filter lecturers based on selected category, department, and faculty
+  // Note: All lecturers currently belong to "Department of Computing and Technology"
+  // So only show lecturers when that specific department is selected
   const filteredLecturers = useMemo(() => {
     if (!category) {
       return [];
     }
-    return lecturers.filter(lecturer => lecturer.lecturer_category === category);
-  }, [lecturers, category]);
+    
+    // Only show lecturers if Department of Computing and Technology is selected
+    // This is because all current lecturers belong to this department
+    if (department !== 'Department of Computing and Technology') {
+      return [];
+    }
+    
+    // Filter by category
+    let filtered = lecturers.filter(lecturer => lecturer.lecturer_category === category);
+    
+    // Also filter by department to ensure exact match
+    // Support both naming conventions: "Department of Computing and Technology" and "Computing and Technology"
+    filtered = filtered.filter(lecturer => 
+      lecturer.department === 'Department of Computing and Technology' || 
+      lecturer.department === 'Computing and Technology'
+    );
+    
+    return filtered;
+  }, [lecturers, category, department]);
 
   const loadLecturers = async () => {
     try {
@@ -128,8 +150,8 @@ export default function PrivilegeElevationPanel({
 
     // Validate Chief Examiner fields
     if (isSuperAdmin) {
-      if (!category || !faculty || !department || !course || !semester || !year) {
-        setMessage({ type: 'error', text: 'Please fill in all fields: Category, Faculty, Department, Course, Semester, and Year' });
+      if (!faculty || !department || !category || !semester || !year) {
+        setMessage({ type: 'error', text: 'Please fill in all fields: Faculty, Department, Program Category, Semester, and Year' });
         return;
       }
     }
@@ -147,7 +169,6 @@ export default function PrivilegeElevationPanel({
             category: category as 'Undergraduate' | 'Postgraduate',
             faculty,
             department,
-            course,
             semester,
             year,
           }
@@ -181,7 +202,6 @@ export default function PrivilegeElevationPanel({
               category: category as 'Undergraduate' | 'Postgraduate',
               faculty,
               department,
-              course,
               semester,
               year,
             },
@@ -205,10 +225,9 @@ export default function PrivilegeElevationPanel({
         
         setSelectedUserId('');
         // Reset form fields
-        setCategory('');
         setFaculty('');
         setDepartment('');
-        setCourse('');
+        setCategory('');
         setSemester('');
         setYear('');
       } else {
@@ -512,17 +531,6 @@ export default function PrivilegeElevationPanel({
                             <span className="text-xs font-semibold text-slate-800 text-right truncate max-w-[60%]">{metadata.department}</span>
                           </div>
                         )}
-                        {metadata.course && (
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-1.5">
-                              <svg className="w-3 h-3 text-purple-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                                <path d="M10.394 2.08a1 1 0 00-.788 0l-7 3a1 1 0 000 1.84l5.25 2.25a1 1 0 01.356-.356l5.25-2.25a1 1 0 00.356-.356L17.394 4.08a1 1 0 000-1.84l-7-3zM3.5 8.5a1 1 0 01.356-.356l5.25-2.25a1 1 0 01.788 0l5.25 2.25a1 1 0 01.356.356l-5.25 2.25a1 1 0 01-.788 0L3.856 8.5a1 1 0 01-.356-.356z" />
-                              </svg>
-                              <span className="text-xs text-slate-500">Course:</span>
-                            </div>
-                            <span className="text-xs font-semibold text-slate-800 text-right truncate max-w-[60%]">{metadata.course}</span>
-                          </div>
-                        )}
                         {(metadata.semester || metadata.year) && (
                           <div className="flex items-center justify-between gap-2">
                             <div className="flex items-center gap-1.5">
@@ -577,8 +585,74 @@ export default function PrivilegeElevationPanel({
         )}
 
         <div className="space-y-4">
-          {/* Category Selection - Show FIRST */}
+          {/* Faculty Selection - Show FIRST */}
           {isSuperAdmin && (
+            <div>
+              <label className="block text-sm font-semibold text-pink-800 mb-2">
+                Faculty *
+              </label>
+              <select
+                value={faculty}
+                onChange={(e) => {
+                  setFaculty(e.target.value);
+                  // Reset dependent fields when faculty changes
+                  setDepartment('');
+                  setCategory('');
+                  setSelectedUserId('');
+                  setSemester('');
+                  setYear('');
+                }}
+                className="w-full rounded-lg border border-slate-200 bg-white px-4 py-2 text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                required
+              >
+                <option value="">Select Faculty...</option>
+                {allFaculties.map((fac) => (
+                  <option key={fac} value={fac}>
+                    {fac}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Department Selection - Show after Faculty is selected */}
+          {isSuperAdmin && faculty && (
+            <div>
+              <label className="block text-sm font-semibold text-pink-800 mb-2">
+                Department *
+              </label>
+              <select
+                value={department}
+                onChange={(e) => {
+                  setDepartment(e.target.value);
+                  // Reset dependent fields when department changes
+                  setCategory('');
+                  setSelectedUserId('');
+                  setSemester('');
+                  setYear('');
+                }}
+                className="w-full rounded-lg border border-slate-200 bg-white px-4 py-2 text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                required
+                disabled={!faculty || departments.length === 0}
+              >
+                <option value="">Select Department...</option>
+                {departments.length === 0 ? (
+                  <option value="" disabled>
+                    {faculty ? 'No departments found for this faculty' : 'Select a faculty first'}
+                  </option>
+                ) : (
+                  departments.map((dept) => (
+                    <option key={dept} value={dept}>
+                      {dept}
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+          )}
+
+          {/* Program Category Selection - Show after Department is selected */}
+          {isSuperAdmin && faculty && department && (
             <div>
               <label className="block text-sm font-semibold text-pink-800 mb-2">
                 Program Category *
@@ -588,15 +662,8 @@ export default function PrivilegeElevationPanel({
                 onChange={(e) => {
                   const newCategory = e.target.value as 'Undergraduate' | 'Postgraduate' | '';
                   setCategory(newCategory);
-                  
-                  // Always reset lecturer selection when category changes
-                  // The filtered list will ensure only matching lecturers are shown
+                  // Reset lecturer selection when category changes
                   setSelectedUserId('');
-                  
-                  // Reset assignment details when category changes
-                  setFaculty('');
-                  setDepartment('');
-                  setCourse('');
                   setSemester('');
                   setYear('');
                 }}
@@ -611,28 +678,26 @@ export default function PrivilegeElevationPanel({
           )}
 
           {/* Lecturer Selection - Show after Category is selected */}
-          {isSuperAdmin && category && (
+          {isSuperAdmin && faculty && department && category && (
             <div>
               <label className="block text-sm font-semibold text-pink-800 mb-2">
-                Select Lecturer
+                Select Lecturer *
               </label>
               <select
                 value={selectedUserId}
                 onChange={(e) => {
                   setSelectedUserId(e.target.value);
-                  // Reset assignment details when lecturer changes
-                  setFaculty('');
-                  setDepartment('');
-                  setCourse('');
+                  // Reset semester and year when lecturer changes (optional)
                   setSemester('');
                   setYear('');
                 }}
                 className="w-full rounded-lg border border-slate-200 bg-white px-4 py-2 text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                required
               >
                 <option value="">Choose a lecturer...</option>
                 {filteredLecturers.length === 0 ? (
                   <option value="" disabled>
-                    No {category} lecturers found
+                    No {category} lecturers found {department ? `in ${department}` : ''}
                   </option>
                 ) : (
                   filteredLecturers.map((lecturer) => (
@@ -645,27 +710,27 @@ export default function PrivilegeElevationPanel({
             </div>
           )}
 
-          {/* Chief Examiner Assignment Details - Only show when Category and Lecturer are selected */}
-          {isSuperAdmin && category && selectedUserId && (
+          {/* Semester and Year - Show after Lecturer is selected */}
+          {isSuperAdmin && faculty && department && category && selectedUserId && (
             <>
               <div className="border-t border-pink-300 pt-4 mt-4">
                 <h3 className="text-sm font-semibold text-pink-800 mb-4">Assignment Details *</h3>
                 
-                <div className="space-y-4">
+                <div className="grid gap-4 sm:grid-cols-2">
                   <div>
                     <label className="block text-sm font-semibold text-pink-800 mb-2">
-                      Faculty *
+                      Semester *
                     </label>
                     <select
-                      value={faculty}
-                      onChange={(e) => setFaculty(e.target.value)}
+                      value={semester}
+                      onChange={(e) => setSemester(e.target.value)}
                       className="w-full rounded-lg border border-slate-200 bg-white px-4 py-2 text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
                       required
                     >
-                      <option value="">Select Faculty...</option>
-                      {faculties.map((fac) => (
-                        <option key={fac} value={fac}>
-                          {fac}
+                      <option value="">Select Semester...</option>
+                      {semesters.map((sem) => (
+                        <option key={sem} value={sem}>
+                          {sem}
                         </option>
                       ))}
                     </select>
@@ -673,80 +738,21 @@ export default function PrivilegeElevationPanel({
 
                   <div>
                     <label className="block text-sm font-semibold text-pink-800 mb-2">
-                      Department *
+                      Year *
                     </label>
                     <select
-                      value={department}
-                      onChange={(e) => setDepartment(e.target.value)}
+                      value={year}
+                      onChange={(e) => setYear(e.target.value)}
                       className="w-full rounded-lg border border-slate-200 bg-white px-4 py-2 text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
                       required
                     >
-                      <option value="">Select Department...</option>
-                      {departments.map((dept) => (
-                        <option key={dept} value={dept}>
-                          {dept}
+                      <option value="">Select Year...</option>
+                      {years.map((yr) => (
+                        <option key={yr} value={yr}>
+                          {yr}
                         </option>
                       ))}
                     </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-semibold text-pink-800 mb-2">
-                      Course *
-                    </label>
-                    <select
-                      value={course}
-                      onChange={(e) => setCourse(e.target.value)}
-                      className="w-full rounded-lg border border-slate-200 bg-white px-4 py-2 text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
-                      required
-                    >
-                      <option value="">Select Course...</option>
-                      {courses.map((crs) => (
-                        <option key={crs} value={crs}>
-                          {crs}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <div>
-                      <label className="block text-sm font-semibold text-pink-800 mb-2">
-                        Semester *
-                      </label>
-                      <select
-                        value={semester}
-                        onChange={(e) => setSemester(e.target.value)}
-                        className="w-full rounded-lg border border-slate-200 bg-white px-4 py-2 text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
-                        required
-                      >
-                        <option value="">Select Semester...</option>
-                        {semesters.map((sem) => (
-                          <option key={sem} value={sem}>
-                            {sem}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-semibold text-pink-800 mb-2">
-                        Year *
-                      </label>
-                      <select
-                        value={year}
-                        onChange={(e) => setYear(e.target.value)}
-                        className="w-full rounded-lg border border-slate-200 bg-white px-4 py-2 text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
-                        required
-                      >
-                        <option value="">Select Year...</option>
-                        {years.map((yr) => (
-                          <option key={yr} value={yr}>
-                            {yr}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
                   </div>
                 </div>
               </div>
@@ -755,7 +761,7 @@ export default function PrivilegeElevationPanel({
 
           <button
             onClick={handleElevate}
-            disabled={loading || !selectedUserId || (isSuperAdmin && (!category || !faculty || !department || !course || !semester || !year))}
+            disabled={loading || !selectedUserId || (isSuperAdmin && (!faculty || !department || !category || !semester || !year))}
             className="w-full rounded-lg bg-emerald-600 px-4 py-2 font-semibold text-white hover:bg-emerald-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? 'Processing...' : 'Promote to Chief Examiner'}
