@@ -135,7 +135,8 @@ export async function elevateToChiefExaminer(
   }
 }
 
-// Appoint Vetters, Team Leads, or Setters (Chief Examiner only)
+// Appoint Vetters, Team Leads, or Setters (Chief Examiner only).
+// Role is NOT added to user_profiles until the user accepts the consent agreement on next login.
 export async function appointRole(
   userId: string,
   role: 'Vetter' | 'Team Lead' | 'Setter',
@@ -159,17 +160,28 @@ export async function appointRole(
       return { success: false, error: `User is already a ${role}` };
     }
 
-    // Add the role
-    const updatedRoles = [...currentRoles, role];
+    // Do NOT add the role to user_profiles here. User must accept consent on next login first.
+    // We only record the assignment in privilege_elevations; role is granted on consent accept.
 
-    // Update user roles - using user_profiles instead of users
-    const { error: updateError } = await supabase
-      .from('user_profiles')
-      .update({ roles: updatedRoles })
-      .eq('id', userId);
-
-    if (updateError) {
-      return { success: false, error: updateError.message };
+    // CRITICAL: Delete any existing consent acceptance for this role
+    // This ensures that when a role is reassigned, the user must accept the consent again
+    // This prevents showing "Accepted" status for newly assigned roles
+    // Use a transaction-like approach: delete first, then assign
+    const { error: deleteConsentError, count: deleteCount } = await supabase
+      .from('role_consent_acceptances')
+      .delete({ count: 'exact' })
+      .eq('user_id', userId)
+      .eq('role', role);
+    
+    if (deleteConsentError) {
+      console.warn(`Warning: Could not delete old consent acceptance for ${role} role (user: ${userId}):`, deleteConsentError);
+      // If it's an RLS error, log it specifically
+      if (deleteConsentError.code === '42501' || deleteConsentError.message.includes('permission') || deleteConsentError.message.includes('policy')) {
+        console.error(`⚠️ RLS POLICY ISSUE: Cannot delete consent acceptance. May need DELETE policy for Chief Examiners.`);
+      }
+      // Don't fail the assignment if consent deletion fails - log and continue
+    } else {
+      console.log(`✅ Deleted ${deleteCount || 0} old consent acceptance(s) for ${role} role (user: ${userId}) - user must accept again`);
     }
 
     // Record privilege elevation (with FK fallback for elevated_by)
@@ -197,17 +209,17 @@ export async function appointRole(
       }
     }
 
-    // Create notification for the user about their new role
+    // Create notification: user must accept consent on next login to receive the role
     const roleMessages: Record<string, string> = {
-      'Setter': 'You have been assigned the Setter role. You can now submit exam drafts within the deadline window.',
-      'Vetter': 'You have been assigned the Vetter role. You can now join vetting sessions to review exam papers.',
-      'Team Lead': 'You have been assigned the Team Lead role. You can now compile and integrate exam drafts from setters.',
+      'Setter': 'You have been assigned the Setter role. On your next login you will be asked to accept the role agreement; once you accept, you can submit exam drafts within the deadline window.',
+      'Vetter': 'You have been assigned the Vetter role. On your next login you will be asked to accept the role agreement; once you accept, you can join vetting sessions to review exam papers.',
+      'Team Lead': 'You have been assigned the Team Lead role. On your next login you will be asked to accept the role agreement; once you accept, you can compile and integrate exam drafts from setters.',
     };
 
     await createNotification({
       user_id: userId,
-      title: 'Privilege Elevated',
-      message: roleMessages[role] || `You have been assigned the ${role} role.`,
+      title: 'Role assignment – consent required',
+      message: roleMessages[role] || `You have been assigned the ${role} role. Please log in and accept the role agreement to activate it.`,
       type: 'warning',
     });
 
@@ -270,24 +282,21 @@ export async function revokeRole(
     const targetName = (user as any).name || 'User';
 
     const currentRoles = user.roles || [];
-    if (!currentRoles.includes(role)) {
-      return { success: false, error: `User is not a ${role}` };
+
+    // Remove the role from user_profiles only if it's there (user had accepted). If they declined before accepting, role was never added.
+    if (currentRoles.includes(role)) {
+      const updatedRoles = currentRoles.filter((r) => r !== role);
+      const { error: updateError } = await supabase
+        .from('user_profiles')
+        .update({ roles: updatedRoles })
+        .eq('id', userId);
+
+      if (updateError) {
+        return { success: false, error: updateError.message };
+      }
     }
 
-    // Remove the role (but keep base role)
-    const updatedRoles = currentRoles.filter((r) => r !== role);
-
-    // Update user roles - using user_profiles instead of users
-    const { error: updateError } = await supabase
-      .from('user_profiles')
-      .update({ roles: updatedRoles })
-      .eq('id', userId);
-
-    if (updateError) {
-      return { success: false, error: updateError.message };
-    }
-
-    // Mark privilege elevation as inactive
+    // Always mark privilege elevation as inactive (works for both accepted and pending-consent assignments)
     await supabase
       .from('privilege_elevations')
       .update({

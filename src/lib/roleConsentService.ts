@@ -126,3 +126,56 @@ export async function getCurrentUserRoles(userId: string): Promise<string[]> {
 
   return normalizeRoles(data.roles);
 }
+
+const WORKFLOW_ROLES = ['Team Lead', 'Vetter', 'Setter'] as const;
+
+/** Roles assigned to this user via privilege_elevations (active) that require consent. Used to show consent modal on login. */
+export async function getAssignedWorkflowRoles(userId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('privilege_elevations')
+    .select('role_granted')
+    .eq('user_id', userId)
+    .eq('is_active', true)
+    .in('role_granted', [...WORKFLOW_ROLES]);
+
+  if (error) {
+    console.error('Error fetching assigned workflow roles:', error);
+    return [];
+  }
+  const roles = (data || []).map((r: { role_granted: string }) => r.role_granted);
+  return [...new Set(roles)];
+}
+
+/** Add role to user_profiles.roles (called when user accepts consent). */
+export async function addRoleToUserProfile(
+  userId: string,
+  role: WorkflowRole
+): Promise<{ success: boolean; error?: string }> {
+  const { data, error: fetchError } = await supabase
+    .from('user_profiles')
+    .select('roles')
+    .eq('id', userId)
+    .single();
+
+  if (fetchError || !data) {
+    console.error('Error fetching user profile for addRole:', fetchError);
+    return { success: false, error: fetchError?.message || 'User not found' };
+  }
+
+  const currentRoles = normalizeRoles(data.roles);
+  if (currentRoles.includes(role)) {
+    return { success: true }; // already has role
+  }
+
+  const updatedRoles = [...currentRoles, role];
+  const { error: updateError } = await supabase
+    .from('user_profiles')
+    .update({ roles: updatedRoles })
+    .eq('id', userId);
+
+  if (updateError) {
+    console.error('Error adding role to user profile:', updateError);
+    return { success: false, error: updateError.message };
+  }
+  return { success: true };
+}
