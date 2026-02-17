@@ -1276,6 +1276,7 @@ function App() {
     minutes: number;
   }>({ days: 0, hours: 0, minutes: 7 });
   const [setterDeadlineScheduledTime, setSetterDeadlineScheduledTime] = useState<number | null>(null);
+  const [setterDeadlineOriginalScheduledTime, setSetterDeadlineOriginalScheduledTime] = useState<number | null>(null);
   
   const [teamLeadDeadlineActive, setTeamLeadDeadlineActive] = useState(false);
   const [teamLeadDeadlineStartTime, setTeamLeadDeadlineStartTime] = useState<number | null>(null);
@@ -1283,7 +1284,7 @@ function App() {
     days: number;
     hours: number;
     minutes: number;
-  }>({ days: 7, hours: 0, minutes: 0 });
+  }>({ days: 0, hours: 0, minutes: 2 });
   const [teamLeadDeadlineScheduledTime, setTeamLeadDeadlineScheduledTime] = useState<number | null>(null);
   
   const [repositoriesActive, setRepositoriesActive] = useState(false);
@@ -1709,6 +1710,16 @@ function App() {
           }
           return next;
         });
+      } else if (type === 'comments_cleared') {
+        // Clear all comments when a new vetting session starts
+        setChecklistComments(new Map());
+        setChecklistDraftText(new Map());
+        setChecklistTypingState(new Map());
+        try {
+          localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+        } catch (error) {
+          console.error('Error clearing checklist comments from localStorage:', error);
+        }
       }
     };
     return () => {
@@ -2516,7 +2527,7 @@ function App() {
     loadUsersFromSupabase();
   }, []);
 
-  // Check for role consent agreements - show on EVERY login for users with workflow roles
+  // Check for role consent agreements - only show for roles that haven't been accepted yet
   const checkRoleConsent = useCallback(async () => {
     if (!authUserId) {
       // Clear modal state when no user
@@ -2530,20 +2541,23 @@ function App() {
       const userRoles = await getCurrentUserRoles(authUserId);
       console.log('📋 User roles:', userRoles);
       
-      const workflowRoles: WorkflowRole[] = ['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'];
-      // Filter to only roles the user actually has
-      const userWorkflowRoles = workflowRoles.filter((r) => userRoles.includes(r));
-      console.log('✅ User workflow roles:', userWorkflowRoles);
+      // Get roles the user has already accepted
+      const acceptedRoles = await getAcceptedRoles(authUserId);
+      console.log('✅ Already accepted roles:', Array.from(acceptedRoles));
       
-      if (userWorkflowRoles.length > 0) {
-        console.log('📝 Showing consent modal for roles:', userWorkflowRoles);
-        console.log('🔧 Setting rolesNeedingConsent:', userWorkflowRoles);
+      // Only show consent for roles that haven't been accepted yet
+      const rolesNeedingConsentList = getRolesNeedingConsent(userRoles, acceptedRoles);
+      console.log('📝 Roles needing consent:', rolesNeedingConsentList);
+      
+      if (rolesNeedingConsentList.length > 0) {
+        console.log('📝 Showing consent modal for roles:', rolesNeedingConsentList);
+        console.log('🔧 Setting rolesNeedingConsent:', rolesNeedingConsentList);
         console.log('🔧 Setting showConsentModal to true');
-        setRolesNeedingConsent(userWorkflowRoles);
+        setRolesNeedingConsent(rolesNeedingConsentList);
         setShowConsentModal(true);
         console.log('✅ Modal state updated');
       } else {
-        console.log('ℹ️ No workflow roles found, hiding consent modal');
+        console.log('ℹ️ All roles already accepted or no workflow roles found, hiding consent modal');
         setShowConsentModal(false);
         setRolesNeedingConsent([]);
       }
@@ -4590,6 +4604,27 @@ function App() {
       switchingLocked: true,
     });
 
+      // Clear all comments from previous vetting session to start fresh
+      setChecklistComments(new Map());
+      setChecklistDraftText(new Map());
+      setChecklistTypingState(new Map());
+      
+      // Clear localStorage to ensure comments don't persist across sessions
+      try {
+        localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+        // Broadcast clear to other tabs/windows
+        if (checklistCommentsChannelRef.current) {
+          checklistCommentsChannelRef.current.postMessage({
+            type: 'comments_cleared',
+            payload: {
+              sourceUserId: currentUser?.id,
+            },
+          });
+        }
+      } catch (error) {
+        console.error('Error clearing checklist comments from localStorage:', error);
+      }
+
       // Update workflow stage to 'Vetting in Progress'
     const actor = currentUser?.name ?? 'Unknown';
     pushWorkflowEvent(
@@ -4668,6 +4703,17 @@ function App() {
       alert('The Chief Examiner must start the session first. Please wait for the session to begin.');
       console.error('Vetter join blocked: Global session not active');
       return;
+    }
+
+    // Check if vetter has accepted consent before allowing them to start
+    if (isVetter && currentUser?.id) {
+      const acceptedRoles = await getAcceptedRoles(currentUser.id);
+      if (!acceptedRoles.has('Vetter')) {
+        console.log('📝 Vetter has not accepted consent, showing consent modal');
+        setRolesNeedingConsent(['Vetter']);
+        setShowConsentModal(true);
+        return; // Don't proceed until consent is accepted
+      }
     }
 
     // Vetter must enable camera BEFORE starting their session
@@ -4980,6 +5026,26 @@ function App() {
     if (confirm('Are you sure you want to remove the checklist from vetting? This will clear the uploaded checklist PDF/template.')) {
       setCustomChecklistPdf(null);
       setCustomChecklist(null);
+      
+      // Clear all comments when checklist is removed
+      setChecklistComments(new Map());
+      setChecklistDraftText(new Map());
+      setChecklistTypingState(new Map());
+      try {
+        localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+        // Broadcast clear to other tabs/windows
+        if (checklistCommentsChannelRef.current) {
+          checklistCommentsChannelRef.current.postMessage({
+            type: 'comments_cleared',
+            payload: {
+              sourceUserId: currentUser?.id,
+            },
+          });
+        }
+      } catch (error) {
+        console.error('Error clearing checklist comments from localStorage:', error);
+      }
+      
       alert('Checklist removed from vetting. Default checklist will be used.');
     }
   };
@@ -5143,6 +5209,26 @@ function App() {
         // Store the file info - we'll display an editable Word-like interface
         setCustomChecklist(null);
         setCustomChecklistPdf({ url: '', name: file.name, isWordDoc: true });
+        
+        // Clear all comments from previous checklist to start fresh
+        setChecklistComments(new Map());
+        setChecklistDraftText(new Map());
+        setChecklistTypingState(new Map());
+        try {
+          localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+          // Broadcast clear to other tabs/windows
+          if (checklistCommentsChannelRef.current) {
+            checklistCommentsChannelRef.current.postMessage({
+              type: 'comments_cleared',
+              payload: {
+                sourceUserId: currentUser?.id,
+              },
+            });
+          }
+        } catch (error) {
+          console.error('Error clearing checklist comments from localStorage:', error);
+        }
+        
         alert('Word document uploaded! You can now edit the checklist directly in the editable document below.');
       };
       reader.onerror = () => {
@@ -5158,6 +5244,26 @@ function App() {
         const pdfUrl = event.target?.result as string;
         setCustomChecklist(null);
         setCustomChecklistPdf({ url: pdfUrl, name: file.name, isWordDoc: false });
+        
+        // Clear all comments from previous checklist to start fresh
+        setChecklistComments(new Map());
+        setChecklistDraftText(new Map());
+        setChecklistTypingState(new Map());
+        try {
+          localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+          // Broadcast clear to other tabs/windows
+          if (checklistCommentsChannelRef.current) {
+            checklistCommentsChannelRef.current.postMessage({
+              type: 'comments_cleared',
+              payload: {
+                sourceUserId: currentUser?.id,
+              },
+            });
+          }
+        } catch (error) {
+          console.error('Error clearing checklist comments from localStorage:', error);
+        }
+        
         alert('Checklist PDF uploaded. For better editing, consider uploading a Word document (.docx) instead.');
       };
       reader.onerror = () => {
@@ -5182,6 +5288,26 @@ function App() {
         }
         setCustomChecklist(parsed);
         setCustomChecklistPdf(null);
+        
+        // Clear all comments from previous checklist to start fresh
+        setChecklistComments(new Map());
+        setChecklistDraftText(new Map());
+        setChecklistTypingState(new Map());
+        try {
+          localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+          // Broadcast clear to other tabs/windows
+          if (checklistCommentsChannelRef.current) {
+            checklistCommentsChannelRef.current.postMessage({
+              type: 'comments_cleared',
+              payload: {
+                sourceUserId: currentUser?.id,
+              },
+            });
+          }
+        } catch (error) {
+          console.error('Error clearing checklist comments from localStorage:', error);
+        }
+        
         alert('Checklist uploaded successfully. Vetters will now use the new template.');
       } catch (error) {
         const lines = text
@@ -5200,6 +5326,26 @@ function App() {
         };
         setCustomChecklist(fallbackChecklist);
         setCustomChecklistPdf(null);
+        
+        // Clear all comments from previous checklist to start fresh
+        setChecklistComments(new Map());
+        setChecklistDraftText(new Map());
+        setChecklistTypingState(new Map());
+        try {
+          localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+          // Broadcast clear to other tabs/windows
+          if (checklistCommentsChannelRef.current) {
+            checklistCommentsChannelRef.current.postMessage({
+              type: 'comments_cleared',
+              payload: {
+                sourceUserId: currentUser?.id,
+              },
+            });
+          }
+        } catch (error) {
+          console.error('Error clearing checklist comments from localStorage:', error);
+        }
+        
         alert('Checklist uploaded as plain text. All sections will use the provided list.');
       }
     };
@@ -6094,6 +6240,12 @@ function App() {
       related_exam_paper_id: currentPaper.id,
     });
     
+    // Update workflow stage to 'Approved' immediately
+    setWorkflow((prev) => ({
+      ...prev,
+      stage: 'Approved',
+    }));
+    
     // Reload papers from database to get updated status
     try {
       const { data: updatedPapers, error: reloadError } = await supabase
@@ -6123,7 +6275,9 @@ function App() {
           submittedRole: paper.team_lead_id ? 'Team Lead' as const : paper.setter_id ? 'Setter' as const : 'Unknown' as const,
         }));
         setSubmittedPapers(updated);
-        console.log('✅ Reloaded papers from database');
+        console.log('✅ Reloaded papers from database after approval');
+      } else if (reloadError) {
+        console.error('❌ Error reloading papers:', reloadError);
       }
     } catch (error) {
       console.error('⚠️ Error reloading papers:', error);
@@ -6175,6 +6329,25 @@ function App() {
         ? `${approvalDescription} Notes: ${notes}`
         : approvalDescription
     );
+    
+    // Clear vetting dashboard comments after successful approval
+    setChecklistComments(new Map());
+    setChecklistDraftText(new Map());
+    setChecklistTypingState(new Map());
+    try {
+      localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+      // Broadcast clear to other tabs/windows
+      if (checklistCommentsChannelRef.current) {
+        checklistCommentsChannelRef.current.postMessage({
+          type: 'comments_cleared',
+          payload: {
+            sourceUserId: currentUser?.id,
+          },
+        });
+      }
+    } catch (error) {
+      console.error('Error clearing checklist comments after approval:', error);
+    }
     
     // Notify Team Lead (without forwarding comments - vetting was positive)
     users
@@ -6630,7 +6803,7 @@ function App() {
       // Scheduled time reached - activate Setter deadline automatically
       setSetterDeadlineActive(true);
       setSetterDeadlineStartTime(Date.now());
-      setSetterDeadlineScheduledTime(null); // Clear scheduled time after activation
+      setSetterDeadlineScheduledTime(null); // Clear scheduled time after activation (original scheduled time is preserved in setterDeadlineOriginalScheduledTime)
       
       const actor = currentUser?.name ?? 'System';
       const durationText = `${setterDeadlineDuration.days} day${setterDeadlineDuration.days !== 1 ? 's' : ''}, ${setterDeadlineDuration.hours} hour${setterDeadlineDuration.hours !== 1 ? 's' : ''}, ${setterDeadlineDuration.minutes} minute${setterDeadlineDuration.minutes !== 1 ? 's' : ''}`;
@@ -6655,7 +6828,38 @@ function App() {
     }
   }, [currentTime, setterDeadlineScheduledTime, setterDeadlineActive, setterDeadlineDuration, users, currentUser?.name]);
 
-  // Automatically start Team Lead deadline when Setter deadline expires (countdown reaches zero)
+  // Automatically activate Team Lead deadline when scheduled time is reached
+  useEffect(() => {
+    if (teamLeadDeadlineScheduledTime && !teamLeadDeadlineActive && currentTime >= teamLeadDeadlineScheduledTime) {
+      // Scheduled time reached - activate Team Lead deadline automatically
+      setTeamLeadDeadlineActive(true);
+      setTeamLeadDeadlineStartTime(Date.now());
+      setTeamLeadDeadlineScheduledTime(null); // Clear scheduled time after activation
+      
+      const actor = currentUser?.name ?? 'System';
+      const durationText = `${teamLeadDeadlineDuration.days} day${teamLeadDeadlineDuration.days !== 1 ? 's' : ''}, ${teamLeadDeadlineDuration.hours} hour${teamLeadDeadlineDuration.hours !== 1 ? 's' : ''}, ${teamLeadDeadlineDuration.minutes} minute${teamLeadDeadlineDuration.minutes !== 1 ? 's' : ''}`;
+      pushWorkflowEvent(
+        `Team Lead submission deadline activated automatically as scheduled (${durationText}).`,
+        actor
+      );
+      
+      // Notify all Team Leads
+      const teamLeads = users.filter((u) => u.roles.includes('Team Lead'));
+      const message = `Submission deadline has been activated. You have ${durationText} to submit your compiled papers.`;
+      teamLeads.forEach((teamLead) => {
+        if (teamLead.id) {
+          void createNotification({
+            user_id: teamLead.id,
+            title: 'Submission Deadline Activated',
+            message,
+            type: 'deadline',
+          });
+        }
+      });
+    }
+  }, [currentTime, teamLeadDeadlineScheduledTime, teamLeadDeadlineActive, teamLeadDeadlineDuration, users, currentUser?.name]);
+
+  // Automatically start Team Lead deadline when Setter deadline expires
   useEffect(() => {
     if (!setterDeadlineActive || !setterDeadlineStartTime) {
       return;
@@ -6671,13 +6875,16 @@ function App() {
 
     const setterElapsed = currentTime - setterDeadlineStartTime;
 
-    // Check if Setter deadline has expired (countdown reached zero)
     if (setterElapsed >= setterTotalMs) {
-      // Activate Team Lead deadline immediately when Setter countdown reaches zero
-      // Keep setterDeadlineActive true so Setters can still see their deadline status
+      // Start Team Lead deadline immediately when Setter window closes
+      setSetterDeadlineActive(false);
       const now = Date.now();
       setTeamLeadDeadlineActive(true);
       setTeamLeadDeadlineStartTime(now);
+      // Automatically open repositories when Team Lead deadline activates
+      if (!repositoriesActive) {
+        setRepositoriesActive(true);
+      }
 
       const actor = currentUser?.name ?? 'System';
       const durationText = `${teamLeadDeadlineDuration.days} day${teamLeadDeadlineDuration.days !== 1 ? 's' : ''}, ${teamLeadDeadlineDuration.hours} hour${teamLeadDeadlineDuration.hours !== 1 ? 's' : ''}, ${teamLeadDeadlineDuration.minutes} minute${teamLeadDeadlineDuration.minutes !== 1 ? 's' : ''}`;
@@ -6686,14 +6893,14 @@ function App() {
         actor
       );
       
-      // Notify all Team Leads when deadline is activated
+      // Notify all Team Leads that their deadline has started
       const teamLeads = users.filter((u) => u.roles.includes('Team Lead'));
-      const message = `Submission deadline has been activated. You have ${durationText} to submit your compiled papers.`;
+      const message = `Setter deadline has expired. Your submission deadline has been activated. You have ${durationText} to submit your compiled papers.`;
       teamLeads.forEach((teamLead) => {
         if (teamLead.id) {
           void createNotification({
             user_id: teamLead.id,
-            title: 'Submission Deadline Activated',
+            title: 'Team Lead Deadline Activated',
             message,
             type: 'deadline',
           });
@@ -6712,8 +6919,9 @@ function App() {
     teamLeadDeadlineDuration.days,
     teamLeadDeadlineDuration.hours,
     teamLeadDeadlineDuration.minutes,
-    currentUser?.name,
+    repositoriesActive,
     users,
+    currentUser?.name,
   ]);
 
   const latestVersionLabel =
@@ -7391,7 +7599,15 @@ function App() {
           setterDeadlineDuration={setterDeadlineDuration}
           setterDeadlineStartTime={setterDeadlineStartTime}
           setterDeadlineScheduledTime={setterDeadlineScheduledTime}
-          onSetSetterDeadlineScheduled={(scheduledTime: number | null) => setSetterDeadlineScheduledTime(scheduledTime)}
+          setterDeadlineOriginalScheduledTime={setterDeadlineOriginalScheduledTime}
+          onSetSetterDeadlineScheduled={(scheduledTime: number | null) => {
+            setSetterDeadlineScheduledTime(scheduledTime);
+            if (scheduledTime) {
+              setSetterDeadlineOriginalScheduledTime(scheduledTime);
+            } else {
+              setSetterDeadlineOriginalScheduledTime(null);
+            }
+          }}
           teamLeadDeadlineActive={teamLeadDeadlineActive}
           teamLeadDeadlineDuration={teamLeadDeadlineDuration}
           teamLeadDeadlineStartTime={teamLeadDeadlineStartTime}
@@ -7558,6 +7774,7 @@ function App() {
           deadlinesActive={teamLeadDeadlineActive}
           deadlineStartTime={teamLeadDeadlineStartTime}
           deadlineDuration={teamLeadDeadlineDuration}
+          deadlineScheduledTime={teamLeadDeadlineScheduledTime}
           repositoriesActive={repositoriesActive}
           onTeamLeadCompile={handleTeamLeadCompile}
           submittedPapers={submittedPapers.filter(
@@ -7569,10 +7786,11 @@ function App() {
           checklistForwarded={checklistForwardedToTeamLead}
           vettingSessionRecords={vettingSessionRecords}
           customChecklistPdf={customChecklistPdf}
+          setterDeadlineScheduledTime={setterDeadlineScheduledTime}
           setterDeadlineActive={setterDeadlineActive}
           setterDeadlineStartTime={setterDeadlineStartTime}
           setterDeadlineDuration={setterDeadlineDuration}
-          setterDeadlineScheduledTime={setterDeadlineScheduledTime}
+          currentTime={currentTime}
         />
       ),
     });
@@ -7951,14 +8169,74 @@ function App() {
             console.log('✅ Acceptance recorded successfully for role:', role);
           }}
           onDecline={async () => {
-            // User declined terms - log them out
+            // User declined terms - mark as declined and revoke the role(s)
+            console.log('❌ User declined consent, marking as declined and revoking roles:', rolesNeedingConsent);
+            
+            if (!authUserId || !currentUser) {
+              console.error('Cannot revoke roles: missing user info');
+              setShowConsentModal(false);
+              setRolesNeedingConsent([]);
+              return;
+            }
+
+            // Mark roles as declined in privilege_elevations metadata before revoking
+            const actor = currentUser.name || 'System';
+            for (const role of rolesNeedingConsent) {
+              try {
+                // Mark as declined in privilege_elevations metadata
+                const { error: updateError } = await supabase
+                  .from('privilege_elevations')
+                  .update({
+                    metadata: { declined: true, declined_at: new Date().toISOString() }
+                  })
+                  .eq('user_id', authUserId)
+                  .eq('role_granted', role)
+                  .eq('is_active', true);
+                
+                if (updateError) {
+                  console.error(`Error marking ${role} as declined:`, updateError);
+                } else {
+                  console.log(`✅ Marked ${role} as declined`);
+                }
+
+                // Then revoke the role
+                console.log(`🔄 Revoking ${role} role from ${currentUser.name} (${authUserId})`);
+                const result = await revokeRole(authUserId, role, actor, authUserId);
+                if (result.success) {
+                  console.log(`✅ Successfully revoked ${role} role`);
+                } else {
+                  console.error(`❌ Failed to revoke ${role} role:`, result.error);
+                }
+              } catch (error) {
+                console.error(`❌ Error processing declined ${role} role:`, error);
+              }
+            }
+
+            // Refresh users to update role assignments (this will update currentUser via useMemo)
+            await refreshUsers();
+
+            // Close modal and clear consent state immediately
             setShowConsentModal(false);
             setRolesNeedingConsent([]);
-            // Sign out from Supabase
-            await supabase.auth.signOut();
-            // Clear local state
-            setAuthUserId(null);
-            setAuthError('You have declined the terms and conditions. Please contact your administrator if you wish to proceed.');
+
+            // Re-check role consent to ensure modal doesn't show again
+            // This will see that roles are removed and won't show consent form
+            setTimeout(() => {
+              checkRoleConsent();
+            }, 500);
+
+            // Show notification to user
+            const notification: AppNotification = {
+              id: `declined-${Date.now()}`,
+              message: `You have declined the role assignment(s). The role(s) have been removed and you can continue using the system as a normal user.`,
+              timestamp: new Date().toISOString(),
+              read: false,
+              title: 'Role Declined',
+              type: 'info',
+            };
+            setNotifications((prev) => [notification, ...prev].slice(0, 20));
+            setActiveToast(notification);
+            setTimeout(() => setActiveToast((c) => (c?.id === notification.id ? null : c)), 5000);
           }}
           onComplete={() => {
             setShowConsentModal(false);
@@ -11437,6 +11715,7 @@ interface ChiefExaminerConsoleProps {
   setterDeadlineDuration: { days: number; hours: number; minutes: number };
   setterDeadlineStartTime: number | null;
   setterDeadlineScheduledTime: number | null;
+  setterDeadlineOriginalScheduledTime: number | null;
   onSetSetterDeadlineScheduled: (scheduledTime: number | null) => void;
   teamLeadDeadlineActive: boolean;
   teamLeadDeadlineDuration: { days: number; hours: number; minutes: number };
@@ -11510,6 +11789,36 @@ function CountdownPill({ startTime, duration }: CountdownPillProps) {
   );
 }
 
+interface ScheduledCountdownProps {
+  scheduledTime: number;
+  className?: string;
+}
+
+function ScheduledCountdown({ scheduledTime, className = '' }: ScheduledCountdownProps) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const remaining = Math.max(scheduledTime - now, 0);
+  const hours = Math.floor(remaining / (60 * 60 * 1000));
+  const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+  const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
+
+  const expired = remaining <= 0;
+
+  return (
+    <span className={`inline-flex items-center justify-center rounded-full px-3 py-1 text-xs font-semibold ${className}`}>
+      {expired ? 'Activated' : `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`}
+    </span>
+  );
+}
+
 function ChiefExaminerConsole({
   users,
   currentUser,
@@ -11527,6 +11836,7 @@ function ChiefExaminerConsole({
   setterDeadlineDuration,
   setterDeadlineStartTime,
   setterDeadlineScheduledTime,
+  setterDeadlineOriginalScheduledTime,
   onSetSetterDeadlineScheduled,
   teamLeadDeadlineActive,
   teamLeadDeadlineDuration,
@@ -11586,6 +11896,145 @@ function ChiefExaminerConsole({
     return operationalRoles.filter(role => user.roles.includes(role));
   };
 
+  // Track consent statuses: Map<userId_role, 'accepted' | 'pending' | 'declined'>
+  // CRITICAL: Defaults to empty map - getConsentStatus() will return 'pending' for any unknown status
+  const [consentStatuses, setConsentStatuses] = useState<Map<string, 'accepted' | 'pending' | 'declined'>>(new Map());
+
+  // Fetch consent statuses for all users with operational roles
+  // IMPORTANT: Default to "pending" - only show "accepted" if we can 100% confirm acceptance exists
+  // Check for "declined" status by looking at revoked privilege_elevations with declined metadata
+  // Also check for declined users who no longer have the role (revoked with declined metadata)
+  const fetchConsentStatuses = useCallback(async () => {
+    const operationalRoles: Role[] = ['Team Lead', 'Vetter', 'Setter'];
+    const assignedUsers = users.filter(user => 
+      user.baseRole === 'Lecturer' && 
+      user.roles.some(role => operationalRoles.includes(role))
+    );
+
+    const statusMap = new Map<string, 'accepted' | 'pending' | 'declined'>();
+    
+    // First, check all assigned users
+    for (const user of assignedUsers) {
+      for (const role of user.roles) {
+        if (operationalRoles.includes(role)) {
+          const key = `${user.id}_${role}`;
+          
+          // CRITICAL: Default to "pending" - only change if we can confirm acceptance or declined
+          let status: 'accepted' | 'pending' | 'declined' = 'pending';
+          
+          try {
+            // First check if role was declined (revoked with declined metadata)
+            const { data: revokedElevation } = await supabase
+              .from('privilege_elevations')
+              .select('metadata, revoked_at')
+              .eq('user_id', user.id)
+              .eq('role_granted', role)
+              .eq('is_active', false)
+              .not('revoked_at', 'is', null)
+              .order('revoked_at', { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            
+            if (revokedElevation && revokedElevation.metadata && typeof revokedElevation.metadata === 'object') {
+              const metadata = revokedElevation.metadata as any;
+              if (metadata.declined === true) {
+                status = 'declined';
+                console.log(`❌ Consent declined for ${user.name} (${user.id}) - Role: ${role}`);
+                statusMap.set(key, status);
+                continue;
+              }
+            }
+            
+            // Check for acceptance - query directly to get better error handling
+            try {
+              const { data: acceptanceData, error: acceptanceError } = await supabase
+                .from('role_consent_acceptances')
+                .select('role')
+                .eq('user_id', user.id)
+                .eq('role', role)
+                .maybeSingle();
+              
+              if (acceptanceError) {
+                console.error(`❌ Error querying consent acceptance for ${user.name} (${user.id}) ${role}:`, acceptanceError);
+                // If RLS error, log it specifically
+                if (acceptanceError.code === '42501' || acceptanceError.message.includes('permission') || acceptanceError.message.includes('policy')) {
+                  console.error(`⚠️ RLS POLICY ISSUE: Chief Examiner may not have permission to read consent acceptances for other users. Run add_chief_examiner_consent_read_policy.sql`);
+                }
+                // Default to pending on error
+                status = 'pending';
+              } else if (acceptanceData && acceptanceData.role) {
+                // Acceptance record exists
+                status = 'accepted';
+                console.log(`✅ Consent ACCEPTED for ${user.name} (${user.id}) - Role: ${role}`);
+              } else {
+                // No acceptance record found
+                status = 'pending';
+                console.log(`⏳ Consent PENDING for ${user.name} (${user.id}) - Role: ${role}`);
+              }
+            } catch (queryError) {
+              console.error(`❌ Exception querying consent for ${user.name} (${user.id}) ${role}:`, queryError);
+              status = 'pending';
+            }
+          } catch (error) {
+            console.error(`❌ Error fetching consent for ${user.name} (${user.id}) ${role}:`, error);
+            // On ANY error, default to pending - better safe than wrong
+            status = 'pending';
+          }
+          
+          statusMap.set(key, status);
+        }
+      }
+    }
+    
+    // Also check for declined users who no longer have the role (revoked with declined metadata)
+    // This ensures we show declined status even if role was revoked
+    try {
+      const { data: declinedElevations } = await supabase
+        .from('privilege_elevations')
+        .select('user_id, role_granted, metadata')
+        .in('role_granted', operationalRoles)
+        .eq('is_active', false)
+        .not('revoked_at', 'is', null);
+      
+      if (declinedElevations) {
+        for (const elevation of declinedElevations) {
+          const metadata = elevation.metadata || {};
+          if (metadata.declined === true) {
+            const key = `${elevation.user_id}_${elevation.role_granted}`;
+            // Only set if not already set (don't override active assignments)
+            if (!statusMap.has(key)) {
+              statusMap.set(key, 'declined');
+              console.log(`❌ Found declined role for user ${elevation.user_id} - Role: ${elevation.role_granted}`);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching declined roles:', error);
+    }
+    
+    console.log('📋 Final consent statuses:', Array.from(statusMap.entries()));
+    setConsentStatuses(statusMap);
+  }, [users]);
+
+  useEffect(() => {
+    if (users.length > 0) {
+      fetchConsentStatuses();
+      // Refresh every 5 seconds to get real-time updates
+      const interval = setInterval(fetchConsentStatuses, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [users, fetchConsentStatuses]);
+
+  // Helper to get consent status for a user/role combination
+  // ALWAYS defaults to "pending" if status is unknown
+  const getConsentStatus = (userId: string, role: Role): 'accepted' | 'pending' | 'declined' => {
+    const key = `${userId}_${role}`;
+    const status = consentStatuses.get(key);
+    // If status is not found in map, default to "pending" (role just assigned, no acceptance yet)
+    return (status || 'pending') as 'accepted' | 'pending' | 'declined';
+  };
+
   // Helper to get role icon/indicator
   const getRoleIndicator = (role: string): string => {
     switch (role) {
@@ -11636,12 +12085,31 @@ function ChiefExaminerConsole({
     });
   }, [users, currentUser, selectedCourseUnit]);
 
-  const handleAward = (event: FormEvent<HTMLFormElement>) => {
+  const handleAward = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (awardUserId && awardRole) {
+      // CRITICAL: Immediately set status to "pending" for the newly assigned role
+      // This ensures the UI shows "pending" right away, before any database check
+      const key = `${awardUserId}_${awardRole}`;
+      setConsentStatuses(prev => {
+        const updated = new Map(prev);
+        // Force to "pending" - role was just assigned, user hasn't accepted yet
+        updated.set(key, 'pending');
+        console.log(`🆕 NEW ROLE ASSIGNED - Setting status to PENDING: ${awardUserId} - ${awardRole}`);
+        return updated;
+      });
+      
+      // Assign the role
       onAssignRole(awardUserId, awardRole);
       setAwardUserId('');
       setAwardRole('Team Lead');
+      
+      // Refresh consent statuses after assignment completes
+      // This will verify the status, but "pending" is already set above
+      setTimeout(() => {
+        console.log(`🔄 Refreshing consent statuses after role assignment...`);
+        fetchConsentStatuses();
+      }, 2000);
     }
   };
 
@@ -11949,11 +12417,43 @@ function ChiefExaminerConsole({
                                   </div>
                                 </div>
                               </div>
-                              <span
-                                className={`inline-flex items-center rounded-lg px-2.5 py-1 text-xs font-bold border-2 ${roleStyles.active} shadow-sm whitespace-nowrap`}
-                              >
-                                {role}
-                              </span>
+                              <div className="flex flex-col items-end gap-1.5">
+                                <span
+                                  className={`inline-flex items-center rounded-lg px-2.5 py-1 text-xs font-bold border-2 ${roleStyles.active} shadow-sm whitespace-nowrap`}
+                                >
+                                  {role}
+                                </span>
+                                {(() => {
+                                  const status = getConsentStatus(user.id, role);
+                                  const statusConfig = {
+                                    accepted: {
+                                      label: 'Accepted',
+                                      className: 'bg-emerald-100 text-emerald-700 border-emerald-300',
+                                      icon: '✓'
+                                    },
+                                    pending: {
+                                      label: 'Pending',
+                                      className: 'bg-amber-100 text-amber-700 border-amber-300',
+                                      icon: '🏆'
+                                    },
+                                    declined: {
+                                      label: 'Declined',
+                                      className: 'bg-rose-100 text-rose-700 border-rose-300',
+                                      icon: '❌'
+                                    }
+                                  };
+                                  const config = statusConfig[status];
+                                  return (
+                                    <span
+                                      className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[0.65rem] font-bold border ${config.className} shadow-sm whitespace-nowrap`}
+                                      title={`Consent status: ${config.label}`}
+                                    >
+                                      <span>{config.icon}</span>
+                                      <span>{config.label}</span>
+                                    </span>
+                                  );
+                                })()}
+                              </div>
                             </div>
 
                             {user.lecturerCategory || user.department || user.courseUnit ? (
@@ -12164,16 +12664,11 @@ function ChiefExaminerConsole({
                 <p className="text-sm text-amber-900 font-medium">
                   Will activate on: {new Date(setterDeadlineScheduledTime).toLocaleString()}
                 </p>
-                {setterDeadlineScheduledTime > currentTime && (
-                  <p className="text-xs text-amber-700">
-                    Time until activation: {(() => {
-                      const remaining = setterDeadlineScheduledTime - currentTime;
-                      const hours = Math.floor(remaining / (60 * 60 * 1000));
-                      const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
-                      const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
-                      return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-                    })()}
-                  </p>
+                {setterDeadlineScheduledTime > Date.now() && (
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs text-amber-700">Time until activation:</p>
+                    <ScheduledCountdown scheduledTime={setterDeadlineScheduledTime} className="bg-amber-100 text-amber-800" />
+                  </div>
                 )}
               </div>
             )}
@@ -12183,6 +12678,11 @@ function ChiefExaminerConsole({
                 <p className="text-sm text-pink-800 font-medium">
                   {setterDeadlineDuration.days} day{setterDeadlineDuration.days !== 1 ? 's' : ''}, {setterDeadlineDuration.hours} hour{setterDeadlineDuration.hours !== 1 ? 's' : ''}, {setterDeadlineDuration.minutes} minute{setterDeadlineDuration.minutes !== 1 ? 's' : ''}
                 </p>
+                {setterDeadlineOriginalScheduledTime && (
+                  <div className="mt-2 rounded border border-pink-300 bg-pink-100/50 p-2">
+                    <p className="text-xs text-pink-700">Scheduled activation completed at: {new Date(setterDeadlineOriginalScheduledTime).toLocaleString()}</p>
+                  </div>
+                )}
                 <p className="text-xs font-semibold text-pink-700 mt-2">Time Remaining</p>
                 <CountdownPill
                   startTime={setterDeadlineStartTime}
@@ -12421,6 +12921,50 @@ function ChiefExaminerConsole({
                   startTime={teamLeadDeadlineStartTime}
                   duration={teamLeadDeadlineDuration}
                 />
+              </div>
+            )}
+
+            {/* Display Setter Scheduled Activation Info for Team Lead - Show when scheduled but not yet active */}
+            {setterDeadlineScheduledTime && !setterDeadlineActive && (
+              <div className="mb-4 rounded-lg border border-blue-300 bg-blue-50 p-4 flex flex-col gap-2">
+                <p className="text-xs font-semibold text-blue-800">Setter Deadline Scheduled Activation</p>
+                <p className="text-sm text-blue-900 font-medium">
+                  Setter deadline will activate on: {new Date(setterDeadlineScheduledTime).toLocaleString()}
+                </p>
+                {setterDeadlineScheduledTime > Date.now() && (
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs text-blue-700">Time until Setter activation:</p>
+                    <ScheduledCountdown scheduledTime={setterDeadlineScheduledTime} className="bg-blue-100 text-blue-800" />
+                  </div>
+                )}
+                <p className="text-xs text-blue-600 mt-1">
+                  ⚠️ Team Lead deadline will start automatically when Setter deadline expires
+                </p>
+              </div>
+            )}
+
+            {/* Display Setter Active Deadline Info for Team Lead - Show when active, including scheduled activation info if it was scheduled */}
+            {setterDeadlineActive && setterDeadlineStartTime && (
+              <div className="mb-4 rounded-lg border border-pink-200 bg-pink-50 p-4 flex flex-col gap-2">
+                <p className="text-xs font-semibold text-pink-800">Setter Deadline Status</p>
+                <p className="text-sm text-pink-900 font-medium">
+                  Setter deadline is currently active
+                </p>
+                {setterDeadlineOriginalScheduledTime && (
+                  <div className="mt-1 rounded border border-pink-300 bg-pink-100/50 p-2">
+                    <p className="text-xs text-pink-700">Scheduled activation completed at: {new Date(setterDeadlineOriginalScheduledTime).toLocaleString()}</p>
+                  </div>
+                )}
+                <div className="flex items-center gap-2 mt-1">
+                  <p className="text-xs text-pink-700">Setter time remaining:</p>
+                  <CountdownPill
+                    startTime={setterDeadlineStartTime}
+                    duration={setterDeadlineDuration}
+                  />
+                </div>
+                <p className="text-xs text-pink-600 mt-1">
+                  ⚠️ Team Lead deadline will start automatically when Setter deadline expires
+                </p>
               </div>
             )}
 
@@ -13166,6 +13710,7 @@ interface TeamLeadPanelProps {
   deadlinesActive: boolean;
   deadlineStartTime: number | null;
   deadlineDuration: { days: number; hours: number; minutes: number };
+  deadlineScheduledTime?: number | null;
   repositoriesActive: boolean;
   onTeamLeadCompile: () => void;
   submittedPapers: SubmittedPaper[];
@@ -13181,16 +13726,18 @@ interface TeamLeadPanelProps {
   vettingSessionRecords?: VettingSessionRecord[];
   customChecklistPdf?: { url: string; name: string; isWordDoc?: boolean } | null;
   checklistForwarded?: boolean;
+  setterDeadlineScheduledTime?: number | null;
   setterDeadlineActive?: boolean;
   setterDeadlineStartTime?: number | null;
   setterDeadlineDuration?: { days: number; hours: number; minutes: number };
-  setterDeadlineScheduledTime?: number | null;
+  currentTime?: number;
 }
 
 function TeamLeadPanel({
   deadlinesActive,
   deadlineStartTime,
   deadlineDuration,
+  deadlineScheduledTime,
   repositoriesActive,
   onTeamLeadCompile: _onTeamLeadCompile,
   submittedPapers,
@@ -13200,12 +13747,13 @@ function TeamLeadPanel({
   vettingSessionRecords = [],
   customChecklistPdf,
   checklistForwarded = false,
+  setterDeadlineScheduledTime,
   setterDeadlineActive = false,
-  setterDeadlineStartTime = null,
-  setterDeadlineDuration = { days: 0, hours: 0, minutes: 0 },
-  setterDeadlineScheduledTime = null,
+  setterDeadlineStartTime,
+  setterDeadlineDuration,
+  currentTime: propCurrentTime,
 }: TeamLeadPanelProps) {
-  const [currentTime, setCurrentTime] = useState(Date.now());
+  const [currentTime, setCurrentTime] = useState(propCurrentTime ?? Date.now());
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [courseUnit, setCourseUnit] = useState('');
   const [courseCode, setCourseCode] = useState('');
@@ -13296,14 +13844,21 @@ function TeamLeadPanel({
   }, [submittedPapers]);
 
   useEffect(() => {
-    // Update timer if Team Lead deadline is active OR Setter deadline is active OR Setter deadline is scheduled (to show total countdown)
-    if ((deadlinesActive && deadlineStartTime) || (setterDeadlineActive && setterDeadlineStartTime) || setterDeadlineScheduledTime) {
+    // Sync with prop currentTime if provided
+    if (propCurrentTime) {
+      setCurrentTime(propCurrentTime);
+    }
+  }, [propCurrentTime]);
+
+  useEffect(() => {
+    // Update timer if Team Lead deadline is active OR if Setter deadline is scheduled OR if Setter deadline is active
+    if ((deadlinesActive && deadlineStartTime) || (setterDeadlineScheduledTime && !setterDeadlineActive) || (setterDeadlineActive && setterDeadlineStartTime)) {
       const timer = setInterval(() => {
         setCurrentTime(Date.now());
       }, 1000);
       return () => clearInterval(timer);
     }
-  }, [deadlinesActive, deadlineStartTime, setterDeadlineActive, setterDeadlineStartTime, setterDeadlineScheduledTime]);
+  }, [deadlinesActive, deadlineStartTime, setterDeadlineScheduledTime, setterDeadlineActive, setterDeadlineStartTime]);
 
   // Auto-populate metadata from the most recent submitted paper
   // so the Team Lead does not have to type course details again.
@@ -13317,28 +13872,42 @@ function TeamLeadPanel({
     setYear((prev) => prev || latest.year || '');
   }, [submittedPapers]);
 
-  // Calculate Setter time remaining (shown when Team Lead deadline is not active)
-  const calculateSetterTimeRemaining = () => {
-    if (!setterDeadlineActive || !setterDeadlineStartTime) {
+  // Calculate combined countdown: time until setter activation + setter duration
+  const calculateCombinedCountdown = () => {
+    if (!setterDeadlineScheduledTime && !setterDeadlineActive) {
       return null;
     }
 
-    const totalDurationMs =
-      setterDeadlineDuration.days * 24 * 60 * 60 * 1000 +
-      setterDeadlineDuration.hours * 60 * 60 * 1000 +
-      setterDeadlineDuration.minutes * 60 * 1000;
+    let totalRemainingMs = 0;
 
-    const elapsed = currentTime - setterDeadlineStartTime;
-    const remaining = totalDurationMs - elapsed;
+    if (setterDeadlineScheduledTime && !setterDeadlineActive) {
+      // Setter deadline is scheduled but not yet active
+      // Calculate: time until activation + setter duration
+      const timeUntilActivation = Math.max(setterDeadlineScheduledTime - currentTime, 0);
+      const setterDurationMs = setterDeadlineDuration
+        ? (setterDeadlineDuration.days * 24 * 60 * 60 * 1000 +
+           setterDeadlineDuration.hours * 60 * 60 * 1000 +
+           setterDeadlineDuration.minutes * 60 * 1000)
+        : 0;
+      totalRemainingMs = timeUntilActivation + setterDurationMs;
+    } else if (setterDeadlineActive && setterDeadlineStartTime && setterDeadlineDuration) {
+      // Setter deadline is active - show remaining setter time
+      const setterDurationMs =
+        setterDeadlineDuration.days * 24 * 60 * 60 * 1000 +
+        setterDeadlineDuration.hours * 60 * 60 * 1000 +
+        setterDeadlineDuration.minutes * 60 * 1000;
+      const elapsed = currentTime - setterDeadlineStartTime;
+      totalRemainingMs = Math.max(setterDurationMs - elapsed, 0);
+    }
 
-    if (remaining <= 0) {
+    if (totalRemainingMs <= 0) {
       return { days: 0, hours: 0, minutes: 0, seconds: 0, expired: true };
     }
 
-    const days = Math.floor(remaining / (24 * 60 * 60 * 1000));
-    const hours = Math.floor((remaining % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
-    const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
-    const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
+    const days = Math.floor(totalRemainingMs / (24 * 60 * 60 * 1000));
+    const hours = Math.floor((totalRemainingMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+    const minutes = Math.floor((totalRemainingMs % (60 * 60 * 1000)) / (60 * 1000));
+    const seconds = Math.floor((totalRemainingMs % (60 * 1000)) / 1000);
 
     return { days, hours, minutes, seconds, expired: false };
   };
@@ -13369,74 +13938,11 @@ function TeamLeadPanel({
   };
 
   const timeRemaining = calculateTimeRemaining();
-  const setterTimeRemaining = calculateSetterTimeRemaining();
-  
-  // Calculate combined total time until Team Lead deadline (Setter remaining + Setter duration + Team Lead duration)
-  const calculateTotalTimeUntilDeadline = () => {
-    // If Team Lead deadline is active, show Team Lead remaining time
-    if (deadlinesActive && deadlineStartTime && timeRemaining) {
-      return timeRemaining;
-    }
-    
-    // If Setter deadline is active (even if expired), calculate: Setter remaining + Team Lead duration
-    // When Setter countdown reaches zero, Team Lead deadline should activate, but we show the calculation until it activates
-    if (setterDeadlineActive && setterDeadlineStartTime && setterTimeRemaining) {
-      // If Setter deadline expired, Team Lead duration is all that remains
-      if (setterTimeRemaining.expired) {
-        const teamLeadDurationMs = deadlineDuration.days * 24 * 60 * 60 * 1000 +
-          deadlineDuration.hours * 60 * 60 * 1000 +
-          deadlineDuration.minutes * 60 * 1000;
-        
-        const days = Math.floor(teamLeadDurationMs / (24 * 60 * 60 * 1000));
-        const hours = Math.floor((teamLeadDurationMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
-        const minutes = Math.floor((teamLeadDurationMs % (60 * 60 * 1000)) / (60 * 1000));
-        const seconds = Math.floor((teamLeadDurationMs % (60 * 1000)) / 1000);
-        
-        return { days, hours, minutes, seconds, expired: false };
-      }
-      
-      // If Setter deadline hasn't expired yet, calculate: Setter remaining + Team Lead duration
-      const setterRemainingMs = setterTimeRemaining.days * 24 * 60 * 60 * 1000 +
-        setterTimeRemaining.hours * 60 * 60 * 1000 +
-        setterTimeRemaining.minutes * 60 * 1000 +
-        setterTimeRemaining.seconds * 1000;
-      const teamLeadDurationMs = deadlineDuration.days * 24 * 60 * 60 * 1000 +
-        deadlineDuration.hours * 60 * 60 * 1000 +
-        deadlineDuration.minutes * 60 * 1000;
-      const totalMs = setterRemainingMs + teamLeadDurationMs;
-      
-      const days = Math.floor(totalMs / (24 * 60 * 60 * 1000));
-      const hours = Math.floor((totalMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
-      const minutes = Math.floor((totalMs % (60 * 60 * 1000)) / (60 * 1000));
-      const seconds = Math.floor((totalMs % (60 * 1000)) / 1000);
-      
-      return { days, hours, minutes, seconds, expired: false };
-    }
-    
-    // If Setter deadline is scheduled but not active, calculate: Time until activation + Setter duration + Team Lead duration
-    if (setterDeadlineScheduledTime && !setterDeadlineActive && setterDeadlineScheduledTime > currentTime) {
-      const timeUntilActivationMs = setterDeadlineScheduledTime - currentTime;
-      const setterDurationMs = setterDeadlineDuration.days * 24 * 60 * 60 * 1000 +
-        setterDeadlineDuration.hours * 60 * 60 * 1000 +
-        setterDeadlineDuration.minutes * 60 * 1000;
-      const teamLeadDurationMs = deadlineDuration.days * 24 * 60 * 60 * 1000 +
-        deadlineDuration.hours * 60 * 60 * 1000 +
-        deadlineDuration.minutes * 60 * 1000;
-      const totalMs = timeUntilActivationMs + setterDurationMs + teamLeadDurationMs;
-      
-      const days = Math.floor(totalMs / (24 * 60 * 60 * 1000));
-      const hours = Math.floor((totalMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
-      const minutes = Math.floor((totalMs % (60 * 60 * 1000)) / (60 * 1000));
-      const seconds = Math.floor((totalMs % (60 * 1000)) / 1000);
-      
-      return { days, hours, minutes, seconds, expired: false };
-    }
-    
-    return null;
-  };
-  
-  const totalTimeUntilDeadline = calculateTotalTimeUntilDeadline();
-  const canSubmit = deadlinesActive && repositoriesActive && !timeRemaining?.expired;
+  const combinedCountdown = calculateCombinedCountdown();
+  // Team Lead can submit when: deadline is active, repositories are open, and deadline hasn't expired
+  // If deadline is active and has a start time, allow submission unless timeRemaining explicitly shows expired
+  // Also allow submission if deadline is active but timeRemaining is null (initial state)
+  const canSubmit = deadlinesActive && deadlineStartTime && repositoriesActive && (timeRemaining === null || !timeRemaining.expired);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -13630,80 +14136,117 @@ function TeamLeadPanel({
         description="Countdown timer showing the time remaining to submit papers as set by the Chief Examiner."
       >
         <div className="rounded-xl border border-slate-200 bg-white p-6">
-          {!deadlinesActive ? (
-            // Show Setter scheduled time countdown when Setter deadline is scheduled but not active
-            totalTimeUntilDeadline ? (
-              <div className="space-y-4">
-                <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 mb-4">
-                  <p className="text-xs font-semibold text-amber-800 mb-1">Total Time Until Your Deadline</p>
-                  <p className="text-sm text-amber-700">
-                    {setterDeadlineScheduledTime && !setterDeadlineActive ? (
-                      <>The Setter deadline will activate on: {new Date(setterDeadlineScheduledTime).toLocaleString()}</>
-                    ) : (
-                      <>Your deadline will start automatically once the Setter deadline expires and Setters have submitted.</>
-                    )}
-                  </p>
-                </div>
-                <div className="grid grid-cols-4 gap-4">
-                  <div className="text-center">
-                    <div className="rounded-xl border border-slate-200 bg-white p-4">
-                      <p className="text-3xl font-bold text-violet-600">{String(totalTimeUntilDeadline?.days ?? 0).padStart(2, '0')}</p>
-                      <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Days</p>
-                    </div>
-                  </div>
-                  <div className="text-center">
-                    <div className="rounded-xl border border-slate-200 bg-white p-4">
-                      <p className="text-3xl font-bold text-violet-600">{String(totalTimeUntilDeadline?.hours ?? 0).padStart(2, '0')}</p>
-                      <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Hours</p>
-                    </div>
-                  </div>
-                  <div className="text-center">
-                    <div className="rounded-xl border border-slate-200 bg-white p-4">
-                      <p className="text-3xl font-bold text-violet-600">{String(totalTimeUntilDeadline?.minutes ?? 0).padStart(2, '0')}</p>
-                      <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Minutes</p>
-                    </div>
-                  </div>
-                  <div className="text-center">
-                    <div className="rounded-xl border border-slate-200 bg-white p-4">
-                      <p className="text-3xl font-bold text-violet-600">{String(totalTimeUntilDeadline?.seconds ?? 0).padStart(2, '0')}</p>
-                      <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Seconds</p>
-                    </div>
-                  </div>
-                </div>
-                <div className="rounded-lg border border-violet-500/30 bg-violet-500/10 p-4">
-                  <p className="text-xs font-semibold text-violet-700 mb-1">Breakdown</p>
-                  <p className="text-xs text-violet-800">
-                    {setterDeadlineScheduledTime && !setterDeadlineActive ? (
-                      <>
-                        Time until Setter activates: {(() => {
-                          const remaining = setterDeadlineScheduledTime - currentTime;
-                          const days = Math.floor(remaining / (24 * 60 * 60 * 1000));
-                          const hours = Math.floor((remaining % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
-                          const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
-                          return `${days}d ${hours}h ${minutes}m`;
-                        })()} + 
-                        Setter duration: {setterDeadlineDuration.days}d {setterDeadlineDuration.hours}h {setterDeadlineDuration.minutes}m + 
-                        Your duration: {deadlineDuration.days}d {deadlineDuration.hours}h {deadlineDuration.minutes}m
-                      </>
-                    ) : setterTimeRemaining?.expired ? (
-                      <>
-                        Setter deadline expired + Your duration: {deadlineDuration.days}d {deadlineDuration.hours}h {deadlineDuration.minutes}m
-                      </>
-                    ) : (
-                      <>
-                        Setter remaining: {setterTimeRemaining?.days ?? 0}d {setterTimeRemaining?.hours ?? 0}h {setterTimeRemaining?.minutes ?? 0}m + 
-                        Your duration: {deadlineDuration.days}d {deadlineDuration.hours}h {deadlineDuration.minutes}m
-                      </>
-                    )}
-                  </p>
-                </div>
+          {!deadlinesActive && deadlineScheduledTime ? (
+            <div className="text-center py-8">
+              <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-amber-500/20 border-2 border-amber-500/50 mb-4">
+                <span className="text-2xl">📅</span>
               </div>
+              <p className="text-lg font-semibold text-amber-700">Deadline Scheduled</p>
+              <p className="text-sm text-slate-600 mt-2">
+                The submission deadline will activate automatically on:
+              </p>
+              <p className="text-base font-semibold text-amber-800 mt-2">
+                {new Date(deadlineScheduledTime).toLocaleString()}
+              </p>
+              {deadlineScheduledTime > currentTime && (
+                <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4">
+                  <p className="text-xs font-semibold text-amber-800 mb-2">Time Until Activation</p>
+                  <div className="grid grid-cols-4 gap-2">
+                    {(() => {
+                      const remaining = deadlineScheduledTime - currentTime;
+                      const hours = Math.floor(remaining / (60 * 60 * 1000));
+                      const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+                      const seconds = Math.floor((remaining % (60 * 1000)) / 1000);
+                      const days = Math.floor(hours / 24);
+                      const displayHours = hours % 24;
+                      return (
+                        <>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(days).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Days</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(displayHours).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Hours</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(minutes).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Minutes</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-700">{String(seconds).padStart(2, '0')}</p>
+                            <p className="text-xs text-amber-600 mt-1">Seconds</p>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (setterDeadlineScheduledTime && !setterDeadlineActive) || (setterDeadlineActive && setterDeadlineStartTime) ? (
+            // Show combined countdown: time until setter activation + setter duration
+            combinedCountdown ? (
+              combinedCountdown.expired ? (
+                <div className="text-center py-8">
+                  <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-rose-500/20 border-2 border-rose-500/50 mb-4">
+                    <span className="text-2xl">⏰</span>
+                  </div>
+                  <p className="text-lg font-semibold text-rose-300">Setter Deadline Expired</p>
+                  <p className="text-sm text-slate-600 mt-2">Team Lead deadline will start automatically.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="text-center mb-4">
+                    <p className="text-sm font-semibold text-blue-700 mb-1">
+                      {setterDeadlineScheduledTime && !setterDeadlineActive
+                        ? 'Combined Countdown: Setter Activation + Setter Duration'
+                        : 'Setter Deadline Active - Time Remaining'}
+                    </p>
+                    <p className="text-xs text-slate-600">
+                      {setterDeadlineScheduledTime && !setterDeadlineActive
+                        ? 'Time until Setter deadline activates plus Setter submission duration'
+                        : 'Team Lead deadline will start automatically when Setter deadline expires'}
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-4 gap-4">
+                    <div className="text-center">
+                      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                        <p className="text-3xl font-bold text-blue-700">{String(combinedCountdown.days).padStart(2, '0')}</p>
+                        <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Days</p>
+                      </div>
+                    </div>
+                    <div className="text-center">
+                      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                        <p className="text-3xl font-bold text-blue-700">{String(combinedCountdown.hours).padStart(2, '0')}</p>
+                        <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Hours</p>
+                      </div>
+                    </div>
+                    <div className="text-center">
+                      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                        <p className="text-3xl font-bold text-blue-700">{String(combinedCountdown.minutes).padStart(2, '0')}</p>
+                        <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Minutes</p>
+                      </div>
+                    </div>
+                    <div className="text-center">
+                      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                        <p className="text-3xl font-bold text-blue-700">{String(combinedCountdown.seconds).padStart(2, '0')}</p>
+                        <p className="text-xs text-slate-600 mt-1 uppercase tracking-wide">Seconds</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
             ) : (
               <div className="text-center py-8">
-                <p className="text-sm text-slate-600">Deadlines are not currently active.</p>
-                <p className="text-xs text-slate-500 mt-2">Waiting for Chief Examiner to activate Setter deadline.</p>
+                <p className="text-sm text-slate-600">Calculating countdown...</p>
               </div>
             )
+          ) : !deadlinesActive ? (
+            <div className="text-center py-8">
+              <p className="text-sm text-slate-600">Deadlines are not currently active.</p>
+              <p className="text-xs text-slate-500 mt-2">Waiting for Chief Examiner to activate deadlines.</p>
+            </div>
           ) : !deadlineStartTime ? (
             <div className="text-center py-8">
               <p className="text-sm text-slate-600">Deadline timer will start when activated.</p>
@@ -14853,8 +15396,17 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                               </span>
                             </p>
                           )}
-                          {/* Send to Vetting Button - appears when similarity <= 30% OR scan completed with no results */}
-                          {((maxSimilarity !== null && maxSimilarity <= 30) || (scanCompleted && maxSimilarity === null && similarityResults.length === 0)) && paper.status !== 'in-vetting' && (
+                          {/* Rejection Message - appears when similarity >= 86% */}
+                          {maxSimilarity !== null && maxSimilarity >= 86 && (
+                            <div className="mt-3 px-3 py-2 rounded-lg bg-gradient-to-r from-red-100 to-rose-100 border-2 border-red-400 shadow-md">
+                              <p className="text-xs font-bold text-red-800 flex items-center gap-1.5">
+                                <span className="text-base">🚫</span>
+                                <span>Paper Rejected: Similarity {maxSimilarity.toFixed(1)}% exceeds threshold (86%). Cannot proceed to vetting.</span>
+                              </p>
+                            </div>
+                          )}
+                          {/* Send to Vetting Button - appears when similarity < 86% OR scan completed with no results */}
+                          {((maxSimilarity !== null && maxSimilarity < 86) || (scanCompleted && maxSimilarity === null && similarityResults.length === 0)) && paper.status !== 'in-vetting' && (
                             <button
                               type="button"
                               onClick={(e) => {
@@ -14998,6 +15550,30 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                         </span>
                       </div>
 
+                      {/* Repository Match Summary - Always Visible */}
+                      {historicalPaper && (
+                        <div className="mb-3 p-2 rounded-lg bg-white/70 backdrop-blur-sm border border-white/60 shadow-sm">
+                          <p className="text-[0.65rem] font-bold text-slate-700 mb-1.5 flex items-center gap-1">
+                            <span>📚</span> Matched with Repository Paper
+                          </p>
+                          <div className="space-y-1 text-[0.6rem]">
+                            <p className="text-slate-800 font-semibold truncate">{historicalPaper.fileName}</p>
+                            <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+                              <span className="text-slate-600">{historicalPaper.semester} {historicalPaper.year}</span>
+                              {historicalPaper.submittedBy && (
+                                <span className="text-slate-600">By: <span className="font-semibold text-slate-700">{historicalPaper.submittedBy}</span></span>
+                              )}
+                              {historicalPaper.submittedAt && (
+                                <span className="text-slate-600">On: <span className="font-semibold text-slate-700">{formatTimestamp(historicalPaper.submittedAt)}</span></span>
+                              )}
+                            </div>
+                            {historicalPaper.submittedRole && (
+                              <p className="text-slate-500">Submitted as: {historicalPaper.submittedRole}</p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
                       {/* File Names */}
                       <div className="space-y-2 mb-4">
                         <div className="flex items-start gap-2 p-2 rounded-lg bg-white/60 backdrop-blur-sm border border-white/50 group-hover:bg-white/80 transition-all duration-300">
@@ -15007,6 +15583,12 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                               {currentPaper?.fileName}
                             </p>
                             <p className="text-[0.65rem] text-slate-600 font-medium">Current</p>
+                            {currentPaper?.submittedBy && (
+                              <p className="text-[0.6rem] text-slate-500 mt-0.5">Submitted by: {currentPaper.submittedBy}</p>
+                            )}
+                            {currentPaper?.submittedAt && (
+                              <p className="text-[0.6rem] text-slate-500">Submitted: {formatTimestamp(currentPaper.submittedAt)}</p>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-start gap-2 p-2 rounded-lg bg-white/60 backdrop-blur-sm border border-white/50 group-hover:bg-white/80 transition-all duration-300">
@@ -15016,14 +15598,32 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                               {historicalPaper?.fileName}
                             </p>
                             <p className="text-[0.65rem] text-slate-600 font-medium">{historicalPaper?.semester} {historicalPaper?.year}</p>
+                            {historicalPaper?.submittedBy && (
+                              <p className="text-[0.6rem] text-slate-500 mt-0.5 font-semibold">Submitted by: {historicalPaper.submittedBy}</p>
+                            )}
+                            {historicalPaper?.submittedAt && (
+                              <p className="text-[0.6rem] text-slate-500 font-semibold">Submitted: {formatTimestamp(historicalPaper.submittedAt)}</p>
+                            )}
+                            {historicalPaper?.submittedRole && (
+                              <p className="text-[0.6rem] text-slate-500">Role: {historicalPaper.submittedRole}</p>
+                            )}
                           </div>
                         </div>
                       </div>
 
                       {/* Action Buttons */}
                       <div className="space-y-2 relative z-10">
-                        {/* Send to Vetting Button - appears when similarity <= 30% */}
-                        {result.similarityScore <= 30 && currentPaper && currentPaper.status !== 'in-vetting' && (
+                        {/* Rejection Message - appears when similarity >= 86% */}
+                        {result.similarityScore >= 86 && (
+                          <div className="w-full px-3 py-2.5 rounded-xl bg-gradient-to-r from-red-100 to-rose-100 border-2 border-red-400 shadow-md">
+                            <p className="text-[0.65rem] font-bold text-red-800 flex items-center justify-center gap-1.5">
+                              <span className="text-base">🚫</span>
+                              <span>Paper Rejected: Similarity {result.similarityScore}% exceeds threshold (86%). Cannot proceed to vetting.</span>
+                            </p>
+                          </div>
+                        )}
+                        {/* Send to Vetting Button - appears when similarity < 86% */}
+                        {result.similarityScore < 86 && currentPaper && currentPaper.status !== 'in-vetting' && (
                           <button
                             type="button"
                             className="w-full rounded-xl bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 px-3 py-2.5 text-[0.7rem] font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.03] transition-all duration-300 flex items-center justify-center gap-1.5 relative overflow-hidden group"
@@ -15076,14 +15676,57 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
                         <div className="grid grid-cols-2 gap-2 text-[0.65rem]">
                           <div className="p-2 rounded-lg bg-white/60 border border-slate-200/50">
                             <p className="font-semibold text-slate-600 mb-0.5">Current Paper</p>
-                            <p className="text-slate-800">{currentPaper?.courseCode}</p>
+                            <p className="text-slate-800 font-medium">{currentPaper?.courseCode}</p>
                             <p className="text-slate-600">{currentPaper?.semester} {currentPaper?.year}</p>
+                            {currentPaper?.submittedBy && (
+                              <p className="text-slate-500 mt-1 text-[0.6rem]">By: {currentPaper.submittedBy}</p>
+                            )}
+                            {currentPaper?.submittedAt && (
+                              <p className="text-slate-500 text-[0.6rem]">{formatTimestamp(currentPaper.submittedAt)}</p>
+                            )}
                           </div>
                           <div className="p-2 rounded-lg bg-white/60 border border-slate-200/50">
-                            <p className="font-semibold text-slate-600 mb-0.5">Historical Paper</p>
-                            <p className="text-slate-800">{historicalPaper?.courseCode}</p>
+                            <p className="font-semibold text-slate-600 mb-0.5">Repository Match</p>
+                            <p className="text-slate-800 font-medium">{historicalPaper?.courseCode}</p>
                             <p className="text-slate-600">{historicalPaper?.semester} {historicalPaper?.year}</p>
+                            {historicalPaper?.submittedBy && (
+                              <p className="text-slate-500 mt-1 text-[0.6rem] font-semibold">By: {historicalPaper.submittedBy}</p>
+                            )}
+                            {historicalPaper?.submittedAt && (
+                              <p className="text-slate-500 text-[0.6rem] font-semibold">{formatTimestamp(historicalPaper.submittedAt)}</p>
+                            )}
+                            {historicalPaper?.submittedRole && (
+                              <p className="text-slate-500 text-[0.6rem]">Role: {historicalPaper.submittedRole}</p>
+                            )}
                           </div>
+                        </div>
+                        {/* Additional Highlights */}
+                        <div className="mt-2 space-y-2">
+                          <div className="p-2 rounded-lg bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200/50">
+                            <p className="text-[0.65rem] font-semibold text-blue-800 mb-1 flex items-center gap-1">
+                              <span>📊</span> Similarity Analysis
+                            </p>
+                            <div className="grid grid-cols-2 gap-2 text-[0.6rem]">
+                              <div>
+                                <p className="text-slate-600">Match Score</p>
+                                <p className="text-blue-700 font-bold">{result.similarityScore}%</p>
+                              </div>
+                              <div>
+                                <p className="text-slate-600">Sections Matched</p>
+                                <p className="text-blue-700 font-bold">{result.matchedSections.length}</p>
+                              </div>
+                            </div>
+                          </div>
+                          {historicalPaper?.fileSize && (
+                            <div className="p-2 rounded-lg bg-white/60 border border-slate-200/50">
+                              <p className="text-[0.65rem] font-semibold text-slate-600 mb-0.5">File Size</p>
+                              <p className="text-[0.6rem] text-slate-700">
+                                {historicalPaper.fileSize > 1024 * 1024
+                                  ? `${(historicalPaper.fileSize / (1024 * 1024)).toFixed(2)} MB`
+                                  : `${(historicalPaper.fileSize / 1024).toFixed(2)} KB`}
+                              </p>
+                            </div>
+                          )}
                         </div>
                         {result.similarityScore >= 70 && (
                           <div className="mt-2 p-2 rounded-lg bg-gradient-to-r from-amber-100 to-orange-100 border-2 border-amber-300/50 shadow-sm">

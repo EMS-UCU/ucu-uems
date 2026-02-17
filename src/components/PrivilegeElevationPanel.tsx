@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { elevateToChiefExaminer, revokeRole } from '../lib/privilegeElevation';
 import { supabase } from '../lib/supabase';
 import type { DatabaseUser } from '../lib/supabase';
+import { getAcceptedRoles } from '../lib/roleConsentService';
 
 interface PrivilegeElevationPanelProps {
   currentUserId: string;
@@ -34,6 +35,8 @@ export default function PrivilegeElevationPanel({
   const [savedAssignments, setSavedAssignments] = useState<any[]>([]);
   // Keep track of optimistic updates separately
   const optimisticUpdatesRef = useRef<Map<string, any>>(new Map());
+  // Track consent statuses: Map<userId_role, 'accepted' | 'pending' | 'declined'>
+  const [consentStatuses, setConsentStatuses] = useState<Map<string, 'accepted' | 'pending' | 'declined'>>(new Map());
 
   // Dropdown options
   const faculties = [
@@ -62,6 +65,48 @@ export default function PrivilegeElevationPanel({
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 5 }, (_, i) => String(currentYear + i));
 
+  // Fetch consent statuses for Chief Examiners
+  const fetchConsentStatuses = useCallback(async () => {
+    const statusMap = new Map<string, 'accepted' | 'pending' | 'declined'>();
+    
+    for (const assignment of savedAssignments) {
+      const userId = assignment.user_id;
+      const role = 'Chief Examiner';
+      const key = `${userId}_${role}`;
+      
+      let status: 'accepted' | 'pending' | 'declined' = 'pending';
+      
+      try {
+        // Check if role was declined (revoked with declined metadata)
+        if (!assignment.is_active && assignment.revoked_at) {
+          const metadata = assignment.metadata || {};
+          if (metadata.declined === true) {
+            status = 'declined';
+            statusMap.set(key, status);
+            continue;
+          }
+        }
+        
+        // Check for acceptance
+        const acceptedRoles = await getAcceptedRoles(userId);
+        const hasAccepted = acceptedRoles.has('Chief Examiner');
+        
+        if (hasAccepted) {
+          status = 'accepted';
+        } else {
+          status = 'pending';
+        }
+      } catch (error) {
+        console.error(`Error fetching consent for ${userId}:`, error);
+        status = 'pending';
+      }
+      
+      statusMap.set(key, status);
+    }
+    
+    setConsentStatuses(statusMap);
+  }, [savedAssignments]);
+
   useEffect(() => {
     loadLecturers();
     // Always load assignments if user is Super Admin or Chief Examiner
@@ -69,6 +114,15 @@ export default function PrivilegeElevationPanel({
       loadSavedAssignments();
     }
   }, [isSuperAdmin, isChiefExaminer]);
+
+  useEffect(() => {
+    if (savedAssignments.length > 0) {
+      fetchConsentStatuses();
+      // Refresh every 5 seconds
+      const interval = setInterval(fetchConsentStatuses, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [savedAssignments, fetchConsentStatuses]);
 
   // Filter lecturers based on selected category
   const filteredLecturers = useMemo(() => {
@@ -228,7 +282,7 @@ export default function PrivilegeElevationPanel({
         ? Array.from(optimisticUpdatesRef.current.values())
         : [];
       
-      // First, try to load from privilege_elevations table
+      // First, try to load from privilege_elevations table (including revoked with declined)
       let query = supabase
         .from('privilege_elevations')
         .select(`
@@ -238,8 +292,13 @@ export default function PrivilegeElevationPanel({
             email
           )
         `)
-        .eq('role_granted', 'Chief Examiner')
-        .eq('is_active', true);
+        .eq('role_granted', 'Chief Examiner');
+      
+      // For Super Admin, also include revoked roles with declined metadata
+      // For Chief Examiner, only show active assignments
+      if (!isSuperAdmin || (isChiefExaminer && !isSuperAdmin)) {
+        query = query.eq('is_active', true);
+      }
       
       // If user is Chief Examiner (but not Super Admin), filter to their own assignment
       if (isChiefExaminer && !isSuperAdmin) {
@@ -271,12 +330,17 @@ export default function PrivilegeElevationPanel({
       if (error) {
         console.error('Error loading assignments with join:', error);
         // Try alternative query without join
-        const { data: altData, error: altError } = await supabase
+        let altQuery = supabase
           .from('privilege_elevations')
           .select('*')
-          .eq('role_granted', 'Chief Examiner')
-          .eq('is_active', true)
-          .order('granted_at', { ascending: false });
+          .eq('role_granted', 'Chief Examiner');
+        
+        // For Super Admin, include revoked with declined; for Chief Examiner, only active
+        if (!isSuperAdmin || (isChiefExaminer && !isSuperAdmin)) {
+          altQuery = altQuery.eq('is_active', true);
+        }
+        
+        const { data: altData, error: altError } = await altQuery.order('granted_at', { ascending: false });
 
         if (!altError && altData && altData.length > 0) {
           // Fetch user details separately
@@ -327,8 +391,16 @@ export default function PrivilegeElevationPanel({
         }
       }
 
-      // Combine all assignments
-      const allAssignments = [...assignmentsFromElevations, ...additionalAssignments];
+      // Filter assignments: include active ones and revoked ones with declined metadata
+      const filteredAssignments = assignmentsFromElevations.filter(assignment => {
+        if (assignment.is_active) return true;
+        // Include revoked assignments with declined metadata
+        const metadata = assignment.metadata || {};
+        return metadata.declined === true;
+      });
+
+      // Combine filtered assignments with additional ones
+      const allAssignments = [...filteredAssignments, ...additionalAssignments];
       
       console.log('Loaded assignments:', allAssignments.length, allAssignments);
       
@@ -459,13 +531,43 @@ export default function PrivilegeElevationPanel({
                     </div>
 
                     {/* Role Badge with colorful gradient */}
-                    <div className="mb-2.5 relative z-10">
+                    <div className="mb-2.5 relative z-10 flex items-center justify-between gap-2">
                       <span className="inline-flex items-center gap-1 rounded-full bg-gradient-to-r from-blue-500 to-cyan-500 text-white px-2.5 py-0.5 text-xs font-bold shadow-sm">
                         <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
                           <path fillRule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
                         </svg>
                         Chief Examiner
                       </span>
+                      {(() => {
+                        const status = consentStatuses.get(`${assignment.user_id}_Chief Examiner`) || 'pending';
+                        const statusConfig = {
+                          accepted: {
+                            label: 'Accepted',
+                            className: 'bg-emerald-100 text-emerald-700 border-emerald-300',
+                            icon: '✓'
+                          },
+                          pending: {
+                            label: 'Pending',
+                            className: 'bg-amber-100 text-amber-700 border-amber-300',
+                            icon: '🏆'
+                          },
+                          declined: {
+                            label: 'Declined',
+                            className: 'bg-rose-100 text-rose-700 border-rose-300',
+                            icon: '❌'
+                          }
+                        };
+                        const config = statusConfig[status];
+                        return (
+                          <span
+                            className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[0.65rem] font-bold border ${config.className} shadow-sm whitespace-nowrap`}
+                            title={`Consent status: ${config.label}`}
+                          >
+                            <span>{config.icon}</span>
+                            <span>{config.label}</span>
+                          </span>
+                        );
+                      })()}
                     </div>
 
                     {/* Assignment Details Section - Compact with colorful icons */}
