@@ -3,6 +3,27 @@ import type { WorkflowRole } from './roleConsentDocuments';
 
 export type { WorkflowRole };
 
+/** Workflow roles that are assigned via privilege_elevations and require consent. */
+const WORKFLOW_ELEVATION_ROLES: WorkflowRole[] = ['Team Lead', 'Vetter', 'Setter'];
+
+/** Returns workflow roles assigned to the user via privilege_elevations (active). Use this to show consent on first login after assignment, since the role may not be in user_profiles yet. */
+export async function getAssignedWorkflowRoles(userId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('privilege_elevations')
+    .select('role_granted')
+    .eq('user_id', userId)
+    .eq('is_active', true)
+    .in('role_granted', WORKFLOW_ELEVATION_ROLES);
+
+  if (error) {
+    console.error('Error fetching assigned workflow roles:', error);
+    return [];
+  }
+
+  const roles = (data || []).map((r: { role_granted: string }) => r.role_granted);
+  return [...new Set(roles)];
+}
+
 export async function getAcceptedRoles(userId: string): Promise<Set<WorkflowRole>> {
   const { data, error } = await supabase
     .from('role_consent_acceptances')
