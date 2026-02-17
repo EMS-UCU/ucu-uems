@@ -29,7 +29,7 @@ import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 import ConsentAgreementModal from './components/ConsentAgreementModal';
 import ComplianceDocumentsDropdown from './components/ComplianceDocumentsDropdown';
 import { supabase } from './lib/supabase';
-import { recordConsentAcceptance, getAssignedWorkflowRoles, getAcceptedRoles, getRolesNeedingConsent, getCurrentUserRoles, addRoleToUserProfile, type WorkflowRole } from './lib/roleConsentService';
+import { recordConsentAcceptance, getCurrentUserRoles, type WorkflowRole } from './lib/roleConsentService';
 import { elevateToChiefExaminer, appointRole, revokeRole } from './lib/privilegeElevation';
 import { uploadVettingRecording } from './lib/examServices/recordingService';
 import { syncVettingRecordingToSession } from './lib/examServices/vettingService';
@@ -1311,8 +1311,6 @@ function App() {
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [showConsentModal, setShowConsentModal] = useState(false);
   const [rolesNeedingConsent, setRolesNeedingConsent] = useState<WorkflowRole[]>([]);
-  /** Workflow roles the current user has accepted (consent). Used to gate Team Lead/Setter/Vetter UI so assigned-but-not-accepted users don't see those features. */
-  const [acceptedWorkflowRoles, setAcceptedWorkflowRoles] = useState<Set<WorkflowRole>>(new Set());
   const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
@@ -1954,6 +1952,141 @@ function App() {
     }
   }, [vettingSession]);
 
+  // ---- Multi-browser sync: moderation_state in Supabase ----
+  // Load vetting_session and moderation_schedule from Supabase when user context is ready
+  useEffect(() => {
+    const loadModerationState = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('moderation_state')
+          .select('key, value')
+          .in('key', ['vetting_session', 'moderation_schedule']);
+
+        if (error) {
+          console.warn('Moderation state load failed (table may not exist yet):', error.message);
+          return;
+        }
+        if (!data || data.length === 0) return;
+
+        for (const row of data) {
+          const value = row.value as Record<string, unknown>;
+          if (row.key === 'vetting_session' && value && typeof value === 'object') {
+            const vs = value as Record<string, unknown>;
+            const startedAt = vs.startedAt != null ? Number(vs.startedAt) : undefined;
+            const expiresAt = vs.expiresAt != null ? Number(vs.expiresAt) : undefined;
+            setVettingSession({
+              active: Boolean(vs.active),
+              startedAt,
+              durationMinutes: typeof vs.durationMinutes === 'number' ? vs.durationMinutes : undefined,
+              expiresAt,
+              safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
+              cameraOn: Boolean(vs.cameraOn),
+              screenshotBlocked: Boolean(vs.screenshotBlocked),
+              switchingLocked: Boolean(vs.switchingLocked),
+              lastClosedReason: vs.lastClosedReason as 'completed' | 'expired' | 'cancelled' | undefined,
+            });
+          }
+          if (row.key === 'moderation_schedule' && value && typeof value === 'object') {
+            const ms = value as Record<string, unknown>;
+            setModerationSchedule({
+              scheduled: Boolean(ms.scheduled),
+              startDateTime: typeof ms.startDateTime === 'string' ? ms.startDateTime : undefined,
+              endDateTime: typeof ms.endDateTime === 'string' ? ms.endDateTime : undefined,
+              scheduledStartTime: ms.scheduledStartTime != null ? Number(ms.scheduledStartTime) : undefined,
+              scheduledEndTime: ms.scheduledEndTime != null ? Number(ms.scheduledEndTime) : undefined,
+            });
+          }
+        }
+      } catch (err) {
+        console.error('Error loading moderation state:', err);
+      }
+    };
+    loadModerationState();
+  }, [authUserId]);
+
+  // Persist vettingSession to Supabase for multi-browser sync
+  useEffect(() => {
+    const payload = {
+      active: vettingSession.active,
+      startedAt: vettingSession.startedAt,
+      durationMinutes: vettingSession.durationMinutes,
+      expiresAt: vettingSession.expiresAt,
+      safeBrowserEnabled: vettingSession.safeBrowserEnabled,
+      cameraOn: vettingSession.cameraOn,
+      screenshotBlocked: vettingSession.screenshotBlocked,
+      switchingLocked: vettingSession.switchingLocked,
+      lastClosedReason: vettingSession.lastClosedReason,
+    };
+    supabase
+      .from('moderation_state')
+      .upsert({ key: 'vetting_session', value: payload, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+      .then(({ error }) => {
+        if (error) console.warn('Failed to persist vetting_session to Supabase:', error.message);
+      });
+  }, [vettingSession]);
+
+  // Persist moderationSchedule to Supabase for multi-browser sync
+  useEffect(() => {
+    const payload = {
+      scheduled: moderationSchedule.scheduled,
+      startDateTime: moderationSchedule.startDateTime,
+      endDateTime: moderationSchedule.endDateTime,
+      scheduledStartTime: moderationSchedule.scheduledStartTime,
+      scheduledEndTime: moderationSchedule.scheduledEndTime,
+    };
+    supabase
+      .from('moderation_state')
+      .upsert({ key: 'moderation_schedule', value: payload, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+      .then(({ error }) => {
+        if (error) console.warn('Failed to persist moderation_schedule to Supabase:', error.message);
+      });
+  }, [moderationSchedule]);
+
+  // Real-time subscription: sync vetting_session and moderation_schedule across all browsers/tabs
+  useEffect(() => {
+    const channel = supabase
+      .channel('moderation_state_changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'moderation_state' },
+        (payload) => {
+          const row = (payload as { new?: { key: string; value: Record<string, unknown> } }).new;
+          if (!row?.key) return;
+          if (row.key === 'vetting_session' && row.value && typeof row.value === 'object') {
+            const vs = row.value as Record<string, unknown>;
+            setVettingSession({
+              active: Boolean(vs.active),
+              startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
+              durationMinutes: typeof vs.durationMinutes === 'number' ? vs.durationMinutes : undefined,
+              expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
+              safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
+              cameraOn: Boolean(vs.cameraOn),
+              screenshotBlocked: Boolean(vs.screenshotBlocked),
+              switchingLocked: Boolean(vs.switchingLocked),
+              lastClosedReason: vs.lastClosedReason as 'completed' | 'expired' | 'cancelled' | undefined,
+            });
+          }
+          if (row.key === 'moderation_schedule' && row.value && typeof row.value === 'object') {
+            const ms = row.value as Record<string, unknown>;
+            setModerationSchedule({
+              scheduled: Boolean(ms.scheduled),
+              startDateTime: typeof ms.startDateTime === 'string' ? ms.startDateTime : undefined,
+              endDateTime: typeof ms.endDateTime === 'string' ? ms.endDateTime : undefined,
+              scheduledStartTime: ms.scheduledStartTime != null ? Number(ms.scheduledStartTime) : undefined,
+              scheduledEndTime: ms.scheduledEndTime != null ? Number(ms.scheduledEndTime) : undefined,
+            });
+          }
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') console.log('✅ Real-time moderation_state subscription active');
+        else if (status === 'CHANNEL_ERROR') console.warn('❌ moderation_state real-time error');
+      });
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
   useEffect(() => {
     try {
       if (customChecklist) {
@@ -2264,7 +2397,7 @@ function App() {
     return () => {
       supabase.removeChannel(examPapersChannel);
     };
-  }, []);
+  }, [authUserId]);
 
   // Refresh papers when window gains focus to catch any deletions that might have been missed
   useEffect(() => {
@@ -2529,40 +2662,34 @@ function App() {
     loadUsersFromSupabase();
   }, []);
 
-  // Check for role consent agreements - show for roles assigned via privilege_elevations that user hasn't accepted yet
+  // Check for role consent agreements - show on EVERY login for users with workflow roles
   const checkRoleConsent = useCallback(async () => {
     if (!authUserId) {
-      // Clear modal state and accepted roles when no user
+      // Clear modal state when no user
       setShowConsentModal(false);
       setRolesNeedingConsent([]);
-      setAcceptedWorkflowRoles(new Set());
       return;
     }
     
     try {
       console.log('🔍 Checking role consent for user:', authUserId);
-      // Use assigned roles from privilege_elevations (not user_profiles) so user sees consent on next login after assignment
-      const assignedRoles = await getAssignedWorkflowRoles(authUserId);
-      console.log('📋 Assigned workflow roles (pending consent):', assignedRoles);
+      const userRoles = await getCurrentUserRoles(authUserId);
+      console.log('📋 User roles:', userRoles);
       
-      // Get roles the user has already accepted
-      const acceptedRoles = await getAcceptedRoles(authUserId);
-      console.log('✅ Already accepted roles:', Array.from(acceptedRoles));
-      setAcceptedWorkflowRoles(acceptedRoles);
-
-      // Only show consent for roles that are assigned but not yet accepted
-      const rolesNeedingConsentList = getRolesNeedingConsent(assignedRoles, acceptedRoles);
-      console.log('📝 Roles needing consent:', rolesNeedingConsentList);
+      const workflowRoles: WorkflowRole[] = ['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'];
+      // Filter to only roles the user actually has
+      const userWorkflowRoles = workflowRoles.filter((r) => userRoles.includes(r));
+      console.log('✅ User workflow roles:', userWorkflowRoles);
       
-      if (rolesNeedingConsentList.length > 0) {
-        console.log('📝 Showing consent modal for roles:', rolesNeedingConsentList);
-        console.log('🔧 Setting rolesNeedingConsent:', rolesNeedingConsentList);
+      if (userWorkflowRoles.length > 0) {
+        console.log('📝 Showing consent modal for roles:', userWorkflowRoles);
+        console.log('🔧 Setting rolesNeedingConsent:', userWorkflowRoles);
         console.log('🔧 Setting showConsentModal to true');
-        setRolesNeedingConsent(rolesNeedingConsentList);
+        setRolesNeedingConsent(userWorkflowRoles);
         setShowConsentModal(true);
         console.log('✅ Modal state updated');
       } else {
-        console.log('ℹ️ All roles already accepted or no workflow roles found, hiding consent modal');
+        console.log('ℹ️ No workflow roles found, hiding consent modal');
         setShowConsentModal(false);
         setRolesNeedingConsent([]);
       }
@@ -2570,7 +2697,6 @@ function App() {
       console.error('❌ Error checking role consent:', err);
       setShowConsentModal(false);
       setRolesNeedingConsent([]);
-      setAcceptedWorkflowRoles(new Set());
     }
   }, [authUserId]);
 
@@ -2589,7 +2715,6 @@ function App() {
       // Clear modal and dropdown when logged out
       setShowConsentModal(false);
       setRolesNeedingConsent([]);
-      setAcceptedWorkflowRoles(new Set());
       setShowUserDropdown(false);
     }
   }, [authUserId, checkRoleConsent]);
@@ -3573,14 +3698,8 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTime, vettingSession.active, vettingSession.expiresAt]);
 
-  // For Team Lead / Setter / Vetter, require consent to be accepted before showing features (getAllUsers merges assigned roles, so we gate on accepted only)
-  const currentUserHasRole = (role: Role) => {
-    const workflowRoles: Role[] = ['Team Lead', 'Setter', 'Vetter'];
-    if (workflowRoles.includes(role)) {
-      return acceptedWorkflowRoles.has(role as WorkflowRole);
-    }
-    return currentUser?.roles.includes(role) ?? false;
-  };
+  const currentUserHasRole = (role: Role) =>
+    currentUser?.roles.includes(role) ?? false;
 
   const handleLogin = async (email: string, password: string) => {
     setAuthError(null);
@@ -4716,17 +4835,6 @@ function App() {
       alert('The Chief Examiner must start the session first. Please wait for the session to begin.');
       console.error('Vetter join blocked: Global session not active');
       return;
-    }
-
-    // Check if vetter has accepted consent before allowing them to start
-    if (isVetter && currentUser?.id) {
-      const acceptedRoles = await getAcceptedRoles(currentUser.id);
-      if (!acceptedRoles.has('Vetter')) {
-        console.log('📝 Vetter has not accepted consent, showing consent modal');
-        setRolesNeedingConsent(['Vetter']);
-        setShowConsentModal(true);
-        return; // Don't proceed until consent is accepted
-      }
     }
 
     // Vetter must enable camera BEFORE starting their session
@@ -8179,87 +8287,17 @@ function App() {
               console.error('❌ Failed to record acceptance:', result.error);
               throw new Error(result.error || 'Failed to record acceptance');
             }
-            // Grant the role to user_profiles only after consent (privileges are given now)
-            const addResult = await addRoleToUserProfile(authUserId, role);
-            if (!addResult.success) {
-              console.error('❌ Failed to add role to profile:', addResult.error);
-              throw new Error(addResult.error || 'Failed to activate role');
-            }
-            console.log('✅ Acceptance recorded and role activated for:', role);
-            // Refresh users so currentUser and CE view update
-            await refreshUsers();
-            // Re-check consent so acceptedWorkflowRoles state updates and UI shows new role; modal updates if more roles need consent
-            await checkRoleConsent();
+            console.log('✅ Acceptance recorded successfully for role:', role);
           }}
           onDecline={async () => {
-            // User declined terms - mark as declined and revoke the role(s)
-            console.log('❌ User declined consent, marking as declined and revoking roles:', rolesNeedingConsent);
-            
-            if (!authUserId || !currentUser) {
-              console.error('Cannot revoke roles: missing user info');
-              setShowConsentModal(false);
-              setRolesNeedingConsent([]);
-              return;
-            }
-
-            // Mark roles as declined in privilege_elevations metadata before revoking
-            const actor = currentUser.name || 'System';
-            for (const role of rolesNeedingConsent) {
-              try {
-                // Mark as declined in privilege_elevations metadata
-                const { error: updateError } = await supabase
-                  .from('privilege_elevations')
-                  .update({
-                    metadata: { declined: true, declined_at: new Date().toISOString() }
-                  })
-                  .eq('user_id', authUserId)
-                  .eq('role_granted', role)
-                  .eq('is_active', true);
-                
-                if (updateError) {
-                  console.error(`Error marking ${role} as declined:`, updateError);
-                } else {
-                  console.log(`✅ Marked ${role} as declined`);
-                }
-
-                // Then revoke the role
-                console.log(`🔄 Revoking ${role} role from ${currentUser.name} (${authUserId})`);
-                const result = await revokeRole(authUserId, role, actor, authUserId);
-                if (result.success) {
-                  console.log(`✅ Successfully revoked ${role} role`);
-                } else {
-                  console.error(`❌ Failed to revoke ${role} role:`, result.error);
-                }
-              } catch (error) {
-                console.error(`❌ Error processing declined ${role} role:`, error);
-              }
-            }
-
-            // Refresh users to update role assignments (this will update currentUser via useMemo)
-            await refreshUsers();
-
-            // Close modal and clear consent state immediately
+            // User declined terms - log them out
             setShowConsentModal(false);
             setRolesNeedingConsent([]);
-
-            // Re-check role consent to ensure modal doesn't show again
-            // This will see that roles are removed and won't show consent form
-            setTimeout(() => {
-              checkRoleConsent();
-            }, 500);
-
-            // Show notification to user
-            const notification: AppNotification = {
-              id: `declined-${Date.now()}`,
-              message: `You have declined the role assignment(s). The role(s) have been removed and you can continue using the system as a normal user.`,
-              timestamp: new Date().toISOString(),
-              read: false,
-              title: 'Role Declined',
-              type: 'info',
-            };
-            setNotifications((prev) => [notification, ...prev].slice(0, 20));
-            setActiveToast(notification);
-            setTimeout(() => setActiveToast((c) => (c?.id === notification.id ? null : c)), 5000);
+            // Sign out from Supabase
+            await supabase.auth.signOut();
+            // Clear local state
+            setAuthUserId(null);
+            setAuthError('You have declined the terms and conditions. Please contact your administrator if you wish to proceed.');
           }}
           onComplete={() => {
             setShowConsentModal(false);
@@ -11919,224 +11957,6 @@ function ChiefExaminerConsole({
     return operationalRoles.filter(role => user.roles.includes(role));
   };
 
-  // Track consent statuses: Map<userId_role, 'accepted' | 'pending' | 'declined'>
-  // CRITICAL: Defaults to empty map - getConsentStatus() will return 'pending' for any unknown status
-  const [consentStatuses, setConsentStatuses] = useState<Map<string, 'accepted' | 'pending' | 'declined'>>(new Map());
-  // Track when roles were just assigned to prevent race conditions
-  const [recentlyAssignedRoles, setRecentlyAssignedRoles] = useState<Map<string, number>>(new Map());
-
-  // Fetch consent statuses for all users with operational roles
-  // IMPORTANT: Default to "pending" - only show "accepted" if we can 100% confirm acceptance exists
-  // Check for "declined" status by looking at revoked privilege_elevations with declined metadata
-  // Also check for declined users who no longer have the role (revoked with declined metadata)
-  const fetchConsentStatuses = useCallback(async () => {
-    const operationalRoles: Role[] = ['Team Lead', 'Vetter', 'Setter'];
-    const assignedUsers = users.filter(user => 
-      user.baseRole === 'Lecturer' && 
-      user.roles.some(role => operationalRoles.includes(role))
-    );
-
-    const statusMap = new Map<string, 'accepted' | 'pending' | 'declined'>();
-    
-    // First, check all assigned users
-    for (const user of assignedUsers) {
-      for (const role of user.roles) {
-        if (operationalRoles.includes(role)) {
-          const key = `${user.id}_${role}`;
-          
-          // CRITICAL: Default to "pending" - only change if we can confirm acceptance or declined
-          let status: 'accepted' | 'pending' | 'declined' = 'pending';
-          
-          try {
-            // First check if role was declined (revoked with declined metadata)
-            const { data: revokedElevation } = await supabase
-              .from('privilege_elevations')
-              .select('metadata, revoked_at')
-              .eq('user_id', user.id)
-              .eq('role_granted', role)
-              .eq('is_active', false)
-              .not('revoked_at', 'is', null)
-              .order('revoked_at', { ascending: false })
-              .limit(1)
-              .maybeSingle();
-            
-            if (revokedElevation && revokedElevation.metadata && typeof revokedElevation.metadata === 'object') {
-              const metadata = revokedElevation.metadata as any;
-              if (metadata.declined === true) {
-                status = 'declined';
-                console.log(`❌ Consent declined for ${user.name} (${user.id}) - Role: ${role}`);
-                statusMap.set(key, status);
-                continue;
-              }
-            }
-            
-            // Check for acceptance - query directly to get better error handling
-            // CRITICAL: Only show "accepted" if we can 100% confirm a record exists
-            // Also check that the acceptance was created AFTER the role was assigned
-            try {
-              // First, get when the role was assigned (from privilege_elevations)
-              const { data: elevationData } = await supabase
-                .from('privilege_elevations')
-                .select('granted_at')
-                .eq('user_id', user.id)
-                .eq('role_granted', role)
-                .eq('is_active', true)
-                .order('granted_at', { ascending: false })
-                .limit(1)
-                .maybeSingle();
-              
-              const roleAssignedAt = elevationData?.granted_at;
-              
-              // Now check for acceptance record
-              const { data: acceptanceData, error: acceptanceError } = await supabase
-                .from('role_consent_acceptances')
-                .select('role, accepted_at')
-                .eq('user_id', user.id)
-                .eq('role', role)
-                .maybeSingle();
-              
-              if (acceptanceError) {
-                console.error(`❌ Error querying consent acceptance for ${user.name} (${user.id}) ${role}:`, acceptanceError);
-                // If RLS error, log it specifically
-                if (acceptanceError.code === '42501' || acceptanceError.message.includes('permission') || acceptanceError.message.includes('policy')) {
-                  console.error(`⚠️ RLS POLICY ISSUE: Chief Examiner may not have permission to read consent acceptances for other users. Run add_chief_examiner_consent_read_policy.sql`);
-                }
-                // Default to pending on error - better safe than wrong
-                status = 'pending';
-                console.log(`⏳ Status set to PENDING due to error for ${user.name} (${user.id}) - Role: ${role}`);
-              } else if (acceptanceData !== null && acceptanceData !== undefined && acceptanceData.role === role && acceptanceData.accepted_at) {
-                // Acceptance record exists - verify it aligns with current assignment where possible
-                const ACCEPTANCE_TOLERANCE_MS = 15000; // 15s: clock skew / same-flow ordering
-                if (roleAssignedAt && acceptanceData.accepted_at) {
-                  const assignedTime = new Date(roleAssignedAt).getTime();
-                  const acceptedTime = new Date(acceptanceData.accepted_at).getTime();
-                  // Show "accepted" if acceptance is at or after assignment, or within tolerance (same flow / clock skew)
-                  const isAfterOrSameFlow = acceptedTime >= assignedTime || (assignedTime - acceptedTime <= ACCEPTANCE_TOLERANCE_MS);
-                  if (isAfterOrSameFlow) {
-                    status = 'accepted';
-                    console.log(`✅ Consent ACCEPTED for ${user.name} (${user.id}) - Role: ${role} (accepted at: ${acceptanceData.accepted_at}, assigned at: ${roleAssignedAt})`);
-                  } else {
-                    // Old acceptance record (from before current assignment) - treat as pending
-                    status = 'pending';
-                    console.log(`⏳ Consent PENDING for ${user.name} (${user.id}) - Role: ${role} (old acceptance record found, assigned: ${roleAssignedAt}, accepted: ${acceptanceData.accepted_at})`);
-                  }
-                } else if (!roleAssignedAt) {
-                  // User is in assignedUsers with this role (active assignment). Acceptance record exists → show accepted.
-                  status = 'accepted';
-                  console.log(`✅ Consent ACCEPTED for ${user.name} (${user.id}) - Role: ${role} (acceptance on file; user has active role)`);
-                } else {
-                  // Valid acceptance
-                  status = 'accepted';
-                  console.log(`✅ Consent ACCEPTED for ${user.name} (${user.id}) - Role: ${role} (accepted at: ${acceptanceData.accepted_at})`);
-                }
-              } else {
-                // No acceptance record found (acceptanceData is null or incomplete)
-                status = 'pending';
-                console.log(`⏳ Consent PENDING for ${user.name} (${user.id}) - Role: ${role} (no acceptance record found)`);
-              }
-            } catch (queryError) {
-              console.error(`❌ Exception querying consent for ${user.name} (${user.id}) ${role}:`, queryError);
-              // On exception, default to pending
-              status = 'pending';
-              console.log(`⏳ Status set to PENDING due to exception for ${user.name} (${user.id}) - Role: ${role}`);
-            }
-          } catch (error) {
-            console.error(`❌ Error fetching consent for ${user.name} (${user.id}) ${role}:`, error);
-            // On ANY error, default to pending - better safe than wrong
-            status = 'pending';
-          }
-          
-          statusMap.set(key, status);
-        }
-      }
-    }
-    
-    // Also check for declined users who no longer have the role (revoked with declined metadata)
-    // BUT only add them if they're NOT in the current assignedUsers list (they were revoked)
-    // This ensures we show declined status for revoked users, but don't interfere with active users
-    try {
-      const assignedUserIds = new Set(assignedUsers.map(u => u.id));
-      
-      const { data: declinedElevations } = await supabase
-        .from('privilege_elevations')
-        .select('user_id, role_granted, metadata')
-        .in('role_granted', operationalRoles)
-        .eq('is_active', false)
-        .not('revoked_at', 'is', null);
-      
-      if (declinedElevations) {
-        for (const elevation of declinedElevations) {
-          // Only process if this user is NOT currently assigned this role
-          // (meaning they were revoked and declined)
-          const userStillHasRole = assignedUsers.some(
-            u => u.id === elevation.user_id && u.roles.includes(elevation.role_granted)
-          );
-          
-          if (!userStillHasRole) {
-            const metadata = elevation.metadata || {};
-            if (metadata.declined === true) {
-              const key = `${elevation.user_id}_${elevation.role_granted}`;
-              // Only set if not already set (don't override active assignments)
-              if (!statusMap.has(key)) {
-                statusMap.set(key, 'declined');
-                console.log(`❌ Found declined role for user ${elevation.user_id} - Role: ${elevation.role_granted} (user no longer has role)`);
-              }
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Error fetching declined roles:', error);
-    }
-    
-    console.log('📋 Final consent statuses:', Array.from(statusMap.entries()));
-    
-    // CRITICAL: Preserve existing "pending" statuses for newly assigned roles
-    // Don't override optimistic "pending" statuses that were just set (within last 10 seconds)
-    setConsentStatuses(prev => {
-      const merged = new Map(prev);
-      const now = Date.now();
-      const RECENT_ASSIGNMENT_WINDOW = 10000; // 10 seconds
-      
-      // Only update statuses that we've verified, but preserve pending if it was recently set
-      statusMap.forEach((newStatus, key) => {
-        const oldStatus = merged.get(key);
-        const assignmentTime = recentlyAssignedRoles.get(key);
-        const isRecentlyAssigned = assignmentTime && (now - assignmentTime) < RECENT_ASSIGNMENT_WINDOW;
-        
-        // If this role was just assigned (within 10 seconds) and we're trying to set it to "accepted",
-        // keep it as "pending" to prevent race conditions
-        if (isRecentlyAssigned && oldStatus === 'pending' && newStatus === 'accepted') {
-          // Keep pending - the user hasn't accepted yet (optimistic update was correct)
-          console.log(`⚠️ Preserving PENDING status for ${key} - role was just assigned ${Math.round((now - assignmentTime!) / 1000)}s ago`);
-          merged.set(key, 'pending');
-        } else {
-          // Update with new status (either not recently assigned, or status change is valid)
-          merged.set(key, newStatus);
-        }
-      });
-      return merged;
-    });
-  }, [users, recentlyAssignedRoles]);
-
-  useEffect(() => {
-    if (users.length > 0) {
-      fetchConsentStatuses();
-      // Refresh every 5 seconds to get real-time updates
-      const interval = setInterval(fetchConsentStatuses, 5000);
-      return () => clearInterval(interval);
-    }
-  }, [users, fetchConsentStatuses]);
-
-  // Helper to get consent status for a user/role combination
-  // ALWAYS defaults to "pending" if status is unknown
-  const getConsentStatus = (userId: string, role: Role): 'accepted' | 'pending' | 'declined' => {
-    const key = `${userId}_${role}`;
-    const status = consentStatuses.get(key);
-    // If status is not found in map, default to "pending" (role just assigned, no acceptance yet)
-    return (status || 'pending') as 'accepted' | 'pending' | 'declined';
-  };
-
   // Helper to get role icon/indicator
   const getRoleIndicator = (role: string): string => {
     switch (role) {
@@ -12187,53 +12007,12 @@ function ChiefExaminerConsole({
     });
   }, [users, currentUser, selectedCourseUnit]);
 
-  const handleAward = async (event: FormEvent<HTMLFormElement>) => {
+  const handleAward = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (awardUserId && awardRole) {
-      const key = `${awardUserId}_${awardRole}`;
-      const userIdForRefresh = awardUserId;
-      const roleForRefresh = awardRole;
-      
-      // CRITICAL: Immediately set status to "pending" for the newly assigned role
-      // This ensures the UI shows "pending" right away, before any database check
-      // Mark this as a "fresh assignment" to prevent race conditions
-      const assignmentTime = Date.now();
-      setConsentStatuses(prev => {
-        const updated = new Map(prev);
-        // Force to "pending" - role was just assigned, user hasn't accepted yet
-        updated.set(key, 'pending');
-        console.log(`🆕 NEW ROLE ASSIGNED - Setting status to PENDING: ${userIdForRefresh} - ${roleForRefresh}`);
-        return updated;
-      });
-      
-      // Track this as a recently assigned role (for 10 seconds) to prevent race conditions
-      setRecentlyAssignedRoles(prev => {
-        const updated = new Map(prev);
-        updated.set(key, assignmentTime);
-        return updated;
-      });
-      
-      // Clear the "recently assigned" flag after 10 seconds
-      setTimeout(() => {
-        setRecentlyAssignedRoles(prev => {
-          const updated = new Map(prev);
-          updated.delete(key);
-          return updated;
-        });
-      }, 10000);
-      
-      // Assign the role (this will delete old consent acceptance in the database)
-      await onAssignRole(userIdForRefresh, roleForRefresh);
+      onAssignRole(awardUserId, awardRole);
       setAwardUserId('');
       setAwardRole('Team Lead');
-      
-      // Refresh consent statuses after assignment completes
-      // Use a longer delay to ensure database updates are complete and old acceptance is deleted
-      // The "pending" status is already set optimistically above
-      setTimeout(() => {
-        console.log(`🔄 Refreshing consent statuses after role assignment for ${userIdForRefresh} - ${roleForRefresh}...`);
-        fetchConsentStatuses();
-      }, 5000);
     }
   };
 
@@ -12437,8 +12216,6 @@ function ChiefExaminerConsole({
             }
 
             // Group users by role
-            // CRITICAL: Only include users who CURRENTLY have the role assigned
-            // Don't filter based on status - show all assigned users regardless of consent status
             const roleGroups: Record<Role, User[]> = {
               'Team Lead': [],
               'Vetter': [],
@@ -12451,7 +12228,6 @@ function ChiefExaminerConsole({
             assignedUsers.forEach(user => {
               user.roles.forEach(role => {
                 if (operationalRoles.includes(role) && roleGroups[role]) {
-                  // Always add user if they have the role - status doesn't affect visibility
                   roleGroups[role].push(user);
                 }
               });
@@ -12544,43 +12320,11 @@ function ChiefExaminerConsole({
                                   </div>
                                 </div>
                               </div>
-                              <div className="flex flex-col items-end gap-1.5">
-                                <span
-                                  className={`inline-flex items-center rounded-lg px-2.5 py-1 text-xs font-bold border-2 ${roleStyles.active} shadow-sm whitespace-nowrap`}
-                                >
-                                  {role}
-                                </span>
-                                {(() => {
-                                  const status = getConsentStatus(user.id, role);
-                                  const statusConfig = {
-                                    accepted: {
-                                      label: 'Accepted',
-                                      className: 'bg-emerald-100 text-emerald-700 border-emerald-300',
-                                      icon: '✓'
-                                    },
-                                    pending: {
-                                      label: 'Pending',
-                                      className: 'bg-amber-100 text-amber-700 border-amber-300',
-                                      icon: '🏆'
-                                    },
-                                    declined: {
-                                      label: 'Declined',
-                                      className: 'bg-rose-100 text-rose-700 border-rose-300',
-                                      icon: '❌'
-                                    }
-                                  };
-                                  const config = statusConfig[status];
-                                  return (
-                                    <span
-                                      className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[0.65rem] font-bold border ${config.className} shadow-sm whitespace-nowrap`}
-                                      title={`Consent status: ${config.label}`}
-                                    >
-                                      <span>{config.icon}</span>
-                                      <span>{config.label}</span>
-                                    </span>
-                                  );
-                                })()}
-                              </div>
+                              <span
+                                className={`inline-flex items-center rounded-lg px-2.5 py-1 text-xs font-bold border-2 ${roleStyles.active} shadow-sm whitespace-nowrap`}
+                              >
+                                {role}
+                              </span>
                             </div>
 
                             {user.lecturerCategory || user.department || user.courseUnit ? (

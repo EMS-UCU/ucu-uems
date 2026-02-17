@@ -237,10 +237,7 @@ export async function authenticateUser(
   }
 }
 
-// Workflow roles that are assigned via privilege_elevations and require consent before being in user_profiles
-const WORKFLOW_ELEVATION_ROLES = ['Team Lead', 'Vetter', 'Setter'];
-
-// Get all users (for admin purposes) - using user_profiles, merged with assigned-but-pending roles from privilege_elevations
+// Get all users (for admin purposes) - using user_profiles
 export async function getAllUsers(): Promise<User[]> {
   try {
     // Get all user profiles
@@ -258,41 +255,20 @@ export async function getAllUsers(): Promise<User[]> {
       return [];
     }
 
-    // Fetch active privilege_elevations for workflow roles so CE sees "assigned (pending consent)" users
-    const { data: elevations } = await supabase
-      .from('privilege_elevations')
-      .select('user_id, role_granted')
-      .eq('is_active', true)
-      .in('role_granted', WORKFLOW_ELEVATION_ROLES);
-
-    const assignedByUser = new Map<string, string[]>();
-    for (const e of elevations || []) {
-      const uid = (e as any).user_id;
-      const role = (e as any).role_granted;
-      if (!assignedByUser.has(uid)) assignedByUser.set(uid, []);
-      const arr = assignedByUser.get(uid)!;
-      if (!arr.includes(role)) arr.push(role);
-    }
-
-    // Convert profiles to User format; merge in assigned roles so pending assignments show on cards
-    const users: User[] = profiles.map((profile: any) => {
-      const profileRoles = (profile.roles as any[]) || [];
-      const assigned = assignedByUser.get(profile.id) || [];
-      const mergedRoles = [...new Set([...profileRoles, ...assigned])];
-      return {
-        id: profile.id,
-        name: profile.name,
-        baseRole: profile.base_role as 'Admin' | 'Lecturer',
-        roles: mergedRoles,
-        password: '',
-        email: profile.email || '', // Email stored in profile
-        isSuperAdmin: profile.is_super_admin || false,
-        campus: profile.campus,
-        department: profile.department,
-        courseUnit: profile.course_unit || undefined,
-        lecturerCategory: profile.lecturer_category as 'Undergraduate' | 'Postgraduate' | undefined,
-      };
-    });
+    // Convert profiles to User format
+    const users: User[] = profiles.map((profile: any) => ({
+      id: profile.id,
+      name: profile.name,
+      baseRole: profile.base_role as 'Admin' | 'Lecturer',
+      roles: profile.roles as any[],
+      password: '',
+      email: profile.email || '', // Email stored in profile
+      isSuperAdmin: profile.is_super_admin || false,
+      campus: profile.campus,
+      department: profile.department,
+      courseUnit: profile.course_unit || undefined,
+      lecturerCategory: profile.lecturer_category as 'Undergraduate' | 'Postgraduate' | undefined,
+    }));
 
     return users;
   } catch (error: any) {
