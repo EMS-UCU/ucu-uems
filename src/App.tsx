@@ -2604,7 +2604,7 @@ function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // Load users from Supabase on mount
+  // Load users from Supabase on mount (same as before); also refetch when auth becomes available so roles persist after refresh
   useEffect(() => {
     const loadUsersFromSupabase = async () => {
       setIsLoadingUsers(true);
@@ -2612,14 +2612,12 @@ function App() {
         const supabaseUsers = await getAllUsers();
         if (supabaseUsers.length > 0) {
           setUsers(supabaseUsers);
-          // Also persist to localStorage as backup
           try {
             localStorage.setItem('ucu-moderation-users', JSON.stringify(supabaseUsers));
           } catch (error) {
             console.error('Error saving users to localStorage:', error);
           }
         } else {
-          // If no users from Supabase, try to load from localStorage as fallback
           const saved = localStorage.getItem('ucu-moderation-users');
           if (saved) {
             try {
@@ -2638,7 +2636,6 @@ function App() {
         }
       } catch (error) {
         console.error('Error loading users from Supabase:', error);
-        // Fallback to localStorage if Supabase fails
         const saved = localStorage.getItem('ucu-moderation-users');
         if (saved) {
           try {
@@ -2728,6 +2725,12 @@ function App() {
     }
   }, []);
 
+  // When auth becomes available (e.g. after session restore on refresh), refetch users from Supabase so assigned roles are up to date
+  useEffect(() => {
+    if (!authUserId) return;
+    refreshUsers();
+  }, [authUserId, refreshUsers]);
+
   // Refetch current user's profile when window gains focus so revoked users (e.g. ex-vetter) get updated roles and stop seeing vetting notifications
   useEffect(() => {
     if (!authUserId) return;
@@ -2736,6 +2739,34 @@ function App() {
     };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
+  }, [authUserId, refreshUsers]);
+
+  // Real-time subscription: when user_profiles (e.g. roles) are updated, refresh the users list so "Currently Assigned Roles" stays in sync
+  useEffect(() => {
+    if (!authUserId) return;
+    const channel = supabase
+      .channel('user_profiles_changes')
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'user_profiles' },
+        () => {
+          refreshUsers();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'user_profiles' },
+        () => {
+          refreshUsers();
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') console.log('✅ Real-time user_profiles subscription active');
+        else if (status === 'CHANNEL_ERROR') console.warn('❌ user_profiles real-time error');
+      });
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [authUserId, refreshUsers]);
 
   // Load persisted notifications for the signed-in user from Supabase with real-time subscription
