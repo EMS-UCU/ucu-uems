@@ -11979,9 +11979,9 @@ function ChiefExaminerConsole({
     return Array.from(new Set(units));
   }, [users]);
 
-  // Only show lecturers in the same category (Undergraduate/Postgraduate) as the Chief Examiner.
-  // Also filter by selected course unit (if chosen).
-  // If the Chief's category is not set, fall back to showing all lecturers for that course unit.
+  // Filter lecturers by role and course unit:
+  // - Team Lead: Main campus only AND must belong to the selected course unit
+  // - Vetter / Setter: only lecturers that belong to the selected course unit
   const eligibleUsers = useMemo(() => {
     const chiefCategory = currentUser?.lecturerCategory;
 
@@ -11991,21 +11991,27 @@ function ChiefExaminerConsole({
 
       if (!isLecturer) return false;
 
-      // If a course unit is chosen, user must belong to that course unit
-      // Use case-insensitive comparison and trim whitespace for robustness
-      if (selectedCourseUnit) {
+      if (awardRole === 'Team Lead') {
+        // Team Lead: Main campus AND selected course unit
+        const campus = (user.campus || '').trim().toLowerCase();
+        if (!campus.includes('main')) return false;
+        if (!selectedCourseUnit) return false;
         const selectedUnit = selectedCourseUnit.trim().toLowerCase();
         const userUnit = (user.courseUnit || '').trim().toLowerCase();
-        if (userUnit !== selectedUnit) {
-          return false;
-        }
+        if (userUnit !== selectedUnit) return false;
+      } else if (awardRole === 'Vetter' || awardRole === 'Setter') {
+        // Vetter/Setter: only lecturers for the selected course unit
+        if (!selectedCourseUnit) return false;
+        const selectedUnit = selectedCourseUnit.trim().toLowerCase();
+        const userUnit = (user.courseUnit || '').trim().toLowerCase();
+        if (userUnit !== selectedUnit) return false;
       }
+      // 'Lecturer' or other: no extra filter
 
       if (!chiefCategory) return true;
-
       return user.lecturerCategory === chiefCategory;
     });
-  }, [users, currentUser, selectedCourseUnit]);
+  }, [users, currentUser, selectedCourseUnit, awardRole]);
 
   const handleAward = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -12070,6 +12076,27 @@ function ChiefExaminerConsole({
                 <div className="grid gap-5 md:grid-cols-3">
                   <div className="space-y-2">
                     <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                      Role
+                    </label>
+                    <select
+                      value={awardRole}
+                      onChange={(event) => {
+                        setAwardRole(event.target.value as Role);
+                        setAwardUserId('');
+                        setSelectedCourseUnit('');
+                      }}
+                      className="w-full rounded-lg border-2 border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-900 shadow-sm transition-all focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 hover:border-indigo-300"
+                    >
+                      {awardableRoles.map((role) => (
+                        <option key={role} value={role}>
+                          {role}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
                       Course Unit
                     </label>
                     <select
@@ -12102,16 +12129,15 @@ function ChiefExaminerConsole({
                       value={awardUserId}
                       onChange={(event) => setAwardUserId(event.target.value)}
                       className="w-full rounded-lg border-2 border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-900 shadow-sm transition-all focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 hover:border-indigo-300 disabled:bg-slate-50 disabled:text-slate-400"
-                      disabled={!selectedCourseUnit}
+                      disabled={(awardRole === 'Team Lead' || awardRole === 'Vetter' || awardRole === 'Setter') ? !selectedCourseUnit : false}
                     >
                       <option value="">
-                        {selectedCourseUnit ? 'Choose a lecturer...' : 'Select a course unit first'}
+                        {(awardRole === 'Team Lead' || awardRole === 'Vetter' || awardRole === 'Setter')
+                          ? (selectedCourseUnit ? (awardRole === 'Team Lead' ? 'Choose a lecturer (Main campus, this course)...' : 'Choose a lecturer...') : 'Select a course unit first')
+                          : 'Choose a lecturer...'}
                       </option>
                       {eligibleUsers.map((user) => {
-                        const isNetworkingCourse =
-                          typeof selectedCourseUnit === 'string' &&
-                          selectedCourseUnit.toLowerCase().includes('network');
-                        
+                        const showCampus = awardRole === 'Team Lead' && user.campus;
                         const existingRoles = getExistingRoles(user);
                         const roleIndicators = existingRoles.map(role => getRoleIndicator(role)).join(' ');
                         const roleLabels = existingRoles.length > 0 
@@ -12119,7 +12145,7 @@ function ChiefExaminerConsole({
                           : '';
                         
                         let label = user.name;
-                        if (isNetworkingCourse && user.campus) {
+                        if (showCampus) {
                           label = `${user.name} • ${getCampusBadgeForLecturer(user.campus)}`;
                         }
                         if (existingRoles.length > 0) {
@@ -12134,28 +12160,11 @@ function ChiefExaminerConsole({
                       })}
                     </select>
                   </div>
-                  
-                  <div className="space-y-2">
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-                      Role
-                    </label>
-                    <select
-                      value={awardRole}
-                      onChange={(event) => setAwardRole(event.target.value as Role)}
-                      className="w-full rounded-lg border-2 border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-900 shadow-sm transition-all focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 hover:border-indigo-300"
-                    >
-                      {awardableRoles.map((role) => (
-                        <option key={role} value={role}>
-                          {role}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
                 </div>
                 
                 <button
                   type="submit"
-                  disabled={!selectedCourseUnit || !awardUserId}
+                  disabled={!awardUserId || ((awardRole === 'Team Lead' || awardRole === 'Vetter' || awardRole === 'Setter') && !selectedCourseUnit)}
                   className="w-full rounded-lg bg-gradient-to-r from-indigo-600 to-indigo-700 px-6 py-3.5 text-sm font-bold text-white shadow-lg transition-all hover:from-indigo-700 hover:to-indigo-800 hover:shadow-xl disabled:cursor-not-allowed disabled:from-slate-300 disabled:to-slate-400 disabled:shadow-none"
                 >
                   Assign Role
