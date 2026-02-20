@@ -29,7 +29,7 @@ import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 import ConsentAgreementModal from './components/ConsentAgreementModal';
 import ComplianceDocumentsDropdown from './components/ComplianceDocumentsDropdown';
 import { supabase } from './lib/supabase';
-import { recordConsentAcceptance, getCurrentUserRoles, type WorkflowRole } from './lib/roleConsentService';
+import { recordConsentAcceptance, getAssignedWorkflowRoles, getAcceptedRoles, getRolesNeedingConsent, type WorkflowRole } from './lib/roleConsentService';
 import { elevateToChiefExaminer, appointRole, revokeRole } from './lib/privilegeElevation';
 import { uploadVettingRecording } from './lib/examServices/recordingService';
 import { syncVettingRecordingToSession } from './lib/examServices/vettingService';
@@ -2662,34 +2662,26 @@ function App() {
     loadUsersFromSupabase();
   }, []);
 
-  // Check for role consent agreements - show on EVERY login for users with workflow roles
+  // Check for role consent - show for workflow roles assigned via privilege_elevations that user hasn't accepted yet (so first login after assignment shows the form)
   const checkRoleConsent = useCallback(async () => {
     if (!authUserId) {
-      // Clear modal state when no user
       setShowConsentModal(false);
       setRolesNeedingConsent([]);
       return;
     }
-    
     try {
       console.log('🔍 Checking role consent for user:', authUserId);
-      const userRoles = await getCurrentUserRoles(authUserId);
-      console.log('📋 User roles:', userRoles);
-      
-      const workflowRoles: WorkflowRole[] = ['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'];
-      // Filter to only roles the user actually has
-      const userWorkflowRoles = workflowRoles.filter((r) => userRoles.includes(r));
-      console.log('✅ User workflow roles:', userWorkflowRoles);
-      
-      if (userWorkflowRoles.length > 0) {
-        console.log('📝 Showing consent modal for roles:', userWorkflowRoles);
-        console.log('🔧 Setting rolesNeedingConsent:', userWorkflowRoles);
-        console.log('🔧 Setting showConsentModal to true');
-        setRolesNeedingConsent(userWorkflowRoles);
+      const assignedRoles = await getAssignedWorkflowRoles(authUserId);
+      console.log('📋 Assigned workflow roles (pending consent):', assignedRoles);
+      const acceptedRoles = await getAcceptedRoles(authUserId);
+      console.log('✅ Already accepted roles:', Array.from(acceptedRoles));
+      const rolesNeedingConsentList = getRolesNeedingConsent(assignedRoles, acceptedRoles);
+      console.log('📝 Roles needing consent:', rolesNeedingConsentList);
+      if (rolesNeedingConsentList.length > 0) {
+        console.log('📝 Showing consent modal for roles:', rolesNeedingConsentList);
+        setRolesNeedingConsent(rolesNeedingConsentList);
         setShowConsentModal(true);
-        console.log('✅ Modal state updated');
       } else {
-        console.log('ℹ️ No workflow roles found, hiding consent modal');
         setShowConsentModal(false);
         setRolesNeedingConsent([]);
       }
