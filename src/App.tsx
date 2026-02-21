@@ -1291,7 +1291,7 @@ function App() {
   const [lastModerationDownload, setLastModerationDownload] = useState<
     string | null
   >(null);
-  // Track if checklist has been forwarded to Team Lead
+  // Track if checklist has been forwarded to Team Lead (also set when we load forwarded_checklist from Supabase)
   const [checklistForwardedToTeamLead, setChecklistForwardedToTeamLead] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('ucu-checklist-forwarded');
@@ -1300,6 +1300,17 @@ function App() {
       return false;
     }
   });
+  // Forwarded checklist payload from Supabase (so Team Lead can download even when they don't have vettingSessionRecords)
+  type ForwardedChecklistPayload = {
+    forwarded: boolean;
+    forwardedAt?: string;
+    paperId?: string;
+    paperName?: string;
+    courseCode?: string;
+    courseUnit?: string;
+    checklistComments: Record<string, { comment: string; vetterName: string; timestamp: number; color: string }>;
+  } | null;
+  const [forwardedChecklistPayload, setForwardedChecklistPayload] = useState<ForwardedChecklistPayload>(null);
   const [workflow, setWorkflow] = useState<WorkflowState>(initialWorkflow);
   const [versionHistory, setVersionHistory] =
     useState<VersionHistoryEntry[]>(initialVersionHistory);
@@ -1996,6 +2007,13 @@ function App() {
               scheduledEndTime: ms.scheduledEndTime != null ? Number(ms.scheduledEndTime) : undefined,
             });
           }
+          if (row.key === 'forwarded_checklist' && value && typeof value === 'object') {
+            const fc = value as { forwarded?: boolean; checklistComments?: Record<string, unknown> };
+            if (fc && fc.forwarded && fc.checklistComments && typeof fc.checklistComments === 'object') {
+              setForwardedChecklistPayload(value as ForwardedChecklistPayload);
+              setChecklistForwardedToTeamLead(true);
+            }
+          }
         }
       } catch (err) {
         console.error('Error loading moderation state:', err);
@@ -2075,6 +2093,13 @@ function App() {
               scheduledStartTime: ms.scheduledStartTime != null ? Number(ms.scheduledStartTime) : undefined,
               scheduledEndTime: ms.scheduledEndTime != null ? Number(ms.scheduledEndTime) : undefined,
             });
+          }
+          if (row.key === 'forwarded_checklist' && row.value && typeof row.value === 'object') {
+            const fc = row.value as { forwarded?: boolean; checklistComments?: Record<string, unknown> };
+            if (fc?.forwarded && fc.checklistComments && typeof fc.checklistComments === 'object') {
+              setForwardedChecklistPayload(row.value as ForwardedChecklistPayload);
+              setChecklistForwardedToTeamLead(true);
+            }
           }
         }
       )
@@ -5879,8 +5904,29 @@ function App() {
         return false;
       }
 
-      // Mark checklist as forwarded and persist to localStorage
+      const vettedPaper = submittedPapers.find((p) => p.status === 'vetted' || p.status === 'approved');
+      const exportPayload: ForwardedChecklistPayload = {
+        forwarded: true,
+        forwardedAt: new Date().toISOString(),
+        paperId: vettedPaper?.id,
+        paperName: vettedPaper?.fileName,
+        courseCode: vettedPaper?.courseCode,
+        courseUnit: vettedPaper?.courseUnit,
+        checklistComments: Object.fromEntries(checklistComments.entries()),
+      };
+      setForwardedChecklistPayload(exportPayload);
       setChecklistForwardedToTeamLead(true);
+
+      supabase
+        .from('moderation_state')
+        .upsert(
+          { key: 'forwarded_checklist', value: exportPayload, updated_at: new Date().toISOString() },
+          { onConflict: 'key' }
+        )
+        .then(({ error }) => {
+          if (error) console.warn('Failed to persist forwarded checklist to Supabase:', error.message);
+        });
+
       try {
         localStorage.setItem('ucu-checklist-forwarded', 'true');
       } catch (error) {
@@ -5917,7 +5963,7 @@ function App() {
 
       return true;
     },
-    [checklistComments, customChecklistPdf, currentUser?.name, users]
+    [checklistComments, customChecklistPdf, currentUser?.name, users, submittedPapers]
   );
 
   const handleForwardChecklistDecision = (decision: 'approved' | 'rejected', notes: string) => {
@@ -7941,7 +7987,8 @@ function App() {
           setterSubmissions={setterSubmissions}
           workflowStage={workflow.stage}
           onSubmitPDF={handleTeamLeadSubmitPDF}
-          checklistForwarded={checklistForwardedToTeamLead}
+          checklistForwarded={checklistForwardedToTeamLead || !!forwardedChecklistPayload}
+          forwardedChecklistPayload={forwardedChecklistPayload}
           vettingSessionRecords={vettingSessionRecords}
           customChecklistPdf={customChecklistPdf}
           setterDeadlineScheduledTime={setterDeadlineScheduledTime}
@@ -13649,6 +13696,15 @@ interface TeamLeadPanelProps {
   workflowStage: WorkflowStage;
   onSubmitPDF: (file: File, courseUnit: string, courseCode: string, semester: string, year: string) => void;
   vettingSessionRecords?: VettingSessionRecord[];
+  forwardedChecklistPayload?: {
+    forwarded: boolean;
+    forwardedAt?: string;
+    paperId?: string;
+    paperName?: string;
+    courseCode?: string;
+    courseUnit?: string;
+    checklistComments: Record<string, { comment: string; vetterName: string; timestamp: number; color: string }>;
+  } | null;
   customChecklistPdf?: { url: string; name: string; isWordDoc?: boolean } | null;
   checklistForwarded?: boolean;
   setterDeadlineScheduledTime?: number | null;
@@ -13670,6 +13726,7 @@ function TeamLeadPanel({
   workflowStage: _workflowStage,
   onSubmitPDF,
   vettingSessionRecords = [],
+  forwardedChecklistPayload = null,
   customChecklistPdf,
   checklistForwarded = false,
   setterDeadlineScheduledTime,
@@ -13685,6 +13742,7 @@ function TeamLeadPanel({
   const [semester, setSemester] = useState('');
   const [year, setYear] = useState('');
   const [cacheVersion, setCacheVersion] = useState(0); // Version counter to force re-renders
+  const [showChecklistViewModal, setShowChecklistViewModal] = useState(false);
   
   // Cache for user names fetched from database (using object for React state updates)
   const [userNameCache, setUserNameCache] = useState<Record<string, string>>({});
@@ -13985,70 +14043,64 @@ function TeamLeadPanel({
     return paper.submittedBy || 'Unknown';
   }, [userNameCache]);
 
+  // Data for viewing the checklist (same source as download: forwarded payload or vetting record)
+  const checklistViewData = useMemo(() => {
+    const forwardedComments = forwardedChecklistPayload?.checklistComments;
+    if (forwardedComments && Object.keys(forwardedComments).length > 0) {
+      return {
+        commentsMap: new Map(Object.entries(forwardedComments)) as Map<string, { comment: string; vetterName: string; timestamp: number; color: string }>,
+        courseCode: forwardedChecklistPayload.courseCode ?? '',
+        courseUnit: forwardedChecklistPayload.courseUnit ?? '',
+        paperName: forwardedChecklistPayload.paperName ?? '',
+      };
+    }
+    const currentCourseCode = courseCode.toLowerCase().trim();
+    const currentCourseUnit = courseUnit.toLowerCase().trim();
+    const paperCourseCode = submittedPapers.find(p => p.courseCode)?.courseCode?.toLowerCase().trim();
+    const paperCourseUnit = submittedPapers.find(p => p.courseUnit)?.courseUnit?.toLowerCase().trim();
+    const searchCourseCode = currentCourseCode || paperCourseCode || '';
+    const searchCourseUnit = currentCourseUnit || paperCourseUnit || '';
+    let matchingRecord = vettingSessionRecords.find((record) => {
+      const recordCourseCode = (record.courseCode || '').toLowerCase().trim();
+      const recordCourseUnit = (record.courseUnit || '').toLowerCase().trim();
+      if (searchCourseCode && recordCourseCode && recordCourseCode === searchCourseCode) return true;
+      if (searchCourseUnit && recordCourseUnit && recordCourseUnit === searchCourseUnit) return true;
+      return false;
+    });
+    if (!matchingRecord && vettingSessionRecords.length > 0) matchingRecord = vettingSessionRecords[0];
+    if (!matchingRecord?.checklistComments?.size) return null;
+    return {
+      commentsMap: matchingRecord.checklistComments,
+      courseCode: matchingRecord.courseCode ?? '',
+      courseUnit: matchingRecord.courseUnit ?? '',
+      paperName: matchingRecord.paperName ?? '',
+    };
+  }, [forwardedChecklistPayload, vettingSessionRecords, courseCode, courseUnit, submittedPapers]);
+
   const handleDownloadModerationChecklist = () => {
     if (!checklistForwarded) {
       alert('The moderation checklist has not been forwarded by the Chief Examiner yet. Please wait for notification.');
       return;
     }
-    
-    // Find the most recent vetting session record that matches the current course
-    // Try to match by course code and course unit from submitted papers or form fields
-    const currentCourseCode = courseCode.toLowerCase().trim();
-    const currentCourseUnit = courseUnit.toLowerCase().trim();
-    
-    // Also check submitted papers for matching course info
-    const paperCourseCode = submittedPapers.find(p => p.courseCode)?.courseCode?.toLowerCase().trim();
-    const paperCourseUnit = submittedPapers.find(p => p.courseUnit)?.courseUnit?.toLowerCase().trim();
-    
-    const searchCourseCode = currentCourseCode || paperCourseCode || '';
-    const searchCourseUnit = currentCourseUnit || paperCourseUnit || '';
-    
-    // Find matching vetting session record - prioritize exact matches
-    let matchingRecord = vettingSessionRecords.find((record) => {
-      const recordCourseCode = (record.courseCode || '').toLowerCase().trim();
-      const recordCourseUnit = (record.courseUnit || '').toLowerCase().trim();
-      // Try exact match first
-      if (searchCourseCode && recordCourseCode && recordCourseCode === searchCourseCode) {
-        return true;
-      }
-      if (searchCourseUnit && recordCourseUnit && recordCourseUnit === searchCourseUnit) {
-        return true;
-      }
-      return false;
-    });
-
-    // If no exact match, try partial match or use most recent record
-    if (!matchingRecord && vettingSessionRecords.length > 0) {
-      matchingRecord = vettingSessionRecords[0]; // Use most recent
-    }
-
-    if (!matchingRecord || !matchingRecord.checklistComments || matchingRecord.checklistComments.size === 0) {
-      alert('No moderation checklist with comments is available yet. The checklist will be available after the vetting process is completed and the Chief Examiner has forwarded it.');
+    if (!checklistViewData || checklistViewData.commentsMap.size === 0) {
+      alert('No moderation checklist with comments is available yet. Refresh the page and try again, or wait for the Chief Examiner to forward it.');
       return;
     }
-
-    // Generate PDF with UCU cover page and checklist content
     const pdf = generateChecklistPDF({
-      comments: matchingRecord.checklistComments,
+      comments: checklistViewData.commentsMap,
       hasCustomChecklistPdf: Boolean(customChecklistPdf?.url),
-      hideVetterNames: true, // Hide vetter names when team lead downloads
-      courseCode: matchingRecord.courseCode,
-      courseUnit: matchingRecord.courseUnit,
-      paperName: matchingRecord.paperName,
+      hideVetterNames: true,
+      courseCode: checklistViewData.courseCode,
+      courseUnit: checklistViewData.courseUnit,
+      paperName: checklistViewData.paperName,
     });
-
     if (!pdf) {
       alert('Failed to generate PDF. Please try again.');
       return;
     }
-
-    // Generate filename with course code and date
-    const courseCodeForFilename = (matchingRecord.courseCode || 'checklist').replace(/\s+/g, '-');
+    const courseCodeForFilename = (checklistViewData.courseCode || 'checklist').replace(/\s+/g, '-');
     const dateStr = new Date().toISOString().split('T')[0];
-    const filename = `moderation-checklist-${courseCodeForFilename}-${dateStr}.pdf`;
-    
-    // Save PDF
-    pdf.save(filename);
+    pdf.save(`moderation-checklist-${courseCodeForFilename}-${dateStr}.pdf`);
     alert('Moderation checklist PDF downloaded successfully!');
   };
 
@@ -14326,34 +14378,89 @@ function TeamLeadPanel({
           {/* Divider */}
           <div className="border-t border-slate-200"></div>
 
-          {/* Download Moderation Checklist Button */}
+          {/* View / Download Moderation Checklist */}
           <div className="space-y-3">
             <div>
               <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">
-                Download Moderation Checklist
+                Moderation Checklist
               </label>
               <p className="text-xs text-slate-600 mb-3">
                 {checklistForwarded 
-                  ? 'Download the moderation checklist with comments and feedback from the vetting process.'
-                  : 'The moderation checklist will be available for download after the Chief Examiner forwards it to you. You will receive a notification when it\'s ready.'}
+                  ? 'View or download the moderation checklist with comments and feedback from the vetting process.'
+                  : 'The moderation checklist will be available after the Chief Examiner forwards it to you. You will receive a notification when it\'s ready.'}
               </p>
             </div>
-            <button
-              type="button"
-              onClick={handleDownloadModerationChecklist}
-              disabled={!checklistForwarded}
-              className={`w-full rounded-xl px-6 py-4 text-sm font-semibold transition ${
-                checklistForwarded
-                  ? 'bg-amber-400/90 text-amber-950 hover:bg-amber-300'
-                  : 'bg-slate-300 text-slate-500 cursor-not-allowed'
-              }`}
-              title={checklistForwarded ? 'Download moderation checklist' : 'Checklist not yet forwarded by Chief Examiner'}
-            >
-              {checklistForwarded ? 'Download Moderation Checklist' : 'Download (Awaiting Chief Examiner)'}
-            </button>
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => setShowChecklistViewModal(true)}
+                disabled={!checklistForwarded || !checklistViewData}
+                className={`flex-1 min-w-[140px] rounded-xl px-6 py-4 text-sm font-semibold transition ${
+                  checklistForwarded && checklistViewData
+                    ? 'bg-slate-700 text-white hover:bg-slate-600'
+                    : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                }`}
+                title={checklistForwarded && checklistViewData ? 'View moderation checklist' : 'Checklist not yet forwarded or no comments available'}
+              >
+                View Checklist
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadModerationChecklist}
+                disabled={!checklistForwarded}
+                className={`flex-1 min-w-[140px] rounded-xl px-6 py-4 text-sm font-semibold transition ${
+                  checklistForwarded
+                    ? 'bg-amber-400/90 text-amber-950 hover:bg-amber-300'
+                    : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                }`}
+                title={checklistForwarded ? 'Download moderation checklist' : 'Checklist not yet forwarded by Chief Examiner'}
+              >
+                {checklistForwarded ? 'Download Moderation Checklist' : 'Download (Awaiting Chief Examiner)'}
+              </button>
+            </div>
           </div>
         </div>
       </SectionCard>
+
+      {/* Moderation Checklist View Modal */}
+      {showChecklistViewModal && checklistViewData && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50" onClick={() => setShowChecklistViewModal(false)}>
+          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between flex-shrink-0">
+              <h3 className="text-lg font-semibold text-slate-900">Moderation Checklist</h3>
+              <button type="button" onClick={() => setShowChecklistViewModal(false)} className="text-slate-500 hover:text-slate-700 p-1 rounded">✕</button>
+            </div>
+            <div className="px-6 py-2 text-sm text-slate-600 border-b border-slate-100 flex-shrink-0">
+              {checklistViewData.paperName && <span className="font-medium">{checklistViewData.paperName}</span>}
+              {(checklistViewData.courseCode || checklistViewData.courseUnit) && (
+                <span className="text-slate-500 ml-2">
+                  {[checklistViewData.courseCode, checklistViewData.courseUnit].filter(Boolean).join(' • ')}
+                </span>
+              )}
+            </div>
+            <div className="overflow-y-auto flex-1 p-6 space-y-4">
+              {(customChecklistPdf ? pdfChecklistSectionConfigs : defaultChecklistSectionConfigs).map((section) => {
+                const sectionComment = checklistViewData.commentsMap.get(section.id);
+                if (!sectionComment?.comment) return null;
+                return (
+                  <div key={section.id} className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+                    <h4 className={`text-sm font-semibold ${section.headingColor} mb-2`}>{section.title}</h4>
+                    <p className="text-sm text-slate-700 whitespace-pre-wrap">{sectionComment.comment}</p>
+                    <p className="text-xs text-slate-500 mt-2">Added on {new Date(sectionComment.timestamp).toLocaleString()}</p>
+                  </div>
+                );
+              })}
+              {!(customChecklistPdf ? pdfChecklistSectionConfigs : defaultChecklistSectionConfigs).some(s => checklistViewData.commentsMap.get(s.id)?.comment) && (
+                <p className="text-sm text-slate-500">No section comments in this checklist.</p>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-slate-200 flex flex-wrap gap-3 flex-shrink-0">
+              <button type="button" onClick={handleDownloadModerationChecklist} className="rounded-xl px-5 py-2.5 text-sm font-semibold bg-amber-400/90 text-amber-950 hover:bg-amber-300">Download PDF</button>
+              <button type="button" onClick={() => setShowChecklistViewModal(false)} className="rounded-xl px-5 py-2.5 text-sm font-semibold bg-slate-200 text-slate-700 hover:bg-slate-300">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Setter Submissions Section */}
       {setterSubmissions.length > 0 && (
@@ -19376,7 +19483,7 @@ function VettingAndAnnotations({
       if (onChecklistCommentChange) {
         const colorToUse = selectedColor || '#2563EB';
         saveTimeoutRef.current = setTimeout(() => {
-          onChecklistCommentChange(commentKey, newValue.trim() || null, colorToUse);
+          onChecklistCommentChange(commentKey, newValue.trim() === '' ? null : newValue, colorToUse);
           if (!newValue.trim()) {
             onChecklistTypingChange?.(commentKey, false);
             // Clear draft when empty
@@ -19482,16 +19589,16 @@ function VettingAndAnnotations({
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       const value = e.target.value;
       setItemDraft(value);
-      // Auto-save if color is selected
-      if (value.trim() && selectedColor && onChecklistCommentChange) {
-        onChecklistCommentChange(commentKey, value.trim(), selectedColor);
+      // Auto-save if color is selected (preserve spaces in value)
+      if (selectedColor && onChecklistCommentChange) {
+        onChecklistCommentChange(commentKey, value.trim() === '' ? null : value, selectedColor);
       }
     };
 
-    // Save on blur
+    // Save on blur (preserve spaces)
     const handleBlur = () => {
-      if (itemDraft.trim() && selectedColor && onChecklistCommentChange) {
-        onChecklistCommentChange(commentKey, itemDraft.trim(), selectedColor);
+      if (selectedColor && onChecklistCommentChange) {
+        onChecklistCommentChange(commentKey, itemDraft.trim() === '' ? null : itemDraft, selectedColor);
       }
     };
 
@@ -20754,10 +20861,18 @@ function VettingAndAnnotations({
       );
     }
 
-    if (showVetterFocusedLayout) {
+    if (showVetterFocusedLayout && !vetterHasJoined) {
       return (
         <div className="rounded-2xl border-2 border-dashed border-blue-200 bg-white/80 px-4 py-6 text-center text-sm text-slate-600">
           Join the secure session to reveal the exam paper and moderation checklist.
+        </div>
+      );
+    }
+
+    if (showVetterFocusedLayout && vetterHasJoined && !selectedPaper) {
+      return (
+        <div className="rounded-2xl border-2 border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-600">
+          No paper is currently in vetting. The Chief Examiner will add a paper for moderation.
         </div>
       );
     }
@@ -21014,8 +21129,8 @@ function VettingAndAnnotations({
                         <button
                           type="button"
                           onClick={() => {
-                            if (commentText && onChecklistCommentChange) {
-                              onChecklistCommentChange(section.id, commentText.trim(), selectedColor);
+                            if (onChecklistCommentChange && commentText.trim()) {
+                              onChecklistCommentChange(section.id, commentText, selectedColor);
                             }
                           }}
                           disabled={!canEditSection || !commentText.trim()}
@@ -21058,7 +21173,8 @@ function VettingAndAnnotations({
                           value={commentEntry?.comment || ''}
                           onChange={(e) => {
                             if (onChecklistCommentChange) {
-                              onChecklistCommentChange(section.id, e.target.value.trim() || null, selectedColor);
+                              const v = e.target.value;
+                              onChecklistCommentChange(section.id, v.trim() === '' ? null : v, selectedColor);
                             }
                           }}
                           placeholder={section.placeholder}
