@@ -13,6 +13,22 @@ export interface RoleConsentAgreement {
   updated_at: string;
 }
 
+/** Normalize DB row to RoleConsentAgreement (Supabase may return snake_case or camelCase). */
+function normalizeAgreementRow(row: Record<string, unknown>): RoleConsentAgreement {
+  const r = row as Record<string, unknown> & { agreementSummary?: string; fullAgreement?: string; effectiveDate?: string; createdAt?: string; updatedAt?: string };
+  return {
+    id: String(r.id ?? ''),
+    role: (r.role ?? '') as WorkflowRole,
+    title: String(r.title ?? ''),
+    agreement_summary: String(r.agreement_summary ?? r.agreementSummary ?? ''),
+    full_agreement: String(r.full_agreement ?? r.fullAgreement ?? ''),
+    version: String(r.version ?? '1.0'),
+    effective_date: String(r.effective_date ?? r.effectiveDate ?? ''),
+    created_at: String(r.created_at ?? r.createdAt ?? ''),
+    updated_at: String(r.updated_at ?? r.updatedAt ?? ''),
+  };
+}
+
 /**
  * Get all role consent agreements from the database
  * Similar to how notifications are fetched
@@ -29,7 +45,7 @@ export async function getRoleConsentAgreements(): Promise<RoleConsentAgreement[]
       return [];
     }
 
-    return (data || []) as RoleConsentAgreement[];
+    return (data || []).map((row: Record<string, unknown>) => normalizeAgreementRow(row));
   } catch (error) {
     console.error('Error fetching role consent agreements:', error);
     return [];
@@ -49,14 +65,15 @@ export async function getRoleConsentAgreement(
       .eq('role', role)
       .single();
 
-    if (error) {
-      console.error(`Error fetching ${role} consent agreement:`, error);
+    if (error || !data) {
+      if (error) console.error(`Error fetching ${role} consent agreement:`, error);
       return null;
     }
 
-    return data as RoleConsentAgreement;
-  } catch (error) {
-    console.error(`Error fetching ${role} consent agreement:`, error);
+    const agreement = normalizeAgreementRow(data as Record<string, unknown>);
+    return agreement.role ? agreement : null;
+  } catch (err) {
+    console.error(`Error fetching ${role} consent agreement:`, err);
     return null;
   }
 }
@@ -79,8 +96,9 @@ export async function getRoleConsentAgreementsForRoles(
     }
 
     const agreementsMap = new Map<WorkflowRole, RoleConsentAgreement>();
-    (data || []).forEach((agreement) => {
-      agreementsMap.set(agreement.role as WorkflowRole, agreement as RoleConsentAgreement);
+    (data || []).forEach((row: Record<string, unknown>) => {
+      const agreement = normalizeAgreementRow(row);
+      if (agreement.role) agreementsMap.set(agreement.role, agreement);
     });
 
     return agreementsMap;

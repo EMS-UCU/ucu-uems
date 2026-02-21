@@ -2693,15 +2693,15 @@ function App() {
   useEffect(() => {
     if (authUserId) {
       console.log('🔄 authUserId changed, checking role consent...');
-      // Close user dropdown when user changes
       setShowUserDropdown(false);
-      // Small delay to ensure user state is fully loaded
-      const timer = setTimeout(() => {
-        checkRoleConsent();
-      }, 100);
-      return () => clearTimeout(timer);
+      const t1 = setTimeout(() => checkRoleConsent(), 100);
+      // Re-check after a short delay so we catch roles that load from user_profiles/privilege_elevations slightly later
+      const t2 = setTimeout(() => checkRoleConsent(), 1500);
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+      };
     } else {
-      // Clear modal and dropdown when logged out
       setShowConsentModal(false);
       setRolesNeedingConsent([]);
       setShowUserDropdown(false);
@@ -2713,12 +2713,25 @@ function App() {
     try {
       const supabaseUsers = await getAllUsers();
       if (supabaseUsers.length > 0) {
-        setUsers(supabaseUsers);
-        try {
-          localStorage.setItem('ucu-moderation-users', JSON.stringify(supabaseUsers));
-        } catch {
-          /* ignore */
-        }
+        setUsers((prev) => {
+          // When DB has same or more roles, use DB; when refetch has fewer (e.g. stale), keep local roles so newly assigned don't disappear
+          const merged = supabaseUsers.map((dbUser) => {
+            const prevUser = prev.find((p) => p.id === dbUser.id);
+            const localRoles = prevUser?.roles ?? [];
+            const dbRoles = dbUser.roles ?? [];
+            const roles =
+              dbRoles.length >= localRoles.length
+                ? dbRoles
+                : Array.from(new Set([...localRoles, ...dbRoles]));
+            return { ...dbUser, roles };
+          });
+          try {
+            localStorage.setItem('ucu-moderation-users', JSON.stringify(merged));
+          } catch {
+            /* ignore */
+          }
+          return merged;
+        });
       }
     } catch (error) {
       console.error('Error refreshing users:', error);
@@ -2750,14 +2763,15 @@ function App() {
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'user_profiles' },
         () => {
-          refreshUsers();
+          // Short delay so DB write is visible and we don't overwrite with stale data (e.g. right after we assign a role)
+          setTimeout(() => refreshUsers(), 400);
         }
       )
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'user_profiles' },
         () => {
-          refreshUsers();
+          setTimeout(() => refreshUsers(), 400);
         }
       )
       .subscribe((status) => {
@@ -12002,7 +12016,11 @@ function ChiefExaminerConsole({
     return Array.from(new Set(units));
   }, [users]);
 
+  // Roles that are mutually exclusive: one person can only have one of these
+  const OPERATIONAL_ROLES = ['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'];
+
   // Filter lecturers by role and course unit:
+  // - Exclude anyone who already has any operational role (one role per person)
   // - Team Lead: Main campus only AND must belong to the selected course unit
   // - Vetter / Setter: only lecturers that belong to the selected course unit
   const eligibleUsers = useMemo(() => {
@@ -12013,6 +12031,10 @@ function ChiefExaminerConsole({
         user.baseRole === 'Lecturer' || user.roles.includes('Lecturer');
 
       if (!isLecturer) return false;
+
+      // Do not show lecturers who already have any operational role
+      const hasOperationalRole = user.roles.some((r) => OPERATIONAL_ROLES.includes(r));
+      if (hasOperationalRole) return false;
 
       if (awardRole === 'Team Lead') {
         // Team Lead: Main campus AND selected course unit
@@ -16790,6 +16812,8 @@ function PaperTrackingPanel({
   submittedPapers,
   repositoryPapers,
 }: PaperTrackingPanelProps) {
+  const [hoverOrActiveStage, setHoverOrActiveStage] = useState<string | null>(null);
+
   // Create a Set of repository paper IDs for efficient lookup
   const repositoryPaperIds = useMemo(() => new Set(repositoryPapers.map(rp => rp.id)), [repositoryPapers]);
   
@@ -16834,11 +16858,56 @@ function PaperTrackingPanel({
     return true; // For now, show all events, but we could filter by paper ID if needed
   });
 
+  // Map each paper to one of the pipeline stages for per-paper tracking
+  type PipelineStageId = WorkflowStage | 'Printing';
+  const getPaperPipelineStage = (p: SubmittedPaper): PipelineStageId => {
+    if (p.status === 'approved') return 'Approved';
+    if (p.status === 'vetted') return 'Revision Complete';
+    if (p.status === 'in-vetting') return 'Vetting in Progress';
+    if (p.status === 'submitted' && p.submittedRole === 'Team Lead') return 'Compiled for Vetting';
+    if (p.status === 'submitted') return 'Submitted to Team Lead';
+    return 'Awaiting Setter';
+  };
+
+  // Build paper tags (course, name, semester/year) and stage for the tracker table
+  const papersWithStage = useMemo(() => realPapers.map(p => ({
+    paper: p,
+    stage: getPaperPipelineStage(p),
+    tag: [p.courseCode || p.courseUnit || '—', p.fileName || p.id].filter(Boolean).join(' · '),
+    meta: [p.semester, p.year].filter(Boolean).join(' '),
+  })), [realPapers]);
+
+  // Group papers by stage for "Papers by stage" view
+  const papersByStage = useMemo(() => {
+    const order: PipelineStageId[] = ['Awaiting Setter', 'Submitted to Team Lead', 'Compiled for Vetting', 'Vetting in Progress', 'Revision Complete', 'Approved', 'Printing'];
+    const map = new Map<PipelineStageId, typeof papersWithStage>();
+    order.forEach(s => map.set(s, []));
+    papersWithStage.forEach(({ paper, stage, tag, meta }) => {
+      const list = map.get(stage) ?? [];
+      list.push({ paper, stage, tag, meta });
+      map.set(stage, list);
+    });
+    return order.map(id => ({ stageId: id, papers: map.get(id) ?? [] })).filter(g => g.papers.length > 0);
+  }, [papersWithStage]);
+
+  // Lookup: stage id -> list of paper tags for node hover/click tooltips
+  const papersAtStageMap = useMemo(() => {
+    const order: PipelineStageId[] = ['Awaiting Setter', 'Submitted to Team Lead', 'Compiled for Vetting', 'Vetting in Progress', 'Revision Complete', 'Approved', 'Printing'];
+    const m = new Map<string, { tag: string; meta: string }[]>();
+    order.forEach(s => m.set(s, []));
+    papersWithStage.forEach(({ stage, tag, meta }) => {
+      const list = m.get(stage) ?? [];
+      list.push({ tag, meta });
+      m.set(stage, list);
+    });
+    return m;
+  }, [papersWithStage]);
+
   return (
     <SectionCard
       title="Track Paper Journey"
       kicker="From Setting to Printing"
-      description="Visual trace of where the current semester paper is in the moderation pipeline."
+      description="Visual trace of where each paper is in the moderation pipeline. See all papers and their current stage below."
     >
       {hasNoPapers ? (
         <div className="space-y-6">
@@ -16856,7 +16925,16 @@ function PaperTrackingPanel({
               Papers will appear here once they are submitted by Team Leads or Setters.
             </p>
           </div>
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="rounded-2xl border border-slate-100 bg-white p-4">
+              <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
+                Papers in Pipeline
+              </p>
+              <p className="mt-1 text-2xl font-bold text-slate-800">0</p>
+              <p className="mt-1 text-xs text-slate-500">
+                papers being tracked. Add papers to see tags and stages here.
+              </p>
+            </div>
             <div className="rounded-2xl border border-slate-100 bg-white p-4">
               <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
                 Approved and Ready
@@ -16895,30 +16973,138 @@ function PaperTrackingPanel({
             {stages.map((stage, index) => {
               const isCompleted = effectiveIndex > index;
               const isActive = effectiveIndex === index;
+              const papersAtNode = papersAtStageMap.get(stage.id) ?? [];
+              const count = papersAtNode.length;
+              const showTooltip = hoverOrActiveStage === stage.id;
               return (
-                <div key={stage.id} className="flex flex-col items-center text-center">
-                  <div
-                    className={`flex h-10 w-10 items-center justify-center rounded-full border-2 text-xs font-semibold transition-all ${
-                      isActive
-                        ? 'border-indigo-500 bg-indigo-500 text-white shadow-[0_0_18px_rgba(79,70,229,0.6)]'
-                        : isCompleted
-                        ? 'border-emerald-400 bg-emerald-50 text-emerald-700'
-                        : 'border-slate-200 bg-white text-slate-500'
-                    }`}
+                <div
+                  key={stage.id}
+                  className="flex flex-col items-center text-center relative"
+                  onMouseEnter={() => setHoverOrActiveStage(stage.id)}
+                  onMouseLeave={() => setHoverOrActiveStage(null)}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setHoverOrActiveStage(prev => prev === stage.id ? null : stage.id)}
+                    className="flex flex-col items-center text-center cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 rounded-full"
+                    aria-label={`${stage.id}: ${count} paper(s). ${count ? 'Click or hover to see list.' : 'No papers at this stage.'}`}
                   >
-                    {index + 1}
-                  </div>
-                  <p className="mt-2 text-[0.7rem] font-medium text-slate-700">
-                    {stage.id}
-                  </p>
-                  <p className="mt-1 text-[0.65rem] text-slate-500">{stage.label}</p>
+                    <div
+                      className={`flex h-10 w-10 items-center justify-center rounded-full border-2 text-xs font-semibold transition-all ${
+                        isActive
+                          ? 'border-indigo-500 bg-indigo-500 text-white shadow-[0_0_18px_rgba(79,70,229,0.6)]'
+                          : isCompleted
+                          ? 'border-emerald-400 bg-emerald-50 text-emerald-700'
+                          : 'border-slate-200 bg-white text-slate-500'
+                      } ${showTooltip ? 'ring-2 ring-indigo-300 ring-offset-2' : ''}`}
+                    >
+                      {index + 1}
+                    </div>
+                    <p className="mt-2 text-[0.7rem] font-medium text-slate-700">
+                      {stage.id}
+                    </p>
+                    <p className="mt-1 text-[0.65rem] text-slate-500">{stage.label}</p>
+                  </button>
+                  {showTooltip && (
+                    <div
+                      className="absolute left-1/2 -translate-x-1/2 top-full mt-2 z-20 w-64 rounded-xl border border-slate-200 bg-white p-3 shadow-lg"
+                      role="tooltip"
+                    >
+                      <p className="text-xs font-semibold text-slate-800">
+                        {count} paper{count !== 1 ? 's' : ''} at this stage
+                      </p>
+                      {count > 0 ? (
+                        <ul className="mt-2 space-y-1 max-h-40 overflow-y-auto text-left">
+                          {papersAtNode.map(({ tag }, i) => (
+                            <li key={i} className="text-[0.7rem] text-slate-600 truncate" title={tag}>
+                              {tag}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-1 text-[0.7rem] text-slate-500">No papers here yet.</p>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        {/* Papers in the pipeline: tags and current stage for each paper */}
+        {papersWithStage.length > 0 && (
+          <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+            <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
+              <h3 className="text-sm font-semibold text-slate-800">Papers in the pipeline</h3>
+              <p className="text-xs text-slate-500 mt-0.5">Each paper with its current stage. Use this to see where every paper is.</p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-100/80">
+                    <th className="px-4 py-2.5 font-semibold text-slate-700">Paper</th>
+                    <th className="px-4 py-2.5 font-semibold text-slate-700 hidden sm:table-cell">Semester / Year</th>
+                    <th className="px-4 py-2.5 font-semibold text-slate-700">Current stage</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {papersWithStage.map(({ paper, stage, tag, meta }) => (
+                    <tr key={paper.id} className="border-b border-slate-100 hover:bg-slate-50/80">
+                      <td className="px-4 py-2.5">
+                        <span className="font-medium text-slate-800">{tag}</span>
+                      </td>
+                      <td className="px-4 py-2.5 text-slate-500 hidden sm:table-cell">{meta || '—'}</td>
+                      <td className="px-4 py-2.5">
+                        <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                          stage === 'Approved' ? 'bg-indigo-100 text-indigo-800' :
+                          stage === 'Vetting in Progress' || stage === 'Revision Complete' ? 'bg-amber-100 text-amber-800' :
+                          stage === 'Compiled for Vetting' || stage === 'Submitted to Team Lead' ? 'bg-sky-100 text-sky-800' :
+                          'bg-slate-100 text-slate-700'
+                        }`}>
+                          {stage}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {/* Grouped by stage */}
+            {papersByStage.length > 0 && (
+              <div className="border-t border-slate-200 px-4 py-3 bg-slate-50/50">
+                <p className="text-xs font-semibold text-slate-600 mb-2">By stage</p>
+                <div className="flex flex-wrap gap-2">
+                  {papersByStage.map(({ stageId, papers }) => (
+                    <div key={stageId} className="rounded-lg border border-slate-200 bg-white px-3 py-2 min-w-0 max-w-full">
+                      <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-slate-500 truncate">{stageId}</p>
+                      <p className="mt-1 text-xs text-slate-700 font-medium">{papers.length} paper{papers.length !== 1 ? 's' : ''}</p>
+                      <ul className="mt-1 space-y-0.5">
+                        {papers.slice(0, 3).map(({ tag }) => (
+                          <li key={tag} className="text-[0.7rem] text-slate-600 truncate" title={tag}>{tag}</li>
+                        ))}
+                        {papers.length > 3 && (
+                          <li className="text-[0.65rem] text-slate-400">+{papers.length - 3} more</li>
+                        )}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="grid gap-4 sm:grid-cols-3">
+          <div className="rounded-2xl border border-slate-100 bg-white p-4">
+            <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
+              Papers in Pipeline
+            </p>
+            <p className="mt-1 text-2xl font-bold text-slate-800">{realPapers.length}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              papers being tracked in the moderation pipeline.
+            </p>
+          </div>
           <div className="rounded-2xl border border-slate-100 bg-white p-4">
             <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">
               Approved and Ready

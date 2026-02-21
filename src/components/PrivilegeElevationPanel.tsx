@@ -73,9 +73,13 @@ export default function PrivilegeElevationPanel({
     }
   }, [isSuperAdmin, isChiefExaminer]);
 
+  // One person can only hold one operational role (Chief Examiner, Team Lead, Vetter, Setter)
+  const OPERATIONAL_ROLES = ['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'];
+
   // Filter lecturers based on selected category, department, and faculty
   // Note: All lecturers currently belong to "Department of Computing and Technology"
   // So only show lecturers when that specific department is selected
+  // Exclude lecturers who already have any operational role (one role per person)
   const filteredLecturers = useMemo(() => {
     if (!category) {
       return [];
@@ -95,6 +99,11 @@ export default function PrivilegeElevationPanel({
     filtered = filtered.filter(lecturer => 
       lecturer.department === 'Department of Computing and Technology' || 
       lecturer.department === 'Computing and Technology'
+    );
+
+    // Exclude lecturers who already have any operational role (Chief Examiner, Team Lead, Vetter, Setter)
+    filtered = filtered.filter(lecturer =>
+      !(lecturer.roles || []).some((r: string) => OPERATIONAL_ROLES.includes(r))
     );
     
     return filtered;

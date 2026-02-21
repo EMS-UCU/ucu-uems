@@ -128,10 +128,10 @@ export default function ConsentAgreementModal({
     );
   }
 
-  if (!document || !currentRole) {
+  if (!effectiveDocument || !currentRole) {
     console.log('⚠️ ConsentAgreementModal: Missing document or role', { 
       currentRole, 
-      document: document ? 'exists' : 'missing',
+      document: effectiveDocument ? 'exists' : 'missing',
       agreementsSize: agreements.size,
       rolesToAccept 
     });
@@ -152,7 +152,7 @@ export default function ConsentAgreementModal({
             >
               <p className="text-red-600 font-semibold mb-4">{error}</p>
               <button
-                onClick={onDecline}
+                onClick={() => currentRole && onDecline(currentRole)}
                 className="rounded-xl bg-red-600 px-6 py-3 font-semibold text-white hover:bg-red-700 transition-colors"
               >
                 Close

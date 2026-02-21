@@ -3,6 +3,18 @@ import type { PrivilegeElevation } from './supabase';
 import { createNotification } from './examServices/notificationService';
 import { getSuperAdminUserIds } from './auth';
 
+/** One person can only hold one of these roles at a time (Chief Examiner, Team Lead, Vetter, Setter). */
+const OPERATIONAL_ROLES = ['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'] as const;
+
+function hasAnyOperationalRole(roles: string[]): boolean {
+  return roles.some((r) => OPERATIONAL_ROLES.includes(r as any));
+}
+
+function getExistingOperationalRole(roles: string[]): string | null {
+  const found = roles.find((r) => OPERATIONAL_ROLES.includes(r as any));
+  return found ?? null;
+}
+
 // Elevate a lecturer to Chief Examiner (Super Admin only)
 export async function elevateToChiefExaminer(
   lecturerId: string,
@@ -31,6 +43,13 @@ export async function elevateToChiefExaminer(
     const currentRoles = user.roles || [];
     if (currentRoles.includes('Chief Examiner')) {
       return { success: false, error: 'User is already a Chief Examiner' };
+    }
+    const existing = getExistingOperationalRole(currentRoles);
+    if (existing) {
+      return {
+        success: false,
+        error: `This person already has the ${existing} role. A user can only hold one operational role (Chief Examiner, Team Lead, Vetter, or Setter) at a time.`,
+      };
     }
 
     // Add Chief Examiner role
@@ -155,6 +174,13 @@ export async function appointRole(
     const currentRoles = user.roles || [];
     if (currentRoles.includes(role)) {
       return { success: false, error: `User is already a ${role}` };
+    }
+    const existing = getExistingOperationalRole(currentRoles);
+    if (existing) {
+      return {
+        success: false,
+        error: `This person already has the ${existing} role. A user can only hold one operational role (Chief Examiner, Team Lead, Vetter, or Setter) at a time.`,
+      };
     }
 
     // Add the role
