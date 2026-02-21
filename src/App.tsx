@@ -16813,6 +16813,18 @@ function PaperTrackingPanel({
   repositoryPapers,
 }: PaperTrackingPanelProps) {
   const [hoverOrActiveStage, setHoverOrActiveStage] = useState<string | null>(null);
+  const [selectedPaperId, setSelectedPaperId] = useState<string | null>(null);
+  const trackerSectionRef = useRef<HTMLDivElement>(null);
+
+  const selectPaperAndScroll = useCallback((paperId: string | null) => {
+    setSelectedPaperId(paperId);
+    if (paperId) {
+      setHoverOrActiveStage(null);
+      requestAnimationFrame(() => {
+        trackerSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }
+  }, []);
 
   // Create a Set of repository paper IDs for efficient lookup
   const repositoryPaperIds = useMemo(() => new Set(repositoryPapers.map(rp => rp.id)), [repositoryPapers]);
@@ -16838,13 +16850,8 @@ function PaperTrackingPanel({
     { id: 'Printing', label: 'Released for secure printing' },
   ];
 
-  // Only calculate index if we have an effective stage
-  const currentIndex = effectiveStage ? stages.findIndex((s) => s.id === effectiveStage) : -1;
-  const effectiveIndex =
-    !effectiveStage ? -1 :
-    currentIndex === -1 && effectiveStage === 'Vetted & Returned to Chief Examiner'
-      ? 4
-      : currentIndex;
+  // Only calculate index if we have an effective stage (used when no paper is selected)
+  const currentIndexWhenNoSelection = effectiveStage ? stages.findIndex((s) => s.id === effectiveStage) : -1;
 
   const totalApproved = realPapers.filter(
     (p) => p.status === 'approved'
@@ -16890,18 +16897,33 @@ function PaperTrackingPanel({
     return order.map(id => ({ stageId: id, papers: map.get(id) ?? [] })).filter(g => g.papers.length > 0);
   }, [papersWithStage]);
 
-  // Lookup: stage id -> list of paper tags for node hover/click tooltips
+  // Lookup: stage id -> list of paper tags + id for node hover/click tooltips (paperId for "view this paper" click)
   const papersAtStageMap = useMemo(() => {
     const order: PipelineStageId[] = ['Awaiting Setter', 'Submitted to Team Lead', 'Compiled for Vetting', 'Vetting in Progress', 'Revision Complete', 'Approved', 'Printing'];
-    const m = new Map<string, { tag: string; meta: string }[]>();
+    const m = new Map<string, { tag: string; meta: string; paperId: string }[]>();
     order.forEach(s => m.set(s, []));
-    papersWithStage.forEach(({ stage, tag, meta }) => {
+    papersWithStage.forEach(({ paper, stage, tag, meta }) => {
       const list = m.get(stage) ?? [];
-      list.push({ tag, meta });
+      list.push({ tag, meta, paperId: paper.id });
       m.set(stage, list);
     });
     return m;
   }, [papersWithStage]);
+
+  // Selected paper: when user clicks a paper, we show its stage on the tracker
+  const selectedPaper = selectedPaperId ? realPapers.find(p => p.id === selectedPaperId) ?? null : null;
+  const selectedPaperStage = selectedPaper ? getPaperPipelineStage(selectedPaper) : null;
+  const selectedPaperTag = selectedPaper
+    ? [selectedPaper.courseCode || selectedPaper.courseUnit || '—', selectedPaper.fileName || selectedPaper.id].filter(Boolean).join(' · ')
+    : '';
+
+  // Progress bar index: when a paper is selected, show that paper's stage; otherwise show overall effective stage
+  const currentIndex = selectedPaperStage
+    ? stages.findIndex((s) => s.id === selectedPaperStage)
+    : currentIndexWhenNoSelection;
+  const effectiveIndex =
+    currentIndex >= 0 ? currentIndex :
+    effectiveStage === 'Vetted & Returned to Chief Examiner' ? 4 : currentIndex;
 
   return (
     <SectionCard
@@ -16955,16 +16977,46 @@ function PaperTrackingPanel({
             </div>
           </div>
         </div>
-      ) : effectiveStage ? (
+      ) : (
       <div className="space-y-6">
-        <div className="rounded-2xl border border-blue-100 bg-gradient-to-r from-blue-50 via-indigo-50 to-sky-50 p-4">
-          <p className="text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">
-            Current Position
-          </p>
-          <p className="mt-1 text-sm text-slate-700">
-            The paper is currently in{' '}
-            <span className="font-semibold text-indigo-700">{effectiveStage}</span>
-          </p>
+        {/* Sticky tracker: stays visible when scrolling so you can click a paper below and still see the tracker */}
+        <div
+          ref={trackerSectionRef}
+          className="sticky top-0 z-10 -mx-1 px-1 pt-1 pb-2 bg-white/95 backdrop-blur-sm rounded-xl border-b border-slate-100"
+        >
+          <div className="rounded-2xl border border-blue-100 bg-gradient-to-r from-blue-50 via-indigo-50 to-sky-50 p-4">
+            {selectedPaperId && selectedPaperTag && selectedPaperStage ? (
+            <>
+              <p className="text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">
+                Viewing this paper&apos;s stage
+              </p>
+              <p className="mt-1 text-sm text-slate-700">
+                <span className="font-medium text-slate-800">{selectedPaperTag}</span>
+                <span className="text-slate-500"> is at </span>
+                <span className="font-semibold text-indigo-700">{selectedPaperStage}</span>
+              </p>
+              <button
+                type="button"
+                onClick={() => setSelectedPaperId(null)}
+                className="mt-2 text-xs font-medium text-indigo-600 hover:text-indigo-800 underline"
+              >
+                Show all papers
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="text-xs font-semibold uppercase tracking-[0.25em] text-indigo-600">
+                Current Position
+              </p>
+              <p className="mt-1 text-sm text-slate-700">
+                {effectiveStage ? (
+                  <>The pipeline is at <span className="font-semibold text-indigo-700">{effectiveStage}</span>. Click a paper below to see its stage.</>
+                ) : (
+                  <>Select a paper below to see its stage on the tracker.</>
+                )}
+              </p>
+            </>
+          )}
         </div>
 
         <div className="relative">
@@ -17015,15 +17067,23 @@ function PaperTrackingPanel({
                       </p>
                       {count > 0 ? (
                         <ul className="mt-2 space-y-1 max-h-40 overflow-y-auto text-left">
-                          {papersAtNode.map(({ tag }, i) => (
-                            <li key={i} className="text-[0.7rem] text-slate-600 truncate" title={tag}>
-                              {tag}
+                          {papersAtNode.map(({ tag, paperId }, i) => (
+                            <li key={i}>
+                              <button
+                                type="button"
+                                onClick={() => selectPaperAndScroll(paperId)}
+                                className="w-full text-left text-[0.7rem] text-indigo-700 hover:text-indigo-900 hover:underline truncate block"
+                                title={`Show ${tag} on tracker`}
+                              >
+                                {tag}
+                              </button>
                             </li>
                           ))}
                         </ul>
                       ) : (
                         <p className="mt-1 text-[0.7rem] text-slate-500">No papers here yet.</p>
                       )}
+                      <p className="mt-2 text-[0.65rem] text-slate-400">Click a paper to show its stage on the tracker.</p>
                     </div>
                   )}
                 </div>
@@ -17031,13 +17091,14 @@ function PaperTrackingPanel({
             })}
           </div>
         </div>
+        </div>
 
         {/* Papers in the pipeline: tags and current stage for each paper */}
         {papersWithStage.length > 0 && (
           <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
             <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
               <h3 className="text-sm font-semibold text-slate-800">Papers in the pipeline</h3>
-              <p className="text-xs text-slate-500 mt-0.5">Each paper with its current stage. Use this to see where every paper is.</p>
+              <p className="text-xs text-slate-500 mt-0.5">Click a paper to see its stage on the tracker above.</p>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
@@ -17049,24 +17110,39 @@ function PaperTrackingPanel({
                   </tr>
                 </thead>
                 <tbody>
-                  {papersWithStage.map(({ paper, stage, tag, meta }) => (
-                    <tr key={paper.id} className="border-b border-slate-100 hover:bg-slate-50/80">
-                      <td className="px-4 py-2.5">
-                        <span className="font-medium text-slate-800">{tag}</span>
-                      </td>
-                      <td className="px-4 py-2.5 text-slate-500 hidden sm:table-cell">{meta || '—'}</td>
-                      <td className="px-4 py-2.5">
-                        <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                          stage === 'Approved' ? 'bg-indigo-100 text-indigo-800' :
-                          stage === 'Vetting in Progress' || stage === 'Revision Complete' ? 'bg-amber-100 text-amber-800' :
-                          stage === 'Compiled for Vetting' || stage === 'Submitted to Team Lead' ? 'bg-sky-100 text-sky-800' :
-                          'bg-slate-100 text-slate-700'
-                        }`}>
-                          {stage}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                  {papersWithStage.map(({ paper, stage, tag, meta }) => {
+                    const isSelected = selectedPaperId === paper.id;
+                    return (
+                      <tr
+                        key={paper.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => selectPaperAndScroll(selectedPaperId === paper.id ? null : paper.id)}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectPaperAndScroll(selectedPaperId === paper.id ? null : paper.id); } }}
+                        className={`border-b border-slate-100 cursor-pointer transition-colors ${
+                          isSelected ? 'bg-indigo-50 ring-1 ring-indigo-200' : 'hover:bg-slate-50/80'
+                        }`}
+                        aria-pressed={isSelected}
+                        aria-label={`${tag}, at ${stage}. Click to show this paper's stage on tracker.`}
+                      >
+                        <td className="px-4 py-2.5">
+                          <span className="font-medium text-slate-800">{tag}</span>
+                          {isSelected && <span className="ml-2 text-xs text-indigo-600">(viewing)</span>}
+                        </td>
+                        <td className="px-4 py-2.5 text-slate-500 hidden sm:table-cell">{meta || '—'}</td>
+                        <td className="px-4 py-2.5">
+                          <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                            stage === 'Approved' ? 'bg-indigo-100 text-indigo-800' :
+                            stage === 'Vetting in Progress' || stage === 'Revision Complete' ? 'bg-amber-100 text-amber-800' :
+                            stage === 'Compiled for Vetting' || stage === 'Submitted to Team Lead' ? 'bg-sky-100 text-sky-800' :
+                            'bg-slate-100 text-slate-700'
+                          }`}>
+                            {stage}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -17127,18 +17203,6 @@ function PaperTrackingPanel({
           </div>
         </div>
       </div>
-      ) : (
-        <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-slate-100 mb-4">
-            <svg className="h-8 w-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-          </div>
-          <p className="text-lg font-semibold text-slate-700 mb-2">No Active Workflow</p>
-          <p className="text-sm text-slate-500">
-            There are papers in the system, but no active workflow stage could be determined.
-          </p>
-        </div>
       )}
     </SectionCard>
   );
