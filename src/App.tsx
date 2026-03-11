@@ -1403,6 +1403,8 @@ function App() {
   const [activePanelId, setActivePanelId] = useState<string>('overview');
   const [moderationSchedule, setModerationSchedule] = useState<ModerationSchedule>(loadPersistedModerationSchedule());
   const [vettingSession, setVettingSession] = useState<VettingSessionState>(loadPersistedVettingSession());
+  // Guard: ignore incoming Supabase/real-time updates that would set session inactive for a short window after Chief starts (avoids race where our own upsert or stale read overwrites)
+  const vettingSessionJustStartedAtRef = useRef<number | null>(null);
   // Track which vetters have joined the session (enabled camera and started their individual session)
   const [joinedVetters, setJoinedVetters] = useState<Set<string>>(new Set());
   // Track restricted vetters (violated rules - cannot rejoin until reactivated by Chief Examiner)
@@ -1983,10 +1985,16 @@ function App() {
           const value = row.value as Record<string, unknown>;
           if (row.key === 'vetting_session' && value && typeof value === 'object') {
             const vs = value as Record<string, unknown>;
+            const incomingActive = Boolean(vs.active);
+            const justStartedAt = vettingSessionJustStartedAtRef.current;
+            if (!incomingActive && justStartedAt != null && Date.now() - justStartedAt < 4000) {
+              continue; // skip overwriting session we just started with stale inactive from DB
+            }
+            if (!incomingActive) vettingSessionJustStartedAtRef.current = null;
             const startedAt = vs.startedAt != null ? Number(vs.startedAt) : undefined;
             const expiresAt = vs.expiresAt != null ? Number(vs.expiresAt) : undefined;
             setVettingSession({
-              active: Boolean(vs.active),
+              active: incomingActive,
               startedAt,
               durationMinutes: typeof vs.durationMinutes === 'number' ? vs.durationMinutes : undefined,
               expiresAt,
@@ -2072,8 +2080,15 @@ function App() {
           if (!row?.key) return;
           if (row.key === 'vetting_session' && row.value && typeof row.value === 'object') {
             const vs = row.value as Record<string, unknown>;
+            const incomingActive = Boolean(vs.active);
+            // Avoid overwriting a session we just started with a stale inactive update (race with our own upsert or delayed event)
+            const justStartedAt = vettingSessionJustStartedAtRef.current;
+            if (!incomingActive && justStartedAt != null && Date.now() - justStartedAt < 4000) {
+              return;
+            }
+            if (!incomingActive) vettingSessionJustStartedAtRef.current = null;
             setVettingSession({
-              active: Boolean(vs.active),
+              active: incomingActive,
               startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
               durationMinutes: typeof vs.durationMinutes === 'number' ? vs.durationMinutes : undefined,
               expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
@@ -4773,8 +4788,28 @@ function App() {
       if (vettingSession.active) {
         alert('A vetting session is already active.');
         console.error('Start session blocked: Session already active');
-      return;
-    }
+        return;
+      }
+      // Require at least one paper in the vetting window (in-vetting or vetted)
+      const papersInVetting = submittedPapers.filter((p) => p.status === 'in-vetting' || p.status === 'vetted');
+      if (papersInVetting.length === 0) {
+        alert('Cannot start vetting session: No paper is in the vetting window. Please add a paper for vetting first.');
+        console.error('Start session blocked: No paper in vetting');
+        return;
+      }
+      // Require a moderation checklist (default, custom template, or uploaded PDF/Word)
+      const hasChecklistContent =
+        customChecklistPdf?.url ||
+        (activeChecklist &&
+          typeof activeChecklist === 'object' &&
+          Object.values(activeChecklist).some((v: unknown) => Array.isArray(v) && v.length > 0));
+      if (!hasChecklistContent) {
+        alert(
+          'Cannot start vetting session: No moderation checklist is available. Please add or upload a moderation checklist first.'
+        );
+        console.error('Start session blocked: No moderation checklist');
+        return;
+      }
 
     const duration = Math.max(DEFAULT_SESSION_MINUTES, minutes);
     const startedAt = Date.now();
@@ -4797,6 +4832,11 @@ function App() {
       screenshotBlocked: true,
       switchingLocked: true,
     });
+    // Prevent Supabase load/real-time from overwriting with stale inactive state for a short window
+    vettingSessionJustStartedAtRef.current = Date.now();
+    setTimeout(() => {
+      vettingSessionJustStartedAtRef.current = null;
+    }, 4000);
 
       // Clear all comments from previous vetting session to start fresh
       setChecklistComments(new Map());
@@ -8029,6 +8069,21 @@ function App() {
     });
   }
 
+  // Papers for vetting panel: in-vetting/vetted so Chief can always see comments and approve/reject after vetting. Dedupe by id.
+  const papersForVettingPanel = useMemo(() => {
+    const dedupeById = (list: SubmittedPaper[]) => [...new Map(list.map((p) => [p.id, p])).values()];
+    const inVettingOrVetted = submittedPapers.filter((p) => p.status === 'in-vetting' || p.status === 'vetted');
+    if (inVettingOrVetted.length > 0) return dedupeById(inVettingOrVetted);
+    const isVetterOnly = currentUserHasRole('Vetter') && !currentUserHasRole('Chief Examiner');
+    const isChief = currentUserHasRole('Chief Examiner');
+    // Chief Examiner: show pipeline papers (in-vetting, vetted, approved) so after vetting, paper/comments/approve-reject never disappear
+    const chiefPipeline = submittedPapers.filter((p) => p.status === 'in-vetting' || p.status === 'vetted' || p.status === 'approved');
+    if (isChief && chiefPipeline.length > 0) return dedupeById(chiefPipeline);
+    if (isChief && submittedPapers.length > 0) return dedupeById(submittedPapers);
+    if (isVetterOnly && vettingSession.active) return dedupeById(submittedPapers);
+    return dedupeById(inVettingOrVetted);
+  }, [submittedPapers, vettingSession.active, currentUserHasRole]);
+
   if (isAuthenticated && showVettingInterfaces && !isPureLecturer) {
     roleSpecificPanels.push({
       id: 'vetting-suite',
@@ -8048,7 +8103,7 @@ function App() {
           onStartVetting={handleStartVetting}
           onCompleteVetting={handleCompleteVetting}
           onAddAnnotation={handleAddAnnotation}
-          submittedPapers={submittedPapers.filter(p => p.status === 'in-vetting' || p.status === 'vetted')}
+          submittedPapers={papersForVettingPanel}
           moderationSchedule={moderationSchedule}
           onScheduleModeration={handleScheduleModeration}
           moderationStartCountdown={moderationStartCountdown}
@@ -19306,7 +19361,14 @@ function VettingAndAnnotations({
   
   // Use submittedPapers from props
   const papersToDisplay = submittedPapers.length > 0 ? submittedPapers : [];
-  
+  const hasPaperInVetting = papersToDisplay.length > 0;
+  const hasModerationChecklist =
+    Boolean(customChecklistPdf?.url) ||
+    (checklist &&
+      typeof checklist === 'object' &&
+      Object.values(checklist).some((v: unknown) => Array.isArray(v) && v.length > 0));
+  const canStartSessionRequirements = hasPaperInVetting && hasModerationChecklist;
+
   // Default to 30 minutes from now for start
   const defaultStartDateTime = new Date(Date.now() + 30 * 60 * 1000).toISOString().slice(0, 16);
   
@@ -19689,13 +19751,6 @@ function VettingAndAnnotations({
     return resolvePaperUrl(selectedPaper.fileUrl);
   }, [selectedPaper?.fileUrl]);
 
-  // For vetters, get first two papers to display side by side
-  const vetterPapers = isVetter && papersToDisplay.length >= 2 
-    ? papersToDisplay.slice(0, 2) 
-    : isVetter && papersToDisplay.length === 1
-    ? [papersToDisplay[0]]
-    : [];
-  
   const getPaperUrl = (paper: SubmittedPaper) => {
     if (!paper?.fileUrl) return null;
     return resolvePaperUrl(paper.fileUrl);
@@ -19791,7 +19846,8 @@ function VettingAndAnnotations({
   // Chief Examiner can always see everything
   const canViewPaperAndChecklist = isChiefExaminer || (isVetter && vetterHasJoined);
   
-  // Vetters can start their session only when global session is active and they haven't joined yet
+  // Vetters can start their session when global session is active and they haven't joined yet.
+  // We do not require paper+checklist in the vetter's view — the Chief already verified them before starting.
   const canVetterStartSession = isVetter && vettingSession.active && !vetterHasJoined;
 
   const examWindow = (
@@ -19848,70 +19904,33 @@ function VettingAndAnnotations({
             )}
             {selectedPaper.fileUrl ? (
               <div className="space-y-3">
-                {isVetter && vetterPapers.length > 0 ? (
-                  <div className={`grid gap-3 ${vetterPapers.length === 2 ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                    {vetterPapers.map((paper, _index) => {
-                      const paperUrl = getPaperUrl(paper);
-                      if (!paperUrl) return null;
-                      return (
-                        <div key={paper.id} className="rounded-xl border-2 border-blue-300/70 bg-white/90 p-3 shadow-inner flex flex-col">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow">
-                                <span className="text-white text-sm">🪟</span>
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold text-slate-800">Secure In-Window Viewer</p>
-                                <p className="text-[0.6rem] text-slate-500">{paper.fileName}</p>
-                              </div>
-                            </div>
-                            <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.6rem] font-semibold text-emerald-700">
-                              Live Preview
-                            </span>
-                          </div>
-                          <div className="mt-3 aspect-[210/297] overflow-hidden rounded-lg border border-slate-200 bg-slate-900/5">
-                            <iframe
-                              key={paperUrl}
-                              src={`${paperUrl}#toolbar=0&navpanes=0`}
-                              title={`Secure viewer for ${paper.fileName}`}
-                              className="h-full w-full"
-                              loading="lazy"
-                            />
-                          </div>
-                          <p className="mt-2 text-[0.6rem] text-slate-500">Zoom, scroll, and annotate from here while Safe Browser keeps other tabs locked.</p>
+                {inlinePaperUrl && (
+                  <div className="rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md">
+                    <div className="mb-3 flex items-center justify-between border-b border-blue-100 pb-2">
+                      <div className="flex items-center gap-2">
+                        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow-sm">
+                          <span className="text-white text-xs">🪟</span>
                         </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  inlinePaperUrl && (
-                    <div className="rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md">
-                      <div className="mb-3 flex items-center justify-between border-b border-blue-100 pb-2">
-                        <div className="flex items-center gap-2">
-                          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow-sm">
-                            <span className="text-white text-xs">🪟</span>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-800">Secure In-Window Viewer</p>
-                            <p className="text-[0.65rem] text-slate-600">Document stays inside the Safe Browser</p>
-                          </div>
+                        <div>
+                          <p className="text-xs font-bold text-slate-800">Secure In-Window Viewer</p>
+                          <p className="text-[0.65rem] text-slate-600">Document stays inside the Safe Browser</p>
                         </div>
-                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.65rem] font-semibold text-emerald-700">
-                          Live Preview
-                        </span>
                       </div>
-                      <div className="mt-3 aspect-[210/297] overflow-hidden rounded-lg border-2 border-slate-200 bg-slate-50 shadow-inner">
-                        <iframe
-                          key={inlinePaperUrl}
-                          src={`${inlinePaperUrl}#toolbar=0&navpanes=0`}
-                          title={`Secure viewer for ${selectedPaper.fileName}`}
-                          className="h-full w-full"
-                          loading="lazy"
-                        />
-                      </div>
-                      <p className="mt-2 text-[0.65rem] text-slate-500 text-center">Zoom, scroll, and annotate from here while Safe Browser keeps other tabs locked.</p>
+                      <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.65rem] font-semibold text-emerald-700">
+                        Live Preview
+                      </span>
                     </div>
-                  )
+                    <div className="mt-3 aspect-[210/297] overflow-hidden rounded-lg border-2 border-slate-200 bg-slate-50 shadow-inner">
+                      <iframe
+                        key={inlinePaperUrl}
+                        src={`${inlinePaperUrl}#toolbar=0&navpanes=0`}
+                        title={`Secure viewer for ${selectedPaper.fileName}`}
+                        className="h-full w-full"
+                        loading="lazy"
+                      />
+                    </div>
+                    <p className="mt-2 text-[0.65rem] text-slate-500 text-center">Zoom, scroll, and annotate from here while Safe Browser keeps other tabs locked.</p>
+                  </div>
                 )}
                 {isChiefExaminer && selectedPaper.status === 'vetted' && (
                   <div className="flex gap-2">
@@ -21377,7 +21396,15 @@ function VettingAndAnnotations({
                             <button
                               type="button"
                               onClick={() => onStartVetting(customDuration)}
-                              className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2 text-xs font-bold text-white shadow-md hover:shadow-lg hover:scale-[1.02] transition-all"
+                              disabled={!canStartSessionRequirements}
+                              title={
+                                !canStartSessionRequirements
+                                  ? !hasPaperInVetting
+                                    ? 'Add a paper to the vetting window first.'
+                                    : 'Add or upload a moderation checklist first.'
+                                  : undefined
+                              }
+                              className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 px-3 py-2 text-xs font-bold text-white shadow-md hover:shadow-lg hover:scale-[1.02] transition-all disabled:cursor-not-allowed disabled:opacity-60"
                             >
                               Start Session
                             </button>
