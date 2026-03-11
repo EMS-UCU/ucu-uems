@@ -20,8 +20,7 @@ export default function ComplianceDocumentsDropdown({
   const [loading, setLoading] = useState(false);
   const [viewingDoc, setViewingDoc] = useState<RoleDocumentInfo | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
-
-  if (userWorkflowRoles.length === 0) return null;
+  const hasWorkflowRoles = userWorkflowRoles.length > 0;
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -34,6 +33,7 @@ export default function ComplianceDocumentsDropdown({
   }, []);
 
   useEffect(() => {
+    if (!hasWorkflowRoles) return;
     if (open && documents.length === 0) {
       setLoading(true);
       getRoleConsentDocuments(userWorkflowRoles)
@@ -44,7 +44,9 @@ export default function ComplianceDocumentsDropdown({
         })
         .finally(() => setLoading(false));
     }
-  }, [open, userWorkflowRoles.join(','), documents.length]);
+  }, [open, hasWorkflowRoles, userWorkflowRoles.join(','), documents.length]);
+
+  if (!hasWorkflowRoles) return null;
 
   const handleView = (doc: RoleDocumentInfo) => {
     if (doc.url) {

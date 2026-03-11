@@ -15,6 +15,105 @@ function getExistingOperationalRole(roles: string[]): string | null {
   return found ?? null;
 }
 
+function isConstraintError(message?: string, constraint?: string): boolean {
+  if (!message || !constraint) return false;
+  return message.includes(constraint) || message.includes('foreign key constraint');
+}
+
+async function upsertPrivilegeElevationByUserId(
+  payload: Record<string, unknown>
+): Promise<{ success: boolean; error?: string }> {
+  if (typeof payload.user_id !== 'string') {
+    return { success: false, error: 'Missing user_id for upsert fallback' };
+  }
+
+  const userId = payload.user_id;
+  const updatePayload: Record<string, unknown> = {
+    elevated_by: typeof payload.elevated_by === 'string' ? payload.elevated_by : null,
+    role_granted: payload.role_granted,
+    is_active: true,
+    revoked_at: null,
+    metadata: payload.metadata && typeof payload.metadata === 'object' ? payload.metadata : null,
+  };
+
+  let { error: updateByIdError } = await supabase
+    .from('privilege_elevations')
+    .update(updatePayload)
+    .eq('id', userId);
+
+  if (!updateByIdError) return { success: true };
+  if (isConstraintError(updateByIdError.message, 'privilege_elevations_elevated_by_fkey')) {
+    ({ error: updateByIdError } = await supabase
+      .from('privilege_elevations')
+      .update({ ...updatePayload, elevated_by: null })
+      .eq('id', userId));
+    if (!updateByIdError) return { success: true };
+  }
+
+  let { error: updateByUserError } = await supabase
+    .from('privilege_elevations')
+    .update(updatePayload)
+    .eq('user_id', userId);
+
+  if (updateByUserError && isConstraintError(updateByUserError.message, 'privilege_elevations_elevated_by_fkey')) {
+    ({ error: updateByUserError } = await supabase
+      .from('privilege_elevations')
+      .update({ ...updatePayload, elevated_by: null })
+      .eq('user_id', userId));
+  }
+
+  if (!updateByUserError) return { success: true };
+
+  return { success: false, error: updateByUserError.message };
+}
+
+async function insertPrivilegeElevationWithFallback(
+  payload: Record<string, unknown>
+): Promise<{ success: boolean; error?: string }> {
+  let insertResult = await supabase.from('privilege_elevations').insert(payload);
+
+  if (!insertResult.error) return { success: true };
+
+  const initialMessage = insertResult.error.message || '';
+
+  // Existing fallback for elevated_by FK issues.
+  if (isConstraintError(initialMessage, 'privilege_elevations_elevated_by_fkey')) {
+    insertResult = await supabase
+      .from('privilege_elevations')
+      .insert({ ...payload, elevated_by: null });
+    if (!insertResult.error) return { success: true };
+  }
+
+  const nextMessage = insertResult.error?.message || initialMessage;
+
+  // Some DBs have id FK to user_profiles/auth.users. Retry with id=user_id.
+  if (
+    isConstraintError(nextMessage, 'privilege_elevations_id_fkey') &&
+    typeof payload.user_id === 'string'
+  ) {
+    insertResult = await supabase
+      .from('privilege_elevations')
+      .insert({ ...payload, id: payload.user_id });
+    if (!insertResult.error) return { success: true };
+
+    // Combine both fallbacks if both constraints are present.
+    if (isConstraintError(insertResult.error?.message || '', 'privilege_elevations_elevated_by_fkey')) {
+      insertResult = await supabase
+        .from('privilege_elevations')
+        .insert({ ...payload, id: payload.user_id, elevated_by: null });
+      if (!insertResult.error) return { success: true };
+    }
+  }
+
+  // Some deployments model privilege_elevations as one-row-per-user.
+  // If PK conflicts, reuse that row as the active assignment record.
+  if (isConstraintError(nextMessage, 'privilege_elevations_pkey')) {
+    return upsertPrivilegeElevationByUserId(payload);
+  }
+
+  return { success: false, error: insertResult.error?.message || 'Failed to insert privilege elevation' };
+}
+
 // Elevate a lecturer to Chief Examiner (Super Admin only)
 export async function elevateToChiefExaminer(
   lecturerId: string,
@@ -66,7 +165,7 @@ export async function elevateToChiefExaminer(
     }
 
     // Record privilege elevation with assignment details in metadata
-    let insertPayload: Record<string, unknown> = {
+    const insertPayload: Record<string, unknown> = {
       user_id: lecturerId,
       elevated_by: elevatedBy,
       role_granted: 'Chief Examiner',
@@ -81,26 +180,12 @@ export async function elevateToChiefExaminer(
           }
         : null,
     };
-    let { error: insertError } = await supabase
-      .from('privilege_elevations')
-      .insert(insertPayload);
-
-    // Fallback: if FK constraint on elevated_by fails, retry with elevated_by=null
-    const isElevatedByFkError =
-      insertError?.message?.includes('privilege_elevations_elevated_by_fkey') ||
-      insertError?.message?.includes('foreign key constraint');
-    if (insertError && isElevatedByFkError) {
-      const retry = await supabase.from('privilege_elevations').insert({
-        ...insertPayload,
-        elevated_by: null,
-      });
-      insertError = retry.error;
-    }
-
-    // If audit record still fails: role was already assigned (user_profiles update succeeded).
-    // Return success so UI shows correct feedback - run fix_privilege_elevations_elevated_by_fk.sql to fix the audit trail.
-    if (insertError) {
-      console.warn('Privilege elevation audit record failed (role was assigned):', insertError.message);
+    const insertAudit = await insertPrivilegeElevationWithFallback(insertPayload);
+    if (!insertAudit.success) {
+      console.warn(
+        'Privilege elevation audit record failed (role was assigned):',
+        insertAudit.error
+      );
     }
 
     // Create notification for the user about their new role
@@ -183,54 +268,67 @@ export async function appointRole(
       };
     }
 
-    // Add the role
-    const updatedRoles = [...currentRoles, role];
+    // Block duplicate pending assignment for the same role.
+    const { data: existingAssignments, error: existingAssignmentsError } = await supabase
+      .from('privilege_elevations')
+      .select('id, role_granted, is_active')
+      .eq('user_id', userId)
+      .eq('is_active', true)
+      .in('role_granted', OPERATIONAL_ROLES as unknown as string[]);
 
-    // Update user roles - using user_profiles instead of users
-    const { error: updateError } = await supabase
-      .from('user_profiles')
-      .update({ roles: updatedRoles })
-      .eq('id', userId);
+    if (existingAssignmentsError) {
+      return { success: false, error: existingAssignmentsError.message };
+    }
 
-    if (updateError) {
-      return { success: false, error: updateError.message };
+    if ((existingAssignments || []).some((entry: any) => entry.role_granted === role)) {
+      return { success: false, error: `A pending or active ${role} assignment already exists for this user.` };
+    }
+    const existingPendingOperational = (existingAssignments || []).find(
+      (entry: any) => entry.role_granted !== role
+    );
+    if (existingPendingOperational) {
+      return {
+        success: false,
+        error: `This person already has an active or pending ${existingPendingOperational.role_granted} assignment.`,
+      };
     }
 
     // Record privilege elevation (with FK fallback for elevated_by)
-    let insertResult = await supabase.from('privilege_elevations').insert({
+    const insertPayload: Record<string, unknown> = {
       user_id: userId,
       elevated_by: appointedBy,
       role_granted: role,
       is_active: true,
-    });
-    if (insertResult.error) {
-      const isElevatedByFk =
-        insertResult.error.message?.includes('privilege_elevations_elevated_by_fkey') ||
-        insertResult.error.message?.includes('foreign key constraint');
-      if (isElevatedByFk) {
-        insertResult = await supabase.from('privilege_elevations').insert({
-          user_id: userId,
-          elevated_by: null,
-          role_granted: role,
-          is_active: true,
-        });
-      }
-      if (insertResult.error) {
-        // Role was already assigned; audit record failed - continue with success
-        console.warn('Privilege elevation audit record failed (role was assigned):', insertResult.error.message);
-      }
+      metadata: {
+        consent_status: 'pending',
+        assigned_at: new Date().toISOString(),
+      },
+    };
+    const insertResult = await insertPrivilegeElevationWithFallback(insertPayload);
+    if (!insertResult.success) {
+      return { success: false, error: insertResult.error };
     }
 
-    // Create notification for the user about their new role
+    // Reset previous acceptance for this role so reassignment starts as pending.
+    const { error: resetConsentError } = await supabase
+      .from('role_consent_acceptances')
+      .delete()
+      .eq('user_id', userId)
+      .eq('role', role);
+    if (resetConsentError) {
+      console.warn('Could not reset previous role consent record:', resetConsentError.message);
+    }
+
+    // Create notification for the user about pending consent
     const roleMessages: Record<string, string> = {
-      'Setter': 'You have been assigned the Setter role. You can now submit exam drafts within the deadline window.',
-      'Vetter': 'You have been assigned the Vetter role. You can now join vetting sessions to review exam papers.',
-      'Team Lead': 'You have been assigned the Team Lead role. You can now compile and integrate exam drafts from setters.',
+      Setter: 'You have been selected for the Setter role. Please review and accept the consent form to activate this role.',
+      Vetter: 'You have been selected for the Vetter role. Please review and accept the consent form to activate this role.',
+      'Team Lead': 'You have been selected for the Team Lead role. Please review and accept the consent form to activate this role.',
     };
 
     await createNotification({
       user_id: userId,
-      title: 'Privilege Elevated',
+      title: 'Role Assignment Pending Consent',
       message: roleMessages[role] || `You have been assigned the ${role} role.`,
       type: 'warning',
     });
@@ -294,39 +392,44 @@ export async function revokeRole(
     const targetName = (user as any).name || 'User';
 
     const currentRoles = user.roles || [];
-    if (!currentRoles.includes(role)) {
-      return { success: false, error: `User is not a ${role}` };
-    }
+    const hadRoleInProfile = currentRoles.includes(role);
 
-    // Remove the role (but keep base role)
-    const updatedRoles = currentRoles.filter((r) => r !== role);
+    // Remove the role from profile only if it exists there.
+    if (hadRoleInProfile) {
+      const updatedRoles = currentRoles.filter((r) => r !== role);
+      const { error: updateError } = await supabase
+        .from('user_profiles')
+        .update({ roles: updatedRoles })
+        .eq('id', userId);
 
-    // Update user roles - using user_profiles instead of users
-    const { error: updateError } = await supabase
-      .from('user_profiles')
-      .update({ roles: updatedRoles })
-      .eq('id', userId);
-
-    if (updateError) {
-      return { success: false, error: updateError.message };
+      if (updateError) {
+        return { success: false, error: updateError.message };
+      }
     }
 
     // Mark privilege elevation as inactive
-    await supabase
+    const { error: deactivateError } = await supabase
       .from('privilege_elevations')
       .update({
         revoked_at: new Date().toISOString(),
         is_active: false,
+        metadata: { consent_status: 'declined', declined_at: new Date().toISOString() },
       })
       .eq('user_id', userId)
       .eq('role_granted', role)
       .eq('is_active', true);
 
+    if (deactivateError) {
+      return { success: false, error: deactivateError.message };
+    }
+
     // Notify the user that their role was revoked (same style as session expired / privilege elevated)
     await createNotification({
       user_id: userId,
       title: 'Privilege Revoked',
-      message: `Your ${role} role has been revoked.`,
+      message: hadRoleInProfile
+        ? `Your ${role} role has been revoked.`
+        : `Your pending ${role} assignment was cancelled.`,
       type: 'warning',
     });
 
