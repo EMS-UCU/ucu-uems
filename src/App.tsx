@@ -29,7 +29,13 @@ import PrivilegeElevationPanel from './components/PrivilegeElevationPanel';
 import ConsentAgreementModal from './components/ConsentAgreementModal';
 import ComplianceDocumentsDropdown from './components/ComplianceDocumentsDropdown';
 import { supabase } from './lib/supabase';
-import { recordConsentAcceptance, getAssignedWorkflowRoles, getAcceptedRoles, getRolesNeedingConsent, type WorkflowRole } from './lib/roleConsentService';
+import {
+  recordConsentAcceptance,
+  activateRoleAfterConsent,
+  declinePendingWorkflowRoles,
+  getAssignedWorkflowRoles,
+  type WorkflowRole,
+} from './lib/roleConsentService';
 import { elevateToChiefExaminer, appointRole, revokeRole } from './lib/privilegeElevation';
 import { uploadVettingRecording } from './lib/examServices/recordingService';
 import { syncVettingRecordingToSession } from './lib/examServices/vettingService';
@@ -613,6 +619,48 @@ const emptyVettingSession: VettingSessionState = {
   cameraOn: false,
   screenshotBlocked: false,
   switchingLocked: false,
+};
+
+const normalizeVettingSessionState = (
+  session: Partial<VettingSessionState> | null | undefined
+): VettingSessionState => {
+  if (!session) {
+    return emptyVettingSession;
+  }
+
+  const startedAt =
+    typeof session.startedAt === 'number' && Number.isFinite(session.startedAt)
+      ? session.startedAt
+      : undefined;
+  const expiresAt =
+    typeof session.expiresAt === 'number' && Number.isFinite(session.expiresAt)
+      ? session.expiresAt
+      : undefined;
+  const durationMinutes =
+    typeof session.durationMinutes === 'number' &&
+    Number.isFinite(session.durationMinutes)
+      ? session.durationMinutes
+      : undefined;
+
+  const hasLiveWindow = Boolean(expiresAt && expiresAt > Date.now());
+  if (!session.active || !hasLiveWindow) {
+    return {
+      ...emptyVettingSession,
+      lastClosedReason: session.active ? 'expired' : session.lastClosedReason,
+    };
+  }
+
+  return {
+    active: true,
+    startedAt,
+    durationMinutes: durationMinutes ?? DEFAULT_SESSION_MINUTES,
+    expiresAt,
+    safeBrowserEnabled: Boolean(session.safeBrowserEnabled),
+    cameraOn: Boolean(session.cameraOn),
+    screenshotBlocked: Boolean(session.screenshotBlocked),
+    switchingLocked: Boolean(session.switchingLocked),
+    lastClosedReason: session.lastClosedReason,
+  };
 };
 
 const DEMO_PAPER_ID = 'demo-networking';
@@ -1387,7 +1435,7 @@ function App() {
       if (parsed.expiresAt && typeof parsed.expiresAt === 'string') {
         parsed.expiresAt = new Date(parsed.expiresAt).getTime();
       }
-      return parsed;
+      return normalizeVettingSessionState(parsed);
     } catch (error) {
       console.error('Error loading persisted vetting session:', error);
       return emptyVettingSession;
@@ -1983,19 +2031,26 @@ function App() {
           const value = row.value as Record<string, unknown>;
           if (row.key === 'vetting_session' && value && typeof value === 'object') {
             const vs = value as Record<string, unknown>;
-            const startedAt = vs.startedAt != null ? Number(vs.startedAt) : undefined;
-            const expiresAt = vs.expiresAt != null ? Number(vs.expiresAt) : undefined;
-            setVettingSession({
-              active: Boolean(vs.active),
-              startedAt,
-              durationMinutes: typeof vs.durationMinutes === 'number' ? vs.durationMinutes : undefined,
-              expiresAt,
-              safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
-              cameraOn: Boolean(vs.cameraOn),
-              screenshotBlocked: Boolean(vs.screenshotBlocked),
-              switchingLocked: Boolean(vs.switchingLocked),
-              lastClosedReason: vs.lastClosedReason as 'completed' | 'expired' | 'cancelled' | undefined,
-            });
+            setVettingSession(
+              normalizeVettingSessionState({
+                active: Boolean(vs.active),
+                startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
+                durationMinutes:
+                  typeof vs.durationMinutes === 'number'
+                    ? vs.durationMinutes
+                    : undefined,
+                expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
+                safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
+                cameraOn: Boolean(vs.cameraOn),
+                screenshotBlocked: Boolean(vs.screenshotBlocked),
+                switchingLocked: Boolean(vs.switchingLocked),
+                lastClosedReason: vs.lastClosedReason as
+                  | 'completed'
+                  | 'expired'
+                  | 'cancelled'
+                  | undefined,
+              })
+            );
           }
           if (row.key === 'moderation_schedule' && value && typeof value === 'object') {
             const ms = value as Record<string, unknown>;
@@ -2072,17 +2127,26 @@ function App() {
           if (!row?.key) return;
           if (row.key === 'vetting_session' && row.value && typeof row.value === 'object') {
             const vs = row.value as Record<string, unknown>;
-            setVettingSession({
-              active: Boolean(vs.active),
-              startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
-              durationMinutes: typeof vs.durationMinutes === 'number' ? vs.durationMinutes : undefined,
-              expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
-              safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
-              cameraOn: Boolean(vs.cameraOn),
-              screenshotBlocked: Boolean(vs.screenshotBlocked),
-              switchingLocked: Boolean(vs.switchingLocked),
-              lastClosedReason: vs.lastClosedReason as 'completed' | 'expired' | 'cancelled' | undefined,
-            });
+            setVettingSession(
+              normalizeVettingSessionState({
+                active: Boolean(vs.active),
+                startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
+                durationMinutes:
+                  typeof vs.durationMinutes === 'number'
+                    ? vs.durationMinutes
+                    : undefined,
+                expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
+                safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
+                cameraOn: Boolean(vs.cameraOn),
+                screenshotBlocked: Boolean(vs.screenshotBlocked),
+                switchingLocked: Boolean(vs.switchingLocked),
+                lastClosedReason: vs.lastClosedReason as
+                  | 'completed'
+                  | 'expired'
+                  | 'cancelled'
+                  | undefined,
+              })
+            );
           }
           if (row.key === 'moderation_schedule' && row.value && typeof row.value === 'object') {
             const ms = row.value as Record<string, unknown>;
@@ -2693,11 +2757,7 @@ function App() {
     }
     try {
       console.log('🔍 Checking role consent for user:', authUserId);
-      const assignedRoles = await getAssignedWorkflowRoles(authUserId);
-      console.log('📋 Assigned workflow roles (pending consent):', assignedRoles);
-      const acceptedRoles = await getAcceptedRoles(authUserId);
-      console.log('✅ Already accepted roles:', Array.from(acceptedRoles));
-      const rolesNeedingConsentList = getRolesNeedingConsent(assignedRoles, acceptedRoles);
+      const rolesNeedingConsentList = await getAssignedWorkflowRoles(authUserId);
       console.log('📝 Roles needing consent:', rolesNeedingConsentList);
       if (rolesNeedingConsentList.length > 0) {
         console.log('📝 Showing consent modal for roles:', rolesNeedingConsentList);
@@ -2763,6 +2823,34 @@ function App() {
     }
   }, []);
 
+  // Show consent modal immediately when this logged-in user's role assignments change.
+  useEffect(() => {
+    if (!authUserId) return;
+
+    const channel = supabase
+      .channel(`privilege_elevations:${authUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'privilege_elevations',
+          filter: `user_id=eq.${authUserId}`,
+        },
+        () => {
+          setTimeout(() => {
+            void checkRoleConsent();
+            void refreshUsers();
+          }, 250);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [authUserId, checkRoleConsent, refreshUsers]);
+
   // When auth becomes available (e.g. after session restore on refresh), refetch users from Supabase so assigned roles are up to date
   useEffect(() => {
     if (!authUserId) return;
@@ -2807,6 +2895,48 @@ function App() {
       supabase.removeChannel(channel);
     };
   }, [authUserId, refreshUsers]);
+
+  const activateVetterSessionFromNotification = useCallback((notificationTimestamp?: string) => {
+    if (!currentUser?.roles) {
+      return;
+    }
+
+    const hasVetterRole = currentUser.roles.some(
+      (role) => String(role).toLowerCase() === 'vetter'
+    );
+    const hasChiefExaminerRole = currentUser.roles.some(
+      (role) => String(role).toLowerCase() === 'chief examiner'
+    );
+
+    // Prevent Chief Examiner dashboards from being auto-activated by vetter notifications.
+    if (!hasVetterRole || hasChiefExaminerRole) {
+      return;
+    }
+
+    const parsedStart = notificationTimestamp
+      ? new Date(notificationTimestamp).getTime()
+      : Date.now();
+    const startedAt = Number.isFinite(parsedStart) ? parsedStart : Date.now();
+    const durationMinutes = DEFAULT_SESSION_MINUTES;
+    const expiresAt = startedAt + durationMinutes * 60 * 1000;
+
+    // Ignore stale notifications from already-expired sessions.
+    if (Date.now() >= expiresAt) {
+      return;
+    }
+
+    setVettingSession((prev) => ({
+      ...prev,
+      active: true,
+      startedAt,
+      durationMinutes,
+      expiresAt,
+      safeBrowserEnabled: true,
+      cameraOn: true,
+      screenshotBlocked: true,
+      switchingLocked: true,
+    }));
+  }, [currentUser?.roles]);
 
   // Load persisted notifications for the signed-in user from Supabase with real-time subscription
   useEffect(() => {
@@ -2871,7 +3001,7 @@ function App() {
           // Enable "Start Session" for vetters when they have "Vetting Session Started" or "Vetter re-activated" in their list
           const isVetterUser = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
           if (isVetterUser && (mostRecent.title === 'Vetting Session Started' || mostRecent.title === 'Vetter re-activated')) {
-            setVettingSession((prev) => ({ ...prev, active: true }));
+            activateVetterSessionFromNotification(mostRecent.timestamp);
             // When vetter receives "Vetter re-activated", clear their local restriction so they see Start Session (not "Restricted Access")
             if (mostRecent.title === 'Vetter re-activated' && currentUser?.id) {
               setRestrictedVetters((prev) => {
@@ -2930,7 +3060,7 @@ function App() {
               // Show toast for new notification (so vetter sees "Vetting Session Started" / "Vetter re-activated" same as session-end)
               if (isVettingSessionNotif) {
                 shownVettingStartedToastIds.current.add(mapped.id);
-                setVettingSession((prev) => ({ ...prev, active: true }));
+                activateVetterSessionFromNotification(mapped.timestamp);
                 if (mapped.title === 'Vetter re-activated' && currentUser?.id) {
                   setRestrictedVetters((prev) => {
                     const next = new Set(prev);
@@ -3029,7 +3159,10 @@ function App() {
         const hasStarted = mapped.some((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
         const hasReActivated = mapped.some((n) => n.title === 'Vetter re-activated');
         if (hasStarted) {
-          setVettingSession((prev) => ({ ...prev, active: true }));
+          const latestStartSignal = mapped
+            .filter((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated')
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+          activateVetterSessionFromNotification(latestStartSignal?.timestamp);
           if (hasReActivated && currentUser?.id) {
             setRestrictedVetters((prev) => {
               const next = new Set(prev);
@@ -3070,7 +3203,10 @@ function App() {
         const hasStarted = mapped.some((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
         const hasReActivated = mapped.some((n) => n.title === 'Vetter re-activated');
         if (hasStarted) {
-          setVettingSession((prev) => ({ ...prev, active: true }));
+          const latestStartSignal = mapped
+            .filter((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated')
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+          activateVetterSessionFromNotification(latestStartSignal?.timestamp);
           if (hasReActivated && currentUser?.id) {
             setRestrictedVetters((prev) => {
               const next = new Set(prev);
@@ -3125,7 +3261,10 @@ function App() {
         const hasStarted = mapped.some((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
         const hasReActivated = mapped.some((n) => n.title === 'Vetter re-activated');
         if (hasStarted) {
-          setVettingSession((prev) => ({ ...prev, active: true }));
+          const latestStartSignal = mapped
+            .filter((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated')
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+          activateVetterSessionFromNotification(latestStartSignal?.timestamp);
           if (hasReActivated && currentUser?.id) {
             setRestrictedVetters((prev) => {
               const next = new Set(prev);
@@ -4078,31 +4217,12 @@ function App() {
     if (!currentUser) return;
 
     const actor = currentUser.name ?? 'Unknown';
-    let assigned = false;
-    let targetUser: User | undefined;
-
-    // Update local state first so UI feels instant
-    setUsers((prev) => {
-      const updated = prev.map((user) => {
-        if (user.id !== userId) return user;
-        targetUser = user;
-        if (user.roles.includes(role)) return user;
-        assigned = true;
-        return { ...user, roles: [...user.roles, role] };
-      });
-      try {
-        localStorage.setItem('ucu-moderation-users', JSON.stringify(updated));
-      } catch (error) {
-        console.error('Error saving users to localStorage:', error);
-      }
-      return updated;
-    });
-
-    if (!assigned || !targetUser) {
+    const targetUser = users.find((user) => user.id === userId);
+    if (!targetUser || targetUser.roles.includes(role)) {
       return;
     }
 
-    // Persist assignment to Supabase so it's saved in the DB
+    // Persist assignment as pending-consent. Role is activated only after user accepts.
     const dbResult =
       role === 'Team Lead' || role === 'Vetter' || role === 'Setter'
         ? await appointRole(targetUser.id, role, currentUser.id)
@@ -4110,22 +4230,6 @@ function App() {
 
     if (!dbResult.success) {
       console.error('Error saving role assignment to database:', dbResult.error);
-      // Roll back local state so UI matches DB and assignments don't get lost on refresh
-      const rollbackUserId = userId;
-      const rollbackRole = role;
-      setUsers((prev) => {
-        const reverted = prev.map((u) =>
-          u.id === rollbackUserId && u.roles.includes(rollbackRole)
-            ? { ...u, roles: u.roles.filter((r) => r !== rollbackRole) }
-            : u
-        );
-        try {
-          localStorage.setItem('ucu-moderation-users', JSON.stringify(reverted));
-        } catch (e) {
-          console.error('Error rolling back users to localStorage:', e);
-        }
-        return reverted;
-      });
       const errorNotification: AppNotification = {
         id: `err-${Date.now()}`,
         message: dbResult.error || 'Role could not be saved. Try again.',
@@ -4143,7 +4247,7 @@ function App() {
     // Sync from DB so refresh shows correct data and list stays consistent
     await refreshUsers();
 
-    const message = `${role} role assigned to ${targetUser.name} by ${actor}.`;
+    const message = `${role} role assigned to ${targetUser.name} by ${actor}. Awaiting consent acceptance before privileges activate.`;
 
     pushWorkflowEvent(message, actor);
 
@@ -4153,7 +4257,7 @@ function App() {
       message,
       timestamp: new Date().toISOString(),
       read: false,
-      title: 'Privilege Elevated',
+      title: 'Role Assignment Pending Consent',
       type: 'warning',
     };
 
@@ -4175,7 +4279,7 @@ function App() {
   const handleUnassignRole = async (userId: string, role: Role) => {
     const actor = currentUser?.name ?? 'Unknown';
     const target = users.find((user) => user.id === userId);
-    if (!target || !target.roles.includes(role)) return;
+    if (!target) return;
 
     // Persist revocation in DB and send notification to the target user (same style as session expired)
     const dbResult = await revokeRole(userId, role, actor, currentUser?.id);
@@ -4197,7 +4301,8 @@ function App() {
 
     setUsers((prev) => {
       const updated = prev.map((user) => {
-        if (user.id !== userId || !user.roles.includes(role)) return user;
+        if (user.id !== userId) return user;
+        if (!user.roles.includes(role)) return user;
         return { ...user, roles: user.roles.filter((r) => r !== role) };
       });
       try {
@@ -4726,7 +4831,10 @@ function App() {
       const hasStarted = mapped.some((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
       const hasReActivated = mapped.some((n) => n.title === 'Vetter re-activated');
       if (hasStarted) {
-        setVettingSession((prev) => ({ ...prev, active: true }));
+        const latestStartSignal = mapped
+          .filter((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated')
+          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+        activateVetterSessionFromNotification(latestStartSignal?.timestamp);
         if (hasReActivated && currentUser?.id) {
           setRestrictedVetters((prev) => {
             const next = new Set(prev);
@@ -6966,9 +7074,15 @@ function App() {
   const isTeamLead = currentUserHasRole('Team Lead');
   const isSetter = currentUserHasRole('Setter');
   const isVetter = currentUserHasRole('Vetter');
-  const isPureLecturer =
+  const hasLecturerAccess =
     isAuthenticated &&
-    currentUserHasRole('Lecturer') &&
+    Boolean(
+      currentUser &&
+        ((currentUser.baseRole as BaseRole) === 'Lecturer' ||
+          currentUserHasRole('Lecturer'))
+    );
+  const isPureLecturer =
+    hasLecturerAccess &&
     !isAdmin &&
     !currentUserHasRole('Chief Examiner') &&
     !currentUserHasRole('Team Lead') &&
@@ -7705,10 +7819,7 @@ function App() {
     : [];
 
   // Always show lecturer panels for any user with baseRole === 'Lecturer' or Lecturer role
-  const isLecturer = isAuthenticated && currentUser && (
-    (currentUser.baseRole as BaseRole) === 'Lecturer' || 
-    currentUserHasRole('Lecturer')
-  );
+  const isLecturer = hasLecturerAccess;
 
   const lecturerPanels: PanelConfig[] = isLecturer
     ? [
@@ -8366,14 +8477,22 @@ function App() {
           userName={currentUser?.name ?? 'User'}
           onAccept={async (role) => {
             console.log('✅ User accepting agreement for role:', role);
-            const result = await recordConsentAcceptance(authUserId, role);
-            if (!result.success) {
-              console.error('❌ Failed to record acceptance:', result.error);
-              throw new Error(result.error || 'Failed to record acceptance');
+            const activation = await activateRoleAfterConsent(authUserId, role);
+            if (!activation.success) {
+              console.error('❌ Failed to activate role after acceptance:', activation.error);
+              throw new Error(activation.error || 'Failed to activate role privileges');
             }
-            console.log('✅ Acceptance recorded successfully for role:', role);
+            const acceptance = await recordConsentAcceptance(authUserId, role);
+            if (!acceptance.success) {
+              console.error('❌ Failed to record acceptance:', acceptance.error);
+              throw new Error(acceptance.error || 'Failed to record acceptance');
+            }
+            await refreshUsers();
+            await checkRoleConsent();
+            console.log('✅ Acceptance recorded and privileges activated for role:', role);
           }}
           onDecline={async () => {
+            await declinePendingWorkflowRoles(authUserId, rolesNeedingConsent);
             // User declined terms - log them out
             setShowConsentModal(false);
             setRolesNeedingConsent([]);
@@ -11891,6 +12010,13 @@ interface ChiefExaminerConsoleProps {
   recordingEntries?: RecordingEntry[];
 }
 
+type OperationalRoleStatus = 'pending' | 'accepted';
+type OperationalAssignmentCard = {
+  userId: string;
+  role: Role;
+  status: OperationalRoleStatus;
+};
+
 interface CountdownPillProps {
   startTime: number;
   duration: { days: number; hours: number; minutes: number };
@@ -12022,6 +12148,7 @@ function ChiefExaminerConsole({
   });
   const [showTeamLeadDurationSettings, setShowTeamLeadDurationSettings] = useState(false);
   const [teamLeadDurationForm, setTeamLeadDurationForm] = useState(teamLeadDeadlineDuration);
+  const [operationalAssignments, setOperationalAssignments] = useState<OperationalAssignmentCard[]>([]);
 
   const awardableRoles: Role[] = ['Team Lead', 'Vetter', 'Setter', 'Lecturer'];
 
@@ -12061,6 +12188,74 @@ function ChiefExaminerConsole({
       .map((u) => u.courseUnit)
       .filter((u): u is string => !!u && u.trim().length > 0);
     return Array.from(new Set(units));
+  }, [users]);
+
+  const operationalRoles: Role[] = ['Team Lead', 'Vetter', 'Setter'];
+
+  useEffect(() => {
+    const loadOperationalAssignments = async () => {
+      try {
+        const { data: activeElevations, error: elevationsError } = await supabase
+          .from('privilege_elevations')
+          .select('user_id, role_granted, metadata')
+          .eq('is_active', true)
+          .in('role_granted', operationalRoles as string[]);
+
+        if (elevationsError) {
+          console.error('Error loading operational assignments:', elevationsError);
+          return;
+        }
+
+        const cardsMap = new Map<string, OperationalAssignmentCard>();
+
+        // Source 1: active elevations (includes pending assignments).
+        (activeElevations || []).forEach((row: any) => {
+          const role = row.role_granted as Role;
+          const userId = row.user_id as string;
+          if (!operationalRoles.includes(role)) return;
+          const key = `${userId}:${role}`;
+          const metadata = (row.metadata || {}) as Record<string, unknown>;
+          const consentStatus = typeof metadata.consent_status === 'string' ? metadata.consent_status : '';
+          const status: OperationalRoleStatus =
+            consentStatus === 'accepted' ? 'accepted' : 'pending';
+          cardsMap.set(key, { userId, role, status });
+        });
+
+        // Source 2: profile roles (ensures accepted assignments still show even if metadata is missing).
+        users.forEach((user) => {
+          if (user.baseRole !== 'Lecturer' && !user.roles.includes('Lecturer')) return;
+          operationalRoles.forEach((role) => {
+            if (!user.roles.includes(role)) return;
+            const key = `${user.id}:${role}`;
+            cardsMap.set(key, { userId: user.id, role, status: 'accepted' });
+          });
+        });
+
+        setOperationalAssignments(Array.from(cardsMap.values()));
+      } catch (error) {
+        console.error('Error building assignment cards:', error);
+      }
+    };
+
+    void loadOperationalAssignments();
+
+    const channel = supabase
+      .channel('chief-console-assignment-status')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'privilege_elevations' },
+        () => void loadOperationalAssignments()
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'user_profiles' },
+        () => void loadOperationalAssignments()
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [users]);
 
   // Roles that are mutually exclusive: one person can only have one of these
@@ -12296,13 +12491,7 @@ function ChiefExaminerConsole({
               </div>
           
           {(() => {
-            const operationalRoles: Role[] = ['Team Lead', 'Vetter', 'Setter'];
-            const assignedUsers = users.filter(user => 
-              user.baseRole === 'Lecturer' && 
-              user.roles.some(role => operationalRoles.includes(role))
-            );
-
-            if (assignedUsers.length === 0) {
+            if (operationalAssignments.length === 0) {
               return (
                 <div className="text-center py-12">
                   <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-slate-100 mb-4">
@@ -12316,8 +12505,8 @@ function ChiefExaminerConsole({
               );
             }
 
-            // Group users by role
-            const roleGroups: Record<Role, User[]> = {
+            // Group assignments by role
+            const roleGroups: Record<Role, OperationalAssignmentCard[]> = {
               'Team Lead': [],
               'Vetter': [],
               'Setter': [],
@@ -12326,19 +12515,17 @@ function ChiefExaminerConsole({
               'Admin': [],
             };
 
-            assignedUsers.forEach(user => {
-              user.roles.forEach(role => {
-                if (operationalRoles.includes(role) && roleGroups[role]) {
-                  roleGroups[role].push(user);
-                }
-              });
+            operationalAssignments.forEach((assignment) => {
+              if (roleGroups[assignment.role]) {
+                roleGroups[assignment.role].push(assignment);
+              }
             });
 
             return (
               <div className="space-y-6">
                 {operationalRoles.map(role => {
-                  const usersWithRole = roleGroups[role];
-                  if (usersWithRole.length === 0) return null;
+                  const assignmentsWithRole = roleGroups[role];
+                  if (assignmentsWithRole.length === 0) return null;
 
                   const getRoleStyles = (r: Role) => {
                     switch (r) {
@@ -12382,13 +12569,16 @@ function ChiefExaminerConsole({
                           {role}
                         </h4>
                         <span className={`px-3 py-1.5 rounded-lg text-xs font-bold border-2 ${roleStyles.badge} shadow-sm`}>
-                          {usersWithRole.length} {usersWithRole.length === 1 ? 'Person' : 'People'}
+                          {assignmentsWithRole.length} {assignmentsWithRole.length === 1 ? 'Person' : 'People'}
                         </span>
                       </div>
                       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                        {usersWithRole.map((user) => (
+                        {assignmentsWithRole.map((assignment) => {
+                          const user = users.find((u) => u.id === assignment.userId);
+                          if (!user) return null;
+                          return (
                           <div
-                            key={user.id}
+                            key={`${assignment.userId}-${assignment.role}`}
                             className="group relative overflow-hidden rounded-xl border-2 border-slate-200 bg-white p-4 shadow-sm transition-all hover:border-slate-300 hover:shadow-md"
                           >
                             <div className="flex items-start justify-between gap-3 mb-3">
@@ -12425,6 +12615,18 @@ function ChiefExaminerConsole({
                                 className={`inline-flex items-center rounded-lg px-2.5 py-1 text-xs font-bold border-2 ${roleStyles.active} shadow-sm whitespace-nowrap`}
                               >
                                 {role}
+                              </span>
+                            </div>
+
+                            <div className="mb-3">
+                              <span
+                                className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wide ${
+                                  assignment.status === 'accepted'
+                                    ? 'border-emerald-300 bg-emerald-100 text-emerald-700'
+                                    : 'border-amber-300 bg-amber-100 text-amber-700'
+                                }`}
+                              >
+                                {assignment.status}
                               </span>
                             </div>
 
@@ -12510,7 +12712,8 @@ function ChiefExaminerConsole({
                               </span>
                             </button>
                           </div>
-                        ))}
+                        );
+                        })}
                       </div>
                     </div>
                   );
