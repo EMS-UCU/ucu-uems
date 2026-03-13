@@ -12,10 +12,10 @@ COPY . .
 
 # If you prefer passing envs at build time, uncomment these lines and
 # build with --build-arg (see step 3):
-ARG VITE_SUPABASE_URL
-ARG VITE_SUPABASE_ANON_KEY
-ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL
-ENV VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
+# ARG VITE_SUPABASE_URL
+# ARG VITE_SUPABASE_ANON_KEY
+ENV VITE_SUPABASE_URL=https://myrzpmkgqymgobfhlhey.supabase.co
+ENV VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15cnpwbWtncXltZ29iZmhsaGV5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjMwNTU2MDUsImV4cCI6MjA3ODYzMTYwNX0.2_IiJsfWDD8LSPjQnmyXyTSWvt-xufVvAWfjixuYEtU
 
 # Build the production static files
 RUN npm run build
