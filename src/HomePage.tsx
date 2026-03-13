@@ -39,8 +39,15 @@ export default function HomePage({
       setConnectionStatus('checking');
       const result = await testSupabaseConnection();
       setConnectionStatus(result.success ? 'connected' : 'disconnected');
+
+      // Keep detailed information in the developer console instead of UI
+      console.info('Supabase connectivity check:', {
+        success: result.success,
+        error: result.error,
+      });
+
       if (!result.success && result.error) {
-        console.warn('Connection test:', result.error);
+        console.warn('Connection test failed:', result.error);
       }
     };
     checkConnection();
@@ -182,13 +189,6 @@ export default function HomePage({
                       Add your Supabase anon key to the <code className="bg-amber-900/50 px-1 rounded">.env</code> file (VITE_SUPABASE_ANON_KEY). Get it from Supabase Dashboard → Settings → API, then restart the dev server.
                     </p>
                   </div>
-                </div>
-              )}
-
-              {connectionStatus === 'connected' && (
-                <div className="mb-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 flex items-center gap-2">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-300" />
-                  <p className="text-sm font-medium text-emerald-200">Database connected</p>
                 </div>
               )}
 
