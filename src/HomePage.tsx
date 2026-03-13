@@ -1,8 +1,9 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { Mail, Lock, AlertCircle, CheckCircle2, Loader2, Eye, EyeOff } from 'lucide-react';
+import { Mail, Lock, AlertCircle, Loader2, Eye, EyeOff } from 'lucide-react';
 import ucuExamBg from './assets/ucu-exam.jpg';
 import ucuLogo from './assets/ucu-logo.jpg';
 import { testSupabaseConnection } from './lib/auth';
+import { logger } from './lib/logger';
 
 interface HomePageProps {
   users: Array<{
@@ -40,15 +41,11 @@ export default function HomePage({
       const result = await testSupabaseConnection();
       setConnectionStatus(result.success ? 'connected' : 'disconnected');
 
-      // Keep detailed information in the developer console instead of UI
-      console.info('Supabase connectivity check:', {
+      // Log detailed connection info to Sentry instead of the browser console
+      logger.info('Supabase connectivity check', {
         success: result.success,
         error: result.error,
       });
-
-      if (!result.success && result.error) {
-        console.warn('Connection test failed:', result.error);
-      }
     };
     checkConnection();
   }, []);
@@ -100,10 +97,13 @@ export default function HomePage({
       const success = await onLogin(email.trim().toLowerCase(), password.trim());
       if (!success) {
         // Error is already set by onLogin
-        console.log('Login failed');
+        logger.warn('Login failed in HomePage');
       }
     } catch (error: any) {
-      console.error('Login error in HomePage:', error);
+      logger.error('Login error in HomePage', {
+        message: error?.message,
+        stack: error?.stack,
+      });
       // Error handling is done in App.tsx
     } finally {
       setIsLoading(false);

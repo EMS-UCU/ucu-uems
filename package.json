@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.app.json"
   },
   "dependencies": {
+    "@sentry/react": "^10.43.0",
     "@supabase/supabase-js": "^2.57.4",
     "framer-motion": "^12.23.24",
     "jspdf": "^4.0.0",

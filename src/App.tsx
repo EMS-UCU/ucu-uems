@@ -2168,9 +2168,8 @@ function App() {
           }
         }
       )
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') console.log('✅ Real-time moderation_state subscription active');
-        else if (status === 'CHANNEL_ERROR') console.warn('❌ moderation_state real-time error');
+      .subscribe(() => {
+        // Real-time moderation_state subscription status intentionally not logged to console
       });
     return () => {
       supabase.removeChannel(channel);
@@ -2204,7 +2203,6 @@ function App() {
           .order('created_at', { ascending: false });
 
         if (error || !data) {
-          console.error('Error loading exam papers from Supabase:', error);
           return;
         }
 
@@ -2472,16 +2470,8 @@ function App() {
           }
         }
       )
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          console.log('✅ Real-time exam_papers subscription active');
-        } else if (status === 'CHANNEL_ERROR') {
-          console.error('❌ Real-time exam_papers subscription error');
-        } else if (status === 'TIMED_OUT') {
-          console.warn('⏱️ Real-time exam_papers subscription timed out');
-        } else {
-          console.log('📡 Real-time exam_papers subscription status:', status);
-        }
+      .subscribe(() => {
+        // Real-time exam_papers subscription status intentionally not logged to console
       });
 
     return () => {
