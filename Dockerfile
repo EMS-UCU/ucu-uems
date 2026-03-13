@@ -17,6 +17,9 @@ COPY . .
 ENV VITE_SUPABASE_URL=https://myrzpmkgqymgobfhlhey.supabase.co
 ENV VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15cnpwbWtncXltZ29iZmhsaGV5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjMwNTU2MDUsImV4cCI6MjA3ODYzMTYwNX0.2_IiJsfWDD8LSPjQnmyXyTSWvt-xufVvAWfjixuYEtU
 
+# Sentry environment variables
+ENV VITE_SENTRY_DSN=https://f1fce56248efde8100e36448b6210970@o4511036538486784.ingest.de.sentry.io/4511036665495633
+ENV VITE_SENTRY_ENV=production
 # Build the production static files
 RUN npm run build
 

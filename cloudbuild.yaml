@@ -9,6 +9,10 @@ steps:
   - VITE_SUPABASE_URL=${_VITE_SUPABASE_URL}
   - '--build-arg'
   - VITE_SUPABASE_ANON_KEY=${_VITE_SUPABASE_ANON_KEY}
+  - '--build-arg'
+  - VITE_SENTRY_DSN=${_VITE_SENTRY_DSN}
+  - '--build-arg'
+  - VITE_SENTRY_ENV=${_VITE_SENTRY_ENV}
   - '-t'
   - gcr.io/$PROJECT_ID/ucu-uems
   - .
