@@ -1,3 +1,6 @@
+options:
+  substitutionOption: ALLOW_LOOSE
+
 steps:
 - name: 'gcr.io/cloud-builders/docker'
   args:
