@@ -1,0 +1,14 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args:
+  - build
+  - '--build-arg'
+  - VITE_SUPABASE_URL=${_VITE_SUPABASE_URL}
+  - '--build-arg'
+  - VITE_SUPABASE_ANON_KEY=${_VITE_SUPABASE_ANON_KEY}
+  - '-t'
+  - gcr.io/$PROJECT_ID/ucu-uems
+  - .
+
+images:
+- gcr.io/$PROJECT_ID/ucu-uems
