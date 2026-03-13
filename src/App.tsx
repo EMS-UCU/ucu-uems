@@ -1,3 +1,4 @@
+console.log("ENV CHECK:", import.meta.env);
 import {
   useCallback,
   useEffect,
