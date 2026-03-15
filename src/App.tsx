@@ -2272,6 +2272,8 @@ function App() {
 
         const repo = data
           .filter((paper: any) => {
+            // Exclude approved papers - they move to Super Admin's Approved Papers Repository
+            if (paper.approval_status === 'approved_for_printing') return false;
             // Filter out checklists - only include exam papers in repository
             const fileName = paper.file_name || 'Exam Paper';
             return !isChecklist(fileName);
@@ -2451,11 +2453,13 @@ function App() {
               return updated;
             });
 
-            // Update repositoryPapers
+            // Update repositoryPapers: when paper is approved, remove it so it disappears from Chief's view
             setRepositoryPapers((prev) => {
+              if (updatedPaper.approval_status === 'approved_for_printing') {
+                return prev.filter((p) => p.id !== updatedPaper.id);
+              }
               const existingIndex = prev.findIndex((p) => p.id === updatedPaper.id);
               if (existingIndex === -1) {
-                // Paper doesn't exist locally, reload all papers
                 loadExamPapersFromSupabase();
                 return prev;
               }
@@ -2538,9 +2542,11 @@ function App() {
               status:
                 paper.approval_status === 'approved_for_printing'
                   ? 'approved'
+                  : paper.status === 'vetted_with_comments' ||
+                    paper.status === 'resubmitted_to_chief_examiner'
+                  ? 'vetted'
                   : paper.status === 'appointed_for_vetting' ||
-                    paper.status === 'vetting_in_progress' ||
-                    paper.status === 'vetted_with_comments'
+                    paper.status === 'vetting_in_progress'
                   ? 'in-vetting'
                   : paper.status === 'integrated_by_team_lead'
                   ? 'submitted'
@@ -2554,30 +2560,35 @@ function App() {
             };
           });
 
-          const repo = data.map((paper: any) => {
-            let submittedRole: 'Setter' | 'Team Lead' | 'Chief Examiner' | 'Manual' | 'Unknown' = 'Unknown';
-            if (paper.team_lead_id) {
-              submittedRole = 'Team Lead';
-            } else if (paper.setter_id) {
-              submittedRole = 'Setter';
-            } else if (paper.chief_examiner_id) {
-              submittedRole = 'Chief Examiner';
-            }
-            
-            return {
-              id: paper.id,
-              courseUnit: paper.course_name,
-              courseCode: paper.course_code,
-              semester: paper.semester,
-              year: paper.academic_year,
-              submittedBy: paper.setter_id || paper.team_lead_id || 'Unknown',
-              submittedAt: paper.submitted_at || paper.created_at,
-              fileName: paper.file_name || 'Exam Paper',
-              content: paper.file_url || '',
-              fileSize: paper.file_size || undefined,
-              submittedRole,
-            };
-          });
+          const repo = data
+            .filter((paper: any) => {
+              if (paper.approval_status === 'approved_for_printing') return false;
+              const fileName = paper.file_name || 'Exam Paper';
+              return !isChecklist(fileName);
+            })
+            .map((paper: any) => {
+              let submittedRole: 'Setter' | 'Team Lead' | 'Chief Examiner' | 'Manual' | 'Unknown' = 'Unknown';
+              if (paper.team_lead_id) {
+                submittedRole = 'Team Lead';
+              } else if (paper.setter_id) {
+                submittedRole = 'Setter';
+              } else if (paper.chief_examiner_id) {
+                submittedRole = 'Chief Examiner';
+              }
+              return {
+                id: paper.id,
+                courseUnit: paper.course_name,
+                courseCode: paper.course_code,
+                semester: paper.semester,
+                year: paper.academic_year,
+                submittedBy: paper.setter_id || paper.team_lead_id || 'Unknown',
+                submittedAt: paper.submitted_at || paper.created_at,
+                fileName: paper.file_name || 'Exam Paper',
+                content: paper.file_url || '',
+                fileSize: paper.file_size || undefined,
+                submittedRole,
+              };
+            });
 
           // Only use papers from Supabase - don't merge with localStorage to avoid showing deleted papers
           const persistedPapers = loadPersistedPapers();
@@ -6473,24 +6484,29 @@ function App() {
 
   const handleApprove = async (notes: string, printingDueDate?: string, printingDueTime?: string) => {
     if (!currentUserHasRole('Chief Examiner')) {
-      return;
-    }
-    // Allow approval from both "Vetted & Returned to Chief Examiner" and "Awaiting Approval" stages
-    if (workflow.stage !== 'Awaiting Approval' && workflow.stage !== 'Vetted & Returned to Chief Examiner') {
+      alert('Only the Chief Examiner can approve papers for printing.');
       return;
     }
     const actor = currentUser?.name ?? 'Unknown';
     const timestamp = new Date().toISOString();
-    
+
     // Find vetted papers - get the first one (should be the current paper)
-    const vettedPapers = submittedPapers.filter(p => p.status === 'vetted');
+    const vettedPapers = submittedPapers.filter((p) => p.status === 'vetted');
     const currentPaper = vettedPapers[0];
-    
-    // Call backend service to approve and lock paper
+
     if (!currentPaper?.id) {
-      console.error('No vetted paper found to approve');
-      alert('Error: No paper found to approve. Please ensure a paper is in vetted status.');
+      alert('No paper ready to approve. Please ensure a paper has been vetted (vetting session completed) and is in "vetted" status.');
       return;
+    }
+
+    // Allow approval when there is a vetted paper; optionally sync workflow stage for UI consistency
+    const allowedStage =
+      workflow.stage === 'Awaiting Approval' || workflow.stage === 'Vetted & Returned to Chief Examiner';
+    if (!allowedStage) {
+      setWorkflow((prev) => ({
+        ...prev,
+        stage: 'Vetted & Returned to Chief Examiner',
+      }));
     }
     
     if (!currentUser?.id) {

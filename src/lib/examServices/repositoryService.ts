@@ -165,9 +165,34 @@ export async function getPapersNeedingPasswordGeneration(): Promise<ApprovedPape
 }
 
 /**
+ * Parse printing due date + time into a single Date (exact hour, minute, second).
+ * Supports time as "HH:MM" or "HH:MM:SS". Seconds default to 0 if omitted.
+ */
+export function getPrintingDueMoment(printingDueDate?: string, printingDueTime?: string): Date | null {
+  if (!printingDueDate || !printingDueTime) return null;
+  const due = new Date(printingDueDate);
+  if (isNaN(due.getTime())) return null;
+  const parts = printingDueTime.trim().split(':').map(Number);
+  const hours = parts[0] ?? 0;
+  const minutes = parts[1] ?? 0;
+  const seconds = parts[2] ?? 0;
+  due.setHours(hours, minutes, seconds, 0);
+  return due;
+}
+
+/**
+ * True when current time is at or past the printing due date/time (exact to the second).
+ */
+export function isPrintingDuePassed(printingDueDate?: string, printingDueTime?: string): boolean {
+  const due = getPrintingDueMoment(printingDueDate, printingDueTime);
+  if (!due) return false;
+  return new Date() >= due;
+}
+
+/**
  * Generate password for a paper and notify Super Admin
  * @param examPaperId - The paper ID
- * @param force - If true, generate password even if due date hasn't passed (for testing)
+ * @param force - If true, generate password even if due date hasn't passed (for testing/admin override)
  */
 export async function generatePasswordForPaper(
   examPaperId: string,
@@ -195,14 +220,14 @@ export async function generatePasswordForPaper(
       return { success: false, error: 'Paper must be approved and locked before generating password' };
     }
 
-    // Check if due date has passed (unless forcing)
+    // Check if due date/time has passed (exact hour, minute, second) unless forcing
     if (!force && paper.printing_due_date && paper.printing_due_time) {
-      const dueDate = new Date(paper.printing_due_date);
-      const [hours, minutes] = paper.printing_due_time.split(':').map(Number);
-      dueDate.setHours(hours, minutes, 0, 0);
-      const now = new Date();
-      if (dueDate > now) {
-        return { success: false, error: `Paper is not due yet. Due: ${dueDate.toLocaleString()}` };
+      const dueMoment = getPrintingDueMoment(paper.printing_due_date, paper.printing_due_time);
+      if (dueMoment && new Date() < dueMoment) {
+        return {
+          success: false,
+          error: `Paper is not due yet. Password can be generated at ${dueMoment.toLocaleString()}`,
+        };
       }
     }
 
