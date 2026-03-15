@@ -354,6 +354,7 @@ type ChecklistCommentsMap = Map<string, ChecklistComment>;
 
 const DEFAULT_PASSWORD = 'user123';
 const DEFAULT_SESSION_MINUTES = 3;
+const MIN_SESSION_MINUTES = 1;
 const CHECKLIST_COMMENTS_STORAGE_KEY = 'ucu-vetting-checklist-comments';
 const CHECKLIST_COMMENTS_CHANNEL = 'ucu-vetting-checklist-sync';
 const CHECKLIST_TYPING_TTL_MS = 6000;
@@ -653,7 +654,7 @@ const normalizeVettingSessionState = (
   return {
     active: true,
     startedAt,
-    durationMinutes: durationMinutes ?? DEFAULT_SESSION_MINUTES,
+    durationMinutes: durationMinutes ?? MIN_SESSION_MINUTES,
     expiresAt,
     safeBrowserEnabled: Boolean(session.safeBrowserEnabled),
     cameraOn: Boolean(session.cameraOn),
@@ -1466,8 +1467,26 @@ function App() {
     }
   };
   const [restrictedVetters, setRestrictedVetters] = useState<Set<string>>(loadRestrictedVetters);
+  // One-strike list: vetters who left the window once (signed out). Persisted so that when they try to rejoin we restrict them.
+  const loadOneStrikeVetters = (): Set<string> => {
+    try {
+      const saved = localStorage.getItem('ucu-vetter-one-strike');
+      if (!saved) return new Set();
+      const parsed = JSON.parse(saved) as string[];
+      return new Set(parsed);
+    } catch (error) {
+      console.error('Error loading one-strike vetters:', error);
+      return new Set();
+    }
+  };
+  const [oneStrikeVetters, setOneStrikeVetters] = useState<Set<string>>(loadOneStrikeVetters);
   // Track monitoring data for each vetter (camera feeds, warnings, violations)
   const [vetterMonitoring, setVetterMonitoring] = useState<Map<string, VetterMonitoring>>(new Map());
+  // Ref so handleVetterViolation can read current violation count synchronously (setState is async)
+  const vetterMonitoringRef = useRef<Map<string, VetterMonitoring>>(new Map());
+  useEffect(() => {
+    vetterMonitoringRef.current = vetterMonitoring;
+  }, [vetterMonitoring]);
   // Store camera stream references for Chief Examiner monitoring
   const vetterCameraStreams = useRef<Map<string, MediaStream>>(new Map());
   // Store MediaRecorder instances for video recording during vetting sessions
@@ -2896,7 +2915,7 @@ function App() {
     };
   }, [authUserId, refreshUsers]);
 
-  const activateVetterSessionFromNotification = useCallback((notificationTimestamp?: string) => {
+  const activateVetterSessionFromNotification = useCallback(async (notificationTimestamp?: string) => {
     if (!currentUser?.roles) {
       return;
     }
@@ -2913,12 +2932,37 @@ function App() {
       return;
     }
 
-    const parsedStart = notificationTimestamp
-      ? new Date(notificationTimestamp).getTime()
-      : Date.now();
-    const startedAt = Number.isFinite(parsedStart) ? parsedStart : Date.now();
-    const durationMinutes = DEFAULT_SESSION_MINUTES;
-    const expiresAt = startedAt + durationMinutes * 60 * 1000;
+    // Fetch actual vetting_session from Supabase so duration/countdown match what Chief set (e.g. 1 min not 3).
+    let durationMinutes = MIN_SESSION_MINUTES;
+    let startedAt: number = Date.now();
+    let expiresAt: number = startedAt + durationMinutes * 60 * 1000;
+    try {
+      const { data } = await supabase
+        .from('moderation_state')
+        .select('value')
+        .eq('key', 'vetting_session')
+        .maybeSingle();
+      const vs = data?.value as Record<string, unknown> | null;
+      if (vs && typeof vs === 'object' && Boolean(vs.active)) {
+        const start = vs.startedAt != null ? Number(vs.startedAt) : undefined;
+        const dur = typeof vs.durationMinutes === 'number' && Number.isFinite(vs.durationMinutes) ? vs.durationMinutes : MIN_SESSION_MINUTES;
+        const exp = vs.expiresAt != null ? Number(vs.expiresAt) : undefined;
+        if (start != null && Number.isFinite(start)) startedAt = start;
+        durationMinutes = Math.max(MIN_SESSION_MINUTES, dur);
+        if (exp != null && Number.isFinite(exp)) expiresAt = exp;
+        else expiresAt = startedAt + durationMinutes * 60 * 1000;
+      } else if (notificationTimestamp) {
+        const parsedStart = new Date(notificationTimestamp).getTime();
+        if (Number.isFinite(parsedStart)) startedAt = parsedStart;
+        expiresAt = startedAt + durationMinutes * 60 * 1000;
+      }
+    } catch (_) {
+      if (notificationTimestamp) {
+        const parsedStart = new Date(notificationTimestamp).getTime();
+        if (Number.isFinite(parsedStart)) startedAt = parsedStart;
+        expiresAt = startedAt + durationMinutes * 60 * 1000;
+      }
+    }
 
     // Ignore stale notifications from already-expired sessions.
     if (Date.now() >= expiresAt) {
@@ -3002,12 +3046,18 @@ function App() {
           const isVetterUser = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
           if (isVetterUser && (mostRecent.title === 'Vetting Session Started' || mostRecent.title === 'Vetter re-activated')) {
             activateVetterSessionFromNotification(mostRecent.timestamp);
-            // When vetter receives "Vetter re-activated", clear their local restriction so they see Start Session (not "Restricted Access")
+            // When vetter receives "Vetter re-activated", clear their local restriction and one-strike so they see Start Session (not "Restricted Access")
             if (mostRecent.title === 'Vetter re-activated' && currentUser?.id) {
               setRestrictedVetters((prev) => {
                 const next = new Set(prev);
                 next.delete(currentUser.id);
                 localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+                return next;
+              });
+              setOneStrikeVetters((prev) => {
+                const next = new Set(prev);
+                next.delete(currentUser.id);
+                localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
                 return next;
               });
             }
@@ -3066,6 +3116,12 @@ function App() {
                     const next = new Set(prev);
                     next.delete(currentUser.id);
                     localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+                    return next;
+                  });
+                  setOneStrikeVetters((prev) => {
+                    const next = new Set(prev);
+                    next.delete(currentUser.id);
+                    localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
                     return next;
                   });
                 }
@@ -3170,6 +3226,12 @@ function App() {
               localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
               return next;
             });
+            setOneStrikeVetters((prev) => {
+              const next = new Set(prev);
+              next.delete(currentUser.id);
+              localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
+              return next;
+            });
           }
         }
       } catch (e) {
@@ -3212,6 +3274,12 @@ function App() {
               const next = new Set(prev);
               next.delete(currentUser.id);
               localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+              return next;
+            });
+            setOneStrikeVetters((prev) => {
+              const next = new Set(prev);
+              next.delete(currentUser.id);
+              localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
               return next;
             });
           }
@@ -3270,6 +3338,12 @@ function App() {
               const next = new Set(prev);
               next.delete(currentUser.id);
               localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+              return next;
+            });
+            setOneStrikeVetters((prev) => {
+              const next = new Set(prev);
+              next.delete(currentUser.id);
+              localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
               return next;
             });
           }
@@ -3362,9 +3436,8 @@ function App() {
         ) {
           e.preventDefault();
           e.stopPropagation();
-          // Immediately restrict the vetter if they attempt screenshot
           if (currentUser?.id && joinedVetters.has(currentUser.id)) {
-            restrictVetter(currentUser.id, 'screenshot_attempt');
+            void handleVetterViolation(currentUser.id, 'screenshot_attempt');
           }
           return false;
         }
@@ -3415,30 +3488,10 @@ function App() {
         }
       }
 
-      // STRICT: Warn user about other tabs and terminate session if they switch away
+      // STRICT: Treat switching away from this tab/window as a vetting violation
       const handleVisibilityChange = () => {
-        if (document.hidden && currentUser?.id) {
-          // Log warning for Chief Examiner monitoring
-          logVetterWarning(
-            currentUser.id,
-            'tab_switch',
-            'Vetter switched away from the vetting session tab.',
-            'critical'
-          );
-          
-          alert('WARNING: You have switched away from the vetting session. If you continue, your session will be terminated. Please return immediately.');
-          // Try to bring focus back
-          window.focus();
-          
-          // If still not focused after warning, restrict the vetter
-          setTimeout(() => {
-            if (document.hidden || !document.hasFocus()) {
-              // Immediately restrict the vetter if they continue leaving the window
-              if (currentUser.id && joinedVetters.has(currentUser.id)) {
-                restrictVetter(currentUser.id, 'window_leave');
-              }
-            }
-          }, 3000);
+        if ((document.hidden || !document.hasFocus()) && currentUser?.id && joinedVetters.has(currentUser.id)) {
+          void handleVetterViolation(currentUser.id, 'window_leave');
         }
       };
 
@@ -3463,49 +3516,10 @@ function App() {
       };
 
       const handleBlur = () => {
-        // STRICT: Immediately prevent leaving the vetting window
-        if (document.hasFocus() === false && currentUser?.id) {
+        // Losing focus (e.g., tab/app switch) is treated as a vetting violation
+        if (document.hasFocus() === false && currentUser?.id && joinedVetters.has(currentUser.id)) {
           const vetterId = currentUser.id;
-          setTimeout(() => {
-            if (!document.hasFocus()) {
-              logVetterWarning(
-                vetterId,
-                'window_leave',
-                'Safe browser enforcement: attempt to leave vetting window detected. Forcing focus back.',
-                'critical'
-              );
-              
-              alert('Leaving the vetting window is not allowed. Returning focus to the vetting environment. Continued attempts will terminate your session.');
-              
-              const refocus = () => {
-                try {
-              window.focus();
-                } catch (error) {
-                  console.error('Error forcing focus back to vetting window:', error);
-                }
-              };
-              
-              refocus();
-              const refocusInterval = window.setInterval(() => {
-                if (!document.hasFocus()) {
-                  refocus();
-              } else {
-                  window.clearInterval(refocusInterval);
-                }
-              }, 150);
-              
-              window.setTimeout(() => {
-                if (!document.hasFocus()) {
-                  window.clearInterval(refocusInterval);
-                  
-                  // Immediately restrict the vetter if they continue leaving the window
-                  if (vetterId && joinedVetters.has(vetterId)) {
-                    restrictVetter(vetterId, 'window_leave');
-                  }
-                }
-              }, 2000);
-            }
-          }, 250);
+          void handleVetterViolation(vetterId, 'window_leave');
         }
       };
 
@@ -3526,28 +3540,16 @@ function App() {
           e.preventDefault();
           e.stopPropagation();
           
-          // Log warning for Chief Examiner monitoring - CRITICAL
+          // Log warning for Chief Examiner monitoring, then apply two-strike policy (sign out / restrict after 2)
           if (currentUser?.id) {
             const alertMessage = 'Tab navigation is disabled during the vetting session. Your session will be terminated if you attempt to open new tabs.';
             logVetterWarning(
               currentUser.id,
               'tab_navigation_attempt',
               `Attempted to use ${e.key.toUpperCase()} shortcut for tab navigation. Alert shown: "${alertMessage}"`,
-              'critical'
+              'warning'
             );
-            
-            // Increment violations count
-            setVetterMonitoring(prev => {
-              const newMap = new Map(prev);
-              const existing = newMap.get(currentUser.id!);
-              if (existing) {
-                newMap.set(currentUser.id!, {
-                  ...existing,
-                  violations: (existing.violations || 0) + 1,
-                });
-              }
-              return newMap;
-            });
+            void handleVetterViolation(currentUser.id, 'window_leave');
           }
           
           alert('Tab navigation is disabled during the vetting session. Your session will be terminated if you attempt to open new tabs.');
@@ -3559,27 +3561,14 @@ function App() {
           e.preventDefault();
           e.stopPropagation();
           
-          // Log warning for Chief Examiner monitoring - CRITICAL
           if (currentUser?.id) {
             logVetterWarning(
               currentUser.id,
               'app_switch_attempt',
               'Attempted to switch between applications using Alt+Tab/Cmd+Tab. This is a critical violation.',
-              'critical'
+              'warning'
             );
-            
-            // Increment violations count
-            setVetterMonitoring(prev => {
-              const newMap = new Map(prev);
-              const existing = newMap.get(currentUser.id!);
-              if (existing) {
-                newMap.set(currentUser.id!, {
-                  ...existing,
-                  violations: (existing.violations || 0) + 1,
-                });
-              }
-              return newMap;
-            });
+            void handleVetterViolation(currentUser.id, 'window_leave');
           }
           
           alert('Switching between applications is not allowed. Your session will be terminated.');
@@ -3590,28 +3579,15 @@ function App() {
       // Block attempts to open new windows/tabs programmatically
       const originalWindowOpen = window.open;
       window.open = function(...args: any[]) {
-        // Log warning for Chief Examiner monitoring - CRITICAL VIOLATION
         if (currentUser?.id) {
           const alertMessage = 'Opening new windows/tabs is disabled during the vetting session. Your session will be terminated if you continue.';
           logVetterWarning(
             currentUser.id,
             'window_open_attempt',
             `Attempted to open new window/tab: ${args[0] || 'unknown URL'}. This is a critical violation. Alert shown: "${alertMessage}"`,
-            'critical'
+            'warning'
           );
-          
-          // Increment violations count
-          setVetterMonitoring(prev => {
-            const newMap = new Map(prev);
-            const existing = newMap.get(currentUser.id!);
-            if (existing) {
-              newMap.set(currentUser.id!, {
-                ...existing,
-                violations: (existing.violations || 0) + 1,
-              });
-            }
-            return newMap;
-          });
+          void handleVetterViolation(currentUser.id, 'window_leave');
         }
         
         alert('Opening new windows/tabs is disabled during the vetting session. Your session will be terminated if you continue.');
@@ -4842,6 +4818,12 @@ function App() {
             localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
             return next;
           });
+          setOneStrikeVetters((prev) => {
+            const next = new Set(prev);
+            next.delete(currentUser.id);
+            localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
+            return next;
+          });
         }
         const startNotif = mapped.find((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
         if (startNotif && !shownVettingStartedToastIds.current.has(startNotif.id)) {
@@ -4876,15 +4858,40 @@ function App() {
       return;
     }
 
-    // If Chief Examiner is starting the global session
-    if (isChiefExaminer && !isVetter) {
-      if (vettingSession.active) {
-        alert('A vetting session is already active.');
-        console.error('Start session blocked: Session already active');
+    // Block restricted vetters from joining (2+ violations) until Chief re-activates them
+    if (isVetter && !isChiefExaminer && currentUser?.id && restrictedVetters.has(currentUser.id)) {
+      alert('Your access is restricted due to vetting violations. Please contact the Chief Examiner to be re-activated before you can join a vetting session again.');
+      console.error('Start session blocked: Vetter is restricted', currentUser.id);
       return;
     }
 
-    const duration = Math.max(DEFAULT_SESSION_MINUTES, minutes);
+    // Vetter had one strike (left window once, was signed out). Trying to rejoin = restrict now and block.
+    if (isVetter && !isChiefExaminer && currentUser?.id && oneStrikeVetters.has(currentUser.id)) {
+      setRestrictedVetters(prev => {
+        const next = new Set(prev);
+        next.add(currentUser.id!);
+        localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+        return next;
+      });
+      setOneStrikeVetters(prev => {
+        const next = new Set(prev);
+        next.delete(currentUser.id!);
+        localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
+        return next;
+      });
+      alert('You left the vetting window and were signed out. You are now restricted from joining again. Please contact the Chief Examiner to be re-activated.');
+      console.error('Start session blocked: Vetter had one strike, restricted on rejoin attempt', currentUser.id);
+      return;
+    }
+
+    // If Chief Examiner is starting the global session (when no session is active yet).
+    // Use "!vettingSession.active" so that a user with both Chief and Vetter roles starts the session when they click first, instead of only joining.
+    if (isChiefExaminer) {
+      if (vettingSession.active) {
+        alert('A vetting session is already active.');
+        return;
+      }
+      const duration = Math.max(MIN_SESSION_MINUTES, minutes);
     const startedAt = Date.now();
     const expiresAt = startedAt + duration * 60 * 1000;
       
@@ -5076,16 +5083,18 @@ function App() {
           // Continue even if recording fails - monitoring is more important
         }
         
-        // Initialize monitoring data for this vetter
+        // Initialize monitoring data for this vetter (preserve existing violation count if rejoining)
         setVetterMonitoring(prev => {
           const newMap = new Map(prev);
+          const existing = newMap.get(currentUser.id!);
+          const preservedViolations = existing && typeof existing.violations === 'number' ? existing.violations : 0;
           newMap.set(currentUser.id!, {
             vetterId: currentUser.id!,
             vetterName: currentUser.name ?? 'Unknown',
             joinedAt: Date.now(),
             cameraStream,
-            warnings: [],
-            violations: 0,
+            warnings: existing?.warnings ?? [],
+            violations: preservedViolations,
           });
           return newMap;
         });
@@ -5218,6 +5227,74 @@ function App() {
     }
 
     // Note: User will need to manually log out or refresh - we've already restricted their access
+  };
+
+  // Handle vetter violations with a two-strike policy:
+  //  - First violation: sign the vetter out of the current session only.
+  //  - Second violation (or more): fully restrict via restrictVetter.
+  const handleVetterViolation = async (vetterId: string, violationType: 'screenshot_attempt' | 'window_leave') => {
+    if (!vetterId) return;
+
+    // Read current count from ref so we don't rely on setState running synchronously (React can batch)
+    const currentCount = vetterMonitoringRef.current.get(vetterId)?.violations ?? 0;
+    const newCount = currentCount + 1;
+
+    setVetterMonitoring(prev => {
+      const newMap = new Map(prev);
+      const existing = newMap.get(vetterId);
+      if (existing) {
+        newMap.set(vetterId, {
+          ...existing,
+          violations: newCount,
+        });
+      } else {
+        newMap.set(vetterId, {
+          vetterId,
+          vetterName: 'Unknown',
+          joinedAt: Date.now(),
+          cameraStream: null,
+          warnings: [],
+          violations: newCount,
+        });
+      }
+      return newMap;
+    });
+
+    if (newCount <= 1) {
+      // First strike: sign out of this session and persist one-strike so that when they try to rejoin we restrict them
+      setJoinedVetters(prev => {
+        const next = new Set(prev);
+        next.delete(vetterId);
+        return next;
+      });
+
+      const stream = vetterCameraStreams.current.get(vetterId);
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        vetterCameraStreams.current.delete(vetterId);
+      }
+
+      // Persist one-strike so that when this vetter tries to start/join again they are restricted (no infinite rejoin)
+      setOneStrikeVetters(prev => {
+        const next = new Set(prev);
+        next.add(vetterId);
+        localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
+        return next;
+      });
+
+      logVetterWarning(
+        vetterId,
+        violationType,
+        'First violation detected. Vetter signed out of current session; if they try to rejoin they will be restricted.',
+        'warning'
+      );
+
+      alert('WARNING: You left the vetting window. You have been signed out. If you try to join again, you will be restricted from the session until the Chief Examiner re-activates you.');
+      return;
+    }
+
+    // Second or later violation: fully restrict
+    await restrictVetter(vetterId, violationType);
   };
 
   // Helper function to log warnings/violations for vetter monitoring
@@ -7937,6 +8014,12 @@ function App() {
               localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(newSet)));
               return newSet;
             });
+            setOneStrikeVetters(prev => {
+              const newSet = new Set(prev);
+              newSet.delete(vetterId);
+              localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(newSet)));
+              return newSet;
+            });
             // Notify re-activated vetter so they see toast and can join if session is still active
             const message = vettingSession.active
               ? 'You have been re-activated. The vetting session is still active—join by clicking Start Session (Enable Camera).'
@@ -8175,6 +8258,12 @@ function App() {
               const newSet = new Set(prev);
               newSet.delete(vetterId);
               localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(newSet)));
+              return newSet;
+            });
+            setOneStrikeVetters(prev => {
+              const newSet = new Set(prev);
+              newSet.delete(vetterId);
+              localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(newSet)));
               return newSet;
             });
             // Notify re-activated vetter so they see toast and can join if session is still active
@@ -19650,6 +19739,8 @@ function VettingAndAnnotations({
     const comment = checklistComments?.get(commentKey);
     const [editText, setEditText] = useState(comment?.comment || '');
     const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const onChecklistTypingChangeRef = useRef(onChecklistTypingChange);
+    onChecklistTypingChangeRef.current = onChecklistTypingChange;
     const typingStatus = getTypingStatus(commentKey);
 
     // Update text when comment changes
@@ -19657,15 +19748,15 @@ function VettingAndAnnotations({
       setEditText(comment?.comment || '');
     }, [comment?.comment]);
 
-    // Cleanup timeout on unmount
+    // Cleanup timeout on unmount (ref for callback to avoid infinite loop from changing callback reference)
     useEffect(() => {
       return () => {
         if (saveTimeoutRef.current) {
           clearTimeout(saveTimeoutRef.current);
         }
-        onChecklistTypingChange?.(commentKey, false);
+        onChecklistTypingChangeRef.current?.(commentKey, false);
       };
-    }, [commentKey, onChecklistTypingChange]);
+    }, [commentKey]);
 
     // Handle text change - simple and direct
     const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -19866,24 +19957,17 @@ function VettingAndAnnotations({
   
   const [startDateTime, setStartDateTime] = useState(defaultStartDateTime);
   
-  // Calculate duration from scheduled times or use default
+  // Session duration: default to 1 minute so Chief's "Session Duration" input and countdown match. User can type a different value.
   const calculatedDuration = useMemo(() => {
     if (moderationSchedule?.scheduledStartTime && moderationSchedule?.scheduledEndTime) {
       const diffMs = moderationSchedule.scheduledEndTime - moderationSchedule.scheduledStartTime;
-      return Math.max(DEFAULT_SESSION_MINUTES, Math.floor(diffMs / (60 * 1000))); // Convert to minutes, enforce minimum
+      return Math.max(MIN_SESSION_MINUTES, Math.floor(diffMs / (60 * 1000)));
     }
-    return DEFAULT_SESSION_MINUTES; // Default fallback
+    return MIN_SESSION_MINUTES;
   }, [moderationSchedule]);
 
-  // Custom session duration state - allow user to customize
-  const [customDuration, setCustomDuration] = useState<number>(calculatedDuration);
-  
-  // Update custom duration when calculated duration changes (but only if not already set by user)
-  useEffect(() => {
-    if (!vettingSession.active) {
-      setCustomDuration(calculatedDuration);
-    }
-  }, [calculatedDuration, vettingSession.active]);
+  // Always start with 1 minute so session countdown is 1 min unless Chief changes the input (schedule no longer overrides)
+  const [customDuration, setCustomDuration] = useState<number>(MIN_SESSION_MINUTES);
   const [selectedPaper, setSelectedPaper] = useState<SubmittedPaper | null>(
     papersToDisplay.find(p => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0] || null
   );
@@ -19994,8 +20078,8 @@ function VettingAndAnnotations({
   // Chief Examiner can always see everything
   const canViewPaperAndChecklist = isChiefExaminer || (isVetter && vetterHasJoined);
   
-  // Vetters can start their session only when global session is active and they haven't joined yet
-  const canVetterStartSession = isVetter && vettingSession.active && !vetterHasJoined;
+  // Vetters can start their session only when global session is active, they haven't joined yet, and they're not restricted
+  const canVetterStartSession = isVetter && !isVetterRestricted && vettingSession.active && !vetterHasJoined;
 
   const examWindow = (
     <div className="rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50/90 via-indigo-50/90 to-cyan-50/90 p-4 shadow-md">
@@ -21115,15 +21199,26 @@ function VettingAndAnnotations({
             </button>
           )}
         </div>
-      ) : (
+      ) : vettingSession.active ? (
         <div className="space-y-2">
-          <button
-            type="button"
-            onClick={onCompleteVetting}
-            className="w-full rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 px-4 py-3 text-sm font-bold text-white shadow-lg transition"
-          >
-            Complete Vetting
-          </button>
+          {isChiefExaminer ? (
+            <button
+              type="button"
+              onClick={onCompleteVetting}
+              className="w-full rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 px-4 py-3 text-sm font-bold text-white shadow-lg transition"
+            >
+              Complete Vetting
+            </button>
+          ) : (
+            <p className="text-center text-sm text-slate-600">Session in progress. The Chief Examiner will end the session.</p>
+          )}
+        </div>
+      ) : (
+        <div className="rounded-lg border-2 border-amber-300 bg-amber-50 p-4 text-center">
+          <h3 className="text-sm font-bold text-amber-800 mb-1">Session Ended</h3>
+          <p className="text-xs text-amber-700">
+            Your vetting session has expired. All records have been saved and the secure environment has been closed by the system.
+          </p>
         </div>
       )}
     </div>
@@ -21529,12 +21624,13 @@ function VettingAndAnnotations({
                         <input
                           id="session-minutes"
                           type="number"
-                          min={DEFAULT_SESSION_MINUTES}
+                          min={MIN_SESSION_MINUTES}
                           max={180}
                           value={vettingSession.active && vettingSession.durationMinutes ? vettingSession.durationMinutes : customDuration}
                           onChange={(e) => {
-                            const value = parseInt(e.target.value) || calculatedDuration;
-                            setCustomDuration(Math.max(DEFAULT_SESSION_MINUTES, Math.min(180, value)));
+                            const value = parseInt(e.target.value, 10);
+                            const minutes = Number.isFinite(value) ? value : MIN_SESSION_MINUTES;
+                            setCustomDuration(Math.max(MIN_SESSION_MINUTES, Math.min(180, minutes)));
                           }}
                           disabled={vettingSession.active}
                           className="w-full rounded-lg border-2 border-emerald-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 shadow-sm disabled:bg-emerald-50/50 disabled:cursor-not-allowed"
@@ -21594,13 +21690,14 @@ function VettingAndAnnotations({
                               Start Session (Enable Camera)
                             </button>
                           )}
-                      {isVetter && vetterHasJoined && (
+                      {/* Complete Vetting is only for Chief Examiner; vetters do not see this button */}
+                      {isChiefExaminer && vettingSession.active && (
                         <button
                           type="button"
                           onClick={onCompleteVetting}
                           className="rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2 text-xs font-bold text-white shadow-md hover:shadow-lg hover:scale-[1.02] transition-all"
                         >
-                          Complete
+                          Complete Vetting
                         </button>
                       )}
                     </div>
