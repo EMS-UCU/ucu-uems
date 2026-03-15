@@ -1,4 +1,5 @@
 import { supabase, type DatabaseUser, type UserProfile } from './supabase';
+import { logger } from './logger';
 import type { User } from '../App';
 
 // Convert auth user + profile to app user format
@@ -99,22 +100,20 @@ export async function authenticateUser(
     const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
     
     if (!supabaseUrl || !supabaseKey) {
-      console.error('Supabase not configured. Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY');
-      return { 
-        user: null, 
-        error: 'Database not configured. Please check your environment variables.' 
+      logger.error('Supabase not configured. Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY');
+      return {
+        user: null,
+        error: 'Database not configured. Please check your environment variables.',
       };
     }
 
     const trimmedEmail = email.trim().toLowerCase();
     const trimmedPassword = password.trim();
     
-    console.log('🔐 Attempting to authenticate with Supabase Auth:', {
+    logger.info('Attempting authentication with Supabase Auth', {
       email: trimmedEmail,
-      passwordLength: trimmedPassword.length,
-      supabaseUrl: supabaseUrl,
-      hasKey: !!supabaseKey,
-      keyPrefix: supabaseKey.substring(0, 20) + '...'
+      supabaseUrl,
+      hasKey: Boolean(supabaseKey),
     });
     
     // Clear any existing session first to avoid conflicts
@@ -127,73 +126,82 @@ export async function authenticateUser(
     });
 
     if (authError) {
-      console.error('❌ Supabase Auth error:', {
+      logger.error('Supabase Auth error', {
         message: authError.message,
         status: authError.status,
         name: authError.name,
         code: (authError as any).code,
-        fullError: JSON.stringify(authError, null, 2)
       });
       
       // More specific error handling
       if (authError.message.includes('Invalid login credentials') || 
           authError.message.includes('Invalid email or password') ||
           authError.status === 400) {
-        console.error('❌ Login failed: Invalid credentials.');
-        console.error('💡 Solutions:');
-        console.error('   1. Check password in Supabase Dashboard → Authentication → Users');
-        console.error('   2. Reset password: Click user → Update password → Set to: admin123');
-        console.error('   3. Verify email is confirmed (email_confirmed_at is not NULL)');
-        return { 
-          user: null, 
-          error: 'Invalid email or password. Please check your credentials or reset your password in Supabase Dashboard.' 
+        logger.warn('Login failed: Invalid credentials', {
+          email: trimmedEmail,
+        });
+        return {
+          user: null,
+          error:
+            'Invalid email or password. Please check your credentials or reset your password in Supabase Dashboard.',
         };
       }
       
       if (authError.message.includes('Email not confirmed') || 
           authError.message.includes('email_not_confirmed')) {
-        console.error('❌ Login failed: Email not confirmed.');
-        console.error('💡 Solution: Confirm email in Supabase Dashboard → Authentication → Users');
-        return { 
-          user: null, 
-          error: 'Email not confirmed. Please confirm your email in Supabase Dashboard.' 
+        logger.warn('Login failed: Email not confirmed', {
+          email: trimmedEmail,
+        });
+        return {
+          user: null,
+          error: 'Email not confirmed. Please confirm your email in Supabase Dashboard.',
         };
       }
       
-      if (authError.message.includes('Too many requests') || 
+      if (authError.message.includes('Too many requests') ||
           authError.status === 429) {
-        return { 
-          user: null, 
-          error: 'Too many login attempts. Please wait a moment and try again.' 
+        logger.warn('Login failed: Too many requests', {
+          email: trimmedEmail,
+        });
+        return {
+          user: null,
+          error: 'Too many login attempts. Please wait a moment and try again.',
         };
       }
       
-      return { 
-        user: null, 
-        error: `Authentication failed: ${authError.message || 'Unknown error'}. Check console for details.` 
+      return {
+        user: null,
+        error: `Authentication failed: ${authError.message || 'Unknown error'}.`,
       };
     }
 
     if (!authData.user) {
-      console.error('❌ No user data returned from authentication');
+      logger.error('Supabase Auth returned no user data');
       return { user: null, error: 'Authentication failed. No user data returned.' };
     }
 
-    console.log('✅ Auth successful! User ID:', authData.user.id);
-    console.log('📧 Email:', authData.user.email);
-    console.log('✅ Email confirmed:', !!authData.user.email_confirmed_at);
-    console.log('🔑 Session active:', !!authData.session);
+    logger.info('Auth successful', {
+      userId: authData.user.id,
+      email: authData.user.email,
+      emailConfirmed: Boolean(authData.user.email_confirmed_at),
+      hasSession: Boolean(authData.session),
+    });
     
     // Fetch user profile from user_profiles table
-    console.log('🔍 Fetching user profile...');
+    logger.info('Fetching user profile for authenticated user', {
+      userId: authData.user.id,
+    });
     const { data: profile, error: profileError } = await supabase
       .from('user_profiles')
       .select('*')
       .eq('id', authData.user.id)
       .single();
 
-    if (profileError) {
-      console.warn('⚠️ Profile not found, creating default profile:', profileError.message);
+      if (profileError) {
+        logger.warn('Profile not found, creating default profile', {
+          userId: authData.user.id,
+          error: profileError.message,
+        });
       // If profile doesn't exist, create a basic one
       const defaultProfile = {
         id: authData.user.id,
@@ -211,28 +219,37 @@ export async function authenticateUser(
         .insert([defaultProfile]);
       
       if (createError) {
-        console.error('❌ Failed to create profile:', createError);
+        logger.error('Failed to create default user profile', {
+          userId: authData.user.id,
+          error: createError.message,
+        });
         // Still return user even if profile creation fails
       } else {
-        console.log('✅ Default profile created');
+        logger.info('Default user profile created', {
+          userId: authData.user.id,
+        });
       }
       
       const appUser = authUserToAppUser(authData.user, defaultProfile);
       return { user: appUser, error: null };
     }
 
-    console.log('✅ User profile found:', {
+    logger.info('User profile found', {
+      userId: authData.user.id,
       username: profile.username,
       base_role: profile.base_role,
-      is_super_admin: profile.is_super_admin
+      is_super_admin: profile.is_super_admin,
     });
     const appUser = authUserToAppUser(authData.user, profile);
     return { user: appUser, error: null };
   } catch (error: any) {
-    console.error('Authentication error:', error);
-    return { 
-      user: null, 
-      error: error?.message || 'An error occurred during authentication. Please check the console for details.' 
+    logger.error('Authentication error', {
+      message: error?.message,
+      stack: error?.stack,
+    });
+    return {
+      user: null,
+      error: error?.message || 'An error occurred during authentication.',
     };
   }
 }

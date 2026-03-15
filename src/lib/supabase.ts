@@ -9,18 +9,9 @@ const isPlaceholderKey = !supabaseAnonKey || supabaseAnonKey === 'your-anon-key-
 const isPlaceholderUrl = !supabaseUrl || supabaseUrl.includes('your-project-id');
 
 if (isPlaceholderUrl || isPlaceholderKey) {
-  console.error('❌ Supabase credentials missing or invalid!');
-  if (isPlaceholderUrl) {
-    console.error('VITE_SUPABASE_URL must be your real project URL (e.g. https://xxxxx.supabase.co)');
-  }
-  if (isPlaceholderKey) {
-    console.error('VITE_SUPABASE_ANON_KEY must be your real anon key from Supabase Dashboard → Settings → API');
-  }
-  console.error('');
-  console.error('Add the correct values to your .env file and restart the dev server.');
+  // Intentionally avoid console output; rely on Sentry for diagnostics
 } else {
-  console.log('✅ Supabase configured');
-  console.log('URL:', supabaseUrl);
+  // Supabase configured successfully; no console output
 }
 
 // Create Supabase client with options

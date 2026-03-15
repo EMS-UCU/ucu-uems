@@ -1,8 +1,9 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { Mail, Lock, AlertCircle, CheckCircle2, Loader2, Eye, EyeOff } from 'lucide-react';
+import { Mail, Lock, AlertCircle, Loader2, Eye, EyeOff } from 'lucide-react';
 import ucuExamBg from './assets/ucu-exam.jpg';
 import ucuLogo from './assets/ucu-logo.jpg';
 import { testSupabaseConnection } from './lib/auth';
+import { logger } from './lib/logger';
 
 interface HomePageProps {
   users: Array<{
@@ -39,9 +40,12 @@ export default function HomePage({
       setConnectionStatus('checking');
       const result = await testSupabaseConnection();
       setConnectionStatus(result.success ? 'connected' : 'disconnected');
-      if (!result.success && result.error) {
-        console.warn('Connection test:', result.error);
-      }
+
+      // Log detailed connection info to Sentry instead of the browser console
+      logger.info('Supabase connectivity check', {
+        success: result.success,
+        error: result.error,
+      });
     };
     checkConnection();
   }, []);
@@ -93,10 +97,13 @@ export default function HomePage({
       const success = await onLogin(email.trim().toLowerCase(), password.trim());
       if (!success) {
         // Error is already set by onLogin
-        console.log('Login failed');
+        logger.warn('Login failed in HomePage');
       }
     } catch (error: any) {
-      console.error('Login error in HomePage:', error);
+      logger.error('Login error in HomePage', {
+        message: error?.message,
+        stack: error?.stack,
+      });
       // Error handling is done in App.tsx
     } finally {
       setIsLoading(false);
@@ -182,13 +189,6 @@ export default function HomePage({
                       Add your Supabase anon key to the <code className="bg-amber-900/50 px-1 rounded">.env</code> file (VITE_SUPABASE_ANON_KEY). Get it from Supabase Dashboard → Settings → API, then restart the dev server.
                     </p>
                   </div>
-                </div>
-              )}
-
-              {connectionStatus === 'connected' && (
-                <div className="mb-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 flex items-center gap-2">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-300" />
-                  <p className="text-sm font-medium text-emerald-200">Database connected</p>
                 </div>
               )}
 
