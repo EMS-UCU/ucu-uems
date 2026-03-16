@@ -44,6 +44,7 @@ import { getVettingRecordings } from './lib/examServices/chiefExaminerService';
 import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead, clearAllNotifications } from './lib/examServices/notificationService';
 import ucuLogo from './assets/ucu-logo.png';
 import RecordingReviewPanel from './components/RecordingReviewPanel';
+import { VettingConference } from './components/VettingConference';
 import type { RecordingEntry } from './types/recordings';
 import type { VettingSession } from './lib/supabase';
 
@@ -19305,6 +19306,10 @@ function VettingAndAnnotations({
   const vetterHasJoined = currentUserId ? joinedVetters.has(currentUserId) : false;
   const isVetterRestricted = currentUserId ? restrictedVetters.has(currentUserId) : false;
   const showVetterFocusedLayout = isVetter && !isChiefExaminer;
+  const currentVettedPaper =
+    submittedPapers.find((p) => p.status === 'in-vetting' || p.status === 'vetted') || null;
+  const currentPaperId = currentVettedPaper?.id ?? null;
+  const enabledVetters = useMemo(() => Array.from(joinedVetters), [joinedVetters]);
   
   // Simple color selection for text comments (like Word document text color)
   const [selectedColor, setSelectedColor] = useState('#2563EB');
@@ -21171,6 +21176,17 @@ function VettingAndAnnotations({
                 </div>
               </div>
             </div>
+        )}
+        {/* Shared vetting conference: Chief Examiner + selected vetters only */}
+        {vettingSession.active && (
+          <VettingConference
+            currentUserName={users.find((u) => u.id === currentUserId)?.name || undefined}
+            currentUserId={currentUserId || null}
+            paperId={currentPaperId}
+            enabledVetters={enabledVetters}
+            isVetter={isVetter}
+            isChiefExaminer={isChiefExaminer}
+          />
         )}
         {showVetterFocusedLayout && vetterSessionPanel}
         {paperChecklistColumns}
