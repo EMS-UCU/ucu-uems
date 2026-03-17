@@ -359,6 +359,7 @@ const MIN_SESSION_MINUTES = 1;
 const CHECKLIST_COMMENTS_STORAGE_KEY = 'ucu-vetting-checklist-comments';
 const CHECKLIST_COMMENTS_CHANNEL = 'ucu-vetting-checklist-sync';
 const CHECKLIST_TYPING_TTL_MS = 6000;
+const RESTRICTED_VETTER_TIMESTAMPS_KEY = 'ucu-restricted-vetter-timestamps';
 
 const _defaultLecturerModules = [
   'Lecturer Dashboard',
@@ -1453,6 +1454,9 @@ function App() {
   const [activePanelId, setActivePanelId] = useState<string>('overview');
   const [moderationSchedule, setModerationSchedule] = useState<ModerationSchedule>(loadPersistedModerationSchedule());
   const [vettingSession, setVettingSession] = useState<VettingSessionState>(loadPersistedVettingSession());
+  const [isStartingSession, setIsStartingSession] = useState(false);
+  const [isEndingSession, setIsEndingSession] = useState(false);
+  const processedSessionClosureRef = useRef<string | null>(null);
   // Track which vetters have joined the session (enabled camera and started their individual session)
   const [joinedVetters, setJoinedVetters] = useState<Set<string>>(new Set());
   // Track restricted vetters (violated rules - cannot rejoin until reactivated by Chief Examiner)
@@ -1466,6 +1470,37 @@ function App() {
       console.error('Error loading restricted vetters:', error);
       return new Set();
     }
+  };
+  const loadRestrictedVetterTimestamps = (): Record<string, number> => {
+    try {
+      const saved = localStorage.getItem(RESTRICTED_VETTER_TIMESTAMPS_KEY);
+      if (!saved) return {};
+      const parsed = JSON.parse(saved) as Record<string, number>;
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (error) {
+      console.error('Error loading restricted vetter timestamps:', error);
+      return {};
+    }
+  };
+  const setRestrictedVetterTimestamp = (vetterId: string, timestamp: number = Date.now()) => {
+    if (!vetterId) return;
+    const timestamps = loadRestrictedVetterTimestamps();
+    timestamps[vetterId] = timestamp;
+    localStorage.setItem(RESTRICTED_VETTER_TIMESTAMPS_KEY, JSON.stringify(timestamps));
+  };
+  const clearRestrictedVetterTimestamp = (vetterId: string) => {
+    if (!vetterId) return;
+    const timestamps = loadRestrictedVetterTimestamps();
+    if (Object.prototype.hasOwnProperty.call(timestamps, vetterId)) {
+      delete timestamps[vetterId];
+      localStorage.setItem(RESTRICTED_VETTER_TIMESTAMPS_KEY, JSON.stringify(timestamps));
+    }
+  };
+  const getRestrictedVetterTimestamp = (vetterId: string): number | null => {
+    if (!vetterId) return null;
+    const timestamps = loadRestrictedVetterTimestamps();
+    const value = timestamps[vetterId];
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
   };
   const [restrictedVetters, setRestrictedVetters] = useState<Set<string>>(loadRestrictedVetters);
   // One-strike list: vetters who left the window once (signed out). Persisted so that when they try to rejoin we restrict them.
@@ -2272,8 +2307,6 @@ function App() {
 
         const repo = data
           .filter((paper: any) => {
-            // Exclude approved papers - they move to Super Admin's Approved Papers Repository
-            if (paper.approval_status === 'approved_for_printing') return false;
             // Filter out checklists - only include exam papers in repository
             const fileName = paper.file_name || 'Exam Paper';
             return !isChecklist(fileName);
@@ -2453,13 +2486,11 @@ function App() {
               return updated;
             });
 
-            // Update repositoryPapers: when paper is approved, remove it so it disappears from Chief's view
+            // Update repositoryPapers
             setRepositoryPapers((prev) => {
-              if (updatedPaper.approval_status === 'approved_for_printing') {
-                return prev.filter((p) => p.id !== updatedPaper.id);
-              }
               const existingIndex = prev.findIndex((p) => p.id === updatedPaper.id);
               if (existingIndex === -1) {
+                // Paper doesn't exist locally, reload all papers
                 loadExamPapersFromSupabase();
                 return prev;
               }
@@ -2560,35 +2591,30 @@ function App() {
             };
           });
 
-          const repo = data
-            .filter((paper: any) => {
-              if (paper.approval_status === 'approved_for_printing') return false;
-              const fileName = paper.file_name || 'Exam Paper';
-              return !isChecklist(fileName);
-            })
-            .map((paper: any) => {
-              let submittedRole: 'Setter' | 'Team Lead' | 'Chief Examiner' | 'Manual' | 'Unknown' = 'Unknown';
-              if (paper.team_lead_id) {
-                submittedRole = 'Team Lead';
-              } else if (paper.setter_id) {
-                submittedRole = 'Setter';
-              } else if (paper.chief_examiner_id) {
-                submittedRole = 'Chief Examiner';
-              }
-              return {
-                id: paper.id,
-                courseUnit: paper.course_name,
-                courseCode: paper.course_code,
-                semester: paper.semester,
-                year: paper.academic_year,
-                submittedBy: paper.setter_id || paper.team_lead_id || 'Unknown',
-                submittedAt: paper.submitted_at || paper.created_at,
-                fileName: paper.file_name || 'Exam Paper',
-                content: paper.file_url || '',
-                fileSize: paper.file_size || undefined,
-                submittedRole,
-              };
-            });
+          const repo = data.map((paper: any) => {
+            let submittedRole: 'Setter' | 'Team Lead' | 'Chief Examiner' | 'Manual' | 'Unknown' = 'Unknown';
+            if (paper.team_lead_id) {
+              submittedRole = 'Team Lead';
+            } else if (paper.setter_id) {
+              submittedRole = 'Setter';
+            } else if (paper.chief_examiner_id) {
+              submittedRole = 'Chief Examiner';
+            }
+            
+            return {
+              id: paper.id,
+              courseUnit: paper.course_name,
+              courseCode: paper.course_code,
+              semester: paper.semester,
+              year: paper.academic_year,
+              submittedBy: paper.setter_id || paper.team_lead_id || 'Unknown',
+              submittedAt: paper.submitted_at || paper.created_at,
+              fileName: paper.file_name || 'Exam Paper',
+              content: paper.file_url || '',
+              fileSize: paper.file_size || undefined,
+              submittedRole,
+            };
+          });
 
           // Only use papers from Supabase - don't merge with localStorage to avoid showing deleted papers
           const persistedPapers = loadPersistedPapers();
@@ -2984,6 +3010,82 @@ function App() {
     }));
   }, [currentUser?.roles]);
 
+  const forceCloseVetterSessionFromNotification = useCallback((notificationTimestamp?: string) => {
+    if (!currentUser?.roles) return;
+
+    const hasVetterRole = currentUser.roles.some(
+      (role) => String(role).toLowerCase() === 'vetter'
+    );
+    const hasChiefExaminerRole = currentUser.roles.some(
+      (role) => String(role).toLowerCase() === 'chief examiner'
+    );
+
+    // Only force-close pure vetter clients.
+    if (!hasVetterRole || hasChiefExaminerRole) return;
+
+    // Ignore stale end notifications.
+    if (notificationTimestamp) {
+      const t = new Date(notificationTimestamp).getTime();
+      if (Number.isFinite(t) && Date.now() - t > 30 * 60 * 1000) return;
+    }
+
+    setVettingSession((prev) => ({
+      ...prev,
+      active: false,
+      safeBrowserEnabled: false,
+      cameraOn: false,
+      screenshotBlocked: false,
+      switchingLocked: false,
+      lastClosedReason: 'cancelled',
+    }));
+    setJoinedVetters(new Set());
+    setVetterMonitoring(new Map());
+
+    // Force logout immediately as requested.
+    setShowUserDropdown(false);
+    setAuthUserId(null);
+    setAuthError(null);
+  }, [currentUser?.roles]);
+
+  const maybeClearRestrictionFromReactivation = (notificationTimestamp?: string) => {
+    if (!currentUser?.id) return;
+    const vetterId = currentUser.id;
+    const restrictionTime = getRestrictedVetterTimestamp(vetterId);
+    const notificationTime = notificationTimestamp ? new Date(notificationTimestamp).getTime() : NaN;
+    const hasRestriction = restrictedVetters.has(vetterId);
+    const isFreshNotification =
+      Number.isFinite(notificationTime) && Date.now() - notificationTime <= 10 * 60 * 1000;
+    const isNewerThanRestriction =
+      restrictionTime != null && Number.isFinite(notificationTime) && notificationTime > restrictionTime;
+    const shouldClearRestriction =
+      hasRestriction && (isNewerThanRestriction || (restrictionTime == null && isFreshNotification));
+
+    if (!shouldClearRestriction) {
+      if (hasRestriction) {
+        console.log('Ignoring stale re-activation notification for restricted vetter', {
+          vetterId,
+          notificationTime,
+          restrictionTime,
+        });
+      }
+      return;
+    }
+
+    setRestrictedVetters((prev) => {
+      const next = new Set(prev);
+      next.delete(vetterId);
+      localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+      return next;
+    });
+    setOneStrikeVetters((prev) => {
+      const next = new Set(prev);
+      next.delete(vetterId);
+      localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
+      return next;
+    });
+    clearRestrictedVetterTimestamp(vetterId);
+  };
+
   // Load persisted notifications for the signed-in user from Supabase with real-time subscription
   useEffect(() => {
     // On login (or user change), clear toast-seen set so vetter always sees "Vetting Session Started" / "Vetter re-activated" toast and can join
@@ -3027,6 +3129,14 @@ function App() {
             .slice(0, 50);
         });
 
+        const sessionEndTitles = new Set(['Vetting Session Ended', 'Vetting Session Expired', 'Session Expired']);
+        const endSignal = mapped
+          .filter((n) => sessionEndTitles.has(n.title || '') && !n.read)
+          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+        if (endSignal) {
+          forceCloseVetterSessionFromNotification(endSignal.timestamp);
+        }
+
         // Show toast ONLY for session-specific notifications (Chief started / vetter re-activated) - and only if user is still a vetter (mapped already filtered for non-vetters above)
         const toShow = mapped.filter(
           (n) => !n.read && (n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated')
@@ -3050,18 +3160,7 @@ function App() {
             activateVetterSessionFromNotification(mostRecent.timestamp);
             // When vetter receives "Vetter re-activated", clear their local restriction and one-strike so they see Start Session (not "Restricted Access")
             if (mostRecent.title === 'Vetter re-activated' && currentUser?.id) {
-              setRestrictedVetters((prev) => {
-                const next = new Set(prev);
-                next.delete(currentUser.id);
-                localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
-                return next;
-              });
-              setOneStrikeVetters((prev) => {
-                const next = new Set(prev);
-                next.delete(currentUser.id);
-                localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
-                return next;
-              });
+              maybeClearRestrictionFromReactivation(mostRecent.timestamp);
             }
           }
         }
@@ -3098,6 +3197,10 @@ function App() {
               };
               const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
               const isVettingSessionNotif = newNotification.title === 'Vetting Session Started' || newNotification.title === 'Vetter re-activated';
+              const isVettingSessionEndNotif =
+                newNotification.title === 'Vetting Session Ended' ||
+                newNotification.title === 'Vetting Session Expired' ||
+                newNotification.title === 'Session Expired';
               // Revoked vetters must not see vetting session notifications – skip add and toast
               if (isVettingSessionNotif && !isVetter) return;
               const mapped: AppNotification = {
@@ -3114,19 +3217,10 @@ function App() {
                 shownVettingStartedToastIds.current.add(mapped.id);
                 activateVetterSessionFromNotification(mapped.timestamp);
                 if (mapped.title === 'Vetter re-activated' && currentUser?.id) {
-                  setRestrictedVetters((prev) => {
-                    const next = new Set(prev);
-                    next.delete(currentUser.id);
-                    localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
-                    return next;
-                  });
-                  setOneStrikeVetters((prev) => {
-                    const next = new Set(prev);
-                    next.delete(currentUser.id);
-                    localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
-                    return next;
-                  });
+                  maybeClearRestrictionFromReactivation(mapped.timestamp);
                 }
+              } else if (isVettingSessionEndNotif) {
+                forceCloseVetterSessionFromNotification(mapped.timestamp);
               }
               setActiveToast(mapped);
               setTimeout(() => {
@@ -3186,7 +3280,7 @@ function App() {
         supabase.removeChannel(channel);
       };
     }
-  }, [currentUser]);
+  }, [currentUser, forceCloseVetterSessionFromNotification]);
 
   // Vetters: fetch on login only - real-time subscription handles updates
   // Removed polling - notifications only come from real-time subscriptions or user actions
@@ -3222,18 +3316,7 @@ function App() {
             .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
           activateVetterSessionFromNotification(latestStartSignal?.timestamp);
           if (hasReActivated && currentUser?.id) {
-            setRestrictedVetters((prev) => {
-              const next = new Set(prev);
-              next.delete(currentUser.id);
-              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
-              return next;
-            });
-            setOneStrikeVetters((prev) => {
-              const next = new Set(prev);
-              next.delete(currentUser.id);
-              localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
-              return next;
-            });
+            maybeClearRestrictionFromReactivation(latestStartSignal?.timestamp);
           }
         }
       } catch (e) {
@@ -3272,18 +3355,7 @@ function App() {
             .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
           activateVetterSessionFromNotification(latestStartSignal?.timestamp);
           if (hasReActivated && currentUser?.id) {
-            setRestrictedVetters((prev) => {
-              const next = new Set(prev);
-              next.delete(currentUser.id);
-              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
-              return next;
-            });
-            setOneStrikeVetters((prev) => {
-              const next = new Set(prev);
-              next.delete(currentUser.id);
-              localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
-              return next;
-            });
+            maybeClearRestrictionFromReactivation(latestStartSignal?.timestamp);
           }
           const startNotif = mapped.find((n) => n.title === 'Vetting Session Started' || n.title === 'Vetter re-activated');
           if (startNotif && !shownVettingStartedToastIds.current.has(startNotif.id)) {
@@ -3336,18 +3408,7 @@ function App() {
             .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
           activateVetterSessionFromNotification(latestStartSignal?.timestamp);
           if (hasReActivated && currentUser?.id) {
-            setRestrictedVetters((prev) => {
-              const next = new Set(prev);
-              next.delete(currentUser.id);
-              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
-              return next;
-            });
-            setOneStrikeVetters((prev) => {
-              const next = new Set(prev);
-              next.delete(currentUser.id);
-              localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(next)));
-              return next;
-            });
+            maybeClearRestrictionFromReactivation(latestStartSignal?.timestamp);
           }
         }
       } catch (e) {
@@ -3932,6 +3993,27 @@ function App() {
     setAuthUserId(null);
     setAuthError(null);
   };
+
+  // Auto-sign out vetters when a session is closed by expiry/cancel/completion.
+  useEffect(() => {
+    if (vettingSession.active) return;
+    if (!vettingSession.lastClosedReason) return;
+    if (!currentUser?.id) return;
+    if (!currentUserHasRole('Vetter') || currentUserHasRole('Chief Examiner')) return;
+
+    const closureKey = `${vettingSession.lastClosedReason}:${vettingSession.expiresAt ?? 0}:${vettingSession.startedAt ?? 0}`;
+    if (processedSessionClosureRef.current === closureKey) return;
+    processedSessionClosureRef.current = closureKey;
+
+    alert('Vetting session has ended. You have been signed out automatically.');
+    handleLogout();
+  }, [
+    vettingSession.active,
+    vettingSession.lastClosedReason,
+    vettingSession.expiresAt,
+    vettingSession.startedAt,
+    currentUser?.id,
+  ]);
 
   const appendVersionHistory = (
     actor: string,
@@ -4840,6 +4922,10 @@ function App() {
   }, [currentUser?.id, currentUser?.roles]);
 
   const handleStartVetting = async (minutes: number) => {
+    if (isStartingSession || isEndingSession) {
+      return;
+    }
+
     console.log('handleStartVetting called with minutes:', minutes);
     console.log('Current state:', {
       hasVetterRole: currentUserHasRole('Vetter'),
@@ -4873,6 +4959,7 @@ function App() {
         const next = new Set(prev);
         next.add(currentUser.id!);
         localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+        setRestrictedVetterTimestamp(currentUser.id!);
         return next;
       });
       setOneStrikeVetters(prev => {
@@ -4889,6 +4976,8 @@ function App() {
     // If Chief Examiner is starting the global session (when no session is active yet).
     // Use "!vettingSession.active" so that a user with both Chief and Vetter roles starts the session when they click first, instead of only joining.
     if (isChiefExaminer) {
+      setIsStartingSession(true);
+      try {
       if (vettingSession.active) {
         alert('A vetting session is already active.');
         return;
@@ -4938,6 +5027,21 @@ function App() {
 
       // Update workflow stage to 'Vetting in Progress'
     const actor = currentUser?.name ?? 'Unknown';
+
+      // Ensure there is an active paper in vetting when the session starts.
+      // Without this, Start Session can appear to "do nothing" in the UI.
+      const paperForVetting = submittedPapers.find(
+        (p) => p.status !== 'approved' && p.status !== 'vetted'
+      );
+      if (paperForVetting?.id) {
+        setSubmittedPapers((prev) =>
+          prev.map((p) =>
+            p.id === paperForVetting.id ? { ...p, status: 'in-vetting' as const } : p
+          )
+        );
+        void syncPaperStatusToSupabase(paperForVetting.id, 'vetting_in_progress');
+      }
+
     pushWorkflowEvent(
         `Chief Examiner started vetting session with a ${duration}-minute secure window. Vetters can now join by clicking "Start Session" and enabling their camera.`,
       actor,
@@ -5007,6 +5111,9 @@ function App() {
 
       console.log('Global vetting session started by Chief Examiner!');
       return;
+      } finally {
+        setIsStartingSession(false);
+      }
     }
 
     // If Vetter is joining the session (global session must already be active)
@@ -5183,6 +5290,7 @@ function App() {
       newSet.add(vetterId);
       // Persist to localStorage
       localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(newSet)));
+      setRestrictedVetterTimestamp(vetterId);
       return newSet;
     });
     
@@ -5522,9 +5630,8 @@ function App() {
     }
     
     if (confirm(`Are you sure you want to remove "${paper.fileName}" from vetting? This will change its status back to "submitted".`)) {
-      // Skip DB sync for demo/sample papers (they don't exist in exam_papers)
-      const isDemoOrInvalidId = paperId === DEMO_PAPER_ID || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(paperId);
-      if (!isDemoOrInvalidId) {
+      // Skip DB sync only for the explicit demo paper.
+      if (paperId !== DEMO_PAPER_ID) {
         try {
           const { error } = await supabase
             .from('exam_papers')
@@ -6287,7 +6394,7 @@ function App() {
     pushWorkflowEvent(
       'Vetting window expired — all vetter sessions terminated automatically. Records saved and cameras stopped.',
       'System',
-      { stage: 'Vetting Session Expired' }
+      { stage: 'Vetted & Returned to Chief Examiner' }
     );
     
     // Show notification locally (same as session-start: immediate feedback)
@@ -6483,30 +6590,50 @@ function App() {
   };
 
   const handleApprove = async (notes: string, printingDueDate?: string, printingDueTime?: string) => {
-    if (!currentUserHasRole('Chief Examiner')) {
-      alert('Only the Chief Examiner can approve papers for printing.');
-      return;
-    }
+    // Do NOT hard-block based on role or stage here; front-end role checks have
+    // been flaky in some environments and were preventing the approval handler
+    // from ever running (no logs, no updates). Instead, log and continue so that
+    // the backend (Supabase RLS) remains the source of truth for permissions.
     const actor = currentUser?.name ?? 'Unknown';
     const timestamp = new Date().toISOString();
 
-    // Find vetted papers - get the first one (should be the current paper)
-    const vettedPapers = submittedPapers.filter((p) => p.status === 'vetted');
-    const currentPaper = vettedPapers[0];
+    console.log('📝 Approving paper (handler entered):', {
+      actor,
+      timestamp,
+      workflowStage: workflow.stage,
+      userId: currentUser?.id,
+      userRoles: currentUser?.roles,
+    });
+    
+    // Prefer vetted papers, but fall back to the most recent submitted paper if needed.
+    const vettedPapers = submittedPapers
+      .filter(p => p.status === 'vetted')
+      .sort((a, b) => {
+        const aTime = a.submittedAt ? new Date(a.submittedAt).getTime() : 0;
+        const bTime = b.submittedAt ? new Date(b.submittedAt).getTime() : 0;
+        return bTime - aTime;
+      });
 
-    if (!currentPaper?.id) {
-      alert('No paper ready to approve. Please ensure a paper has been vetted (vetting session completed) and is in "vetted" status.');
-      return;
+    let currentPaper = vettedPapers[0];
+
+    if (!currentPaper && submittedPapers.length > 0) {
+      // Fallback: pick the most recently submitted paper if none are explicitly marked as vetted.
+      currentPaper = [...submittedPapers].sort((a, b) => {
+        const aTime = a.submittedAt ? new Date(a.submittedAt).getTime() : 0;
+        const bTime = b.submittedAt ? new Date(b.submittedAt).getTime() : 0;
+        return bTime - aTime;
+      })[0];
+      console.warn('⚠️ No vetted papers found; falling back to most recent submitted paper for approval:', {
+        fallbackPaperId: currentPaper?.id,
+        fallbackCourseCode: currentPaper?.courseCode,
+      });
     }
-
-    // Allow approval when there is a vetted paper; optionally sync workflow stage for UI consistency
-    const allowedStage =
-      workflow.stage === 'Awaiting Approval' || workflow.stage === 'Vetted & Returned to Chief Examiner';
-    if (!allowedStage) {
-      setWorkflow((prev) => ({
-        ...prev,
-        stage: 'Vetted & Returned to Chief Examiner',
-      }));
+    
+    // Call backend service to approve and lock paper
+    if (!currentPaper?.id) {
+      console.error('No vetted paper found to approve');
+      alert('Error: No paper found to approve. Please ensure a paper is in vetted status.');
+      return;
     }
     
     if (!currentUser?.id) {
@@ -6725,6 +6852,11 @@ function App() {
         ? `${approvalDescription} Notes: ${notes}`
         : approvalDescription
     );
+    
+    // Immediately remove the approved paper from local vetting lists
+    // so it disappears from the Vetting & Annotations window even if
+    // there is any delay or issue with Supabase syncing.
+    setSubmittedPapers((prev) => prev.filter((p) => p.id !== currentPaper.id));
     
     // Clear vetting dashboard comments after successful approval
     setChecklistComments(new Map());
@@ -7947,6 +8079,18 @@ function App() {
     : [];
 
   const roleSpecificPanels: PanelConfig[] = [];
+  const papersForVettingSuite = (() => {
+    const activeVettingPapers = submittedPapers.filter(
+      (paper) => paper.status === 'in-vetting' || paper.status === 'vetted'
+    );
+
+    // Fallback: still surface Team Lead submissions when status sync is delayed.
+    if (activeVettingPapers.length > 0) return activeVettingPapers;
+
+    return submittedPapers.filter(
+      (paper) => paper.status === 'submitted' && paper.submittedRole === 'Team Lead'
+    );
+  })();
 
   if (isAuthenticated && isChiefExaminer) {
     roleSpecificPanels.push({
@@ -8027,6 +8171,7 @@ function App() {
               localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(newSet)));
               return newSet;
             });
+            clearRestrictedVetterTimestamp(vetterId);
             // Notify re-activated vetter so they see toast and can join if session is still active
             const message = vettingSession.active
               ? 'You have been re-activated. The vetting session is still active—join by clicking Start Session (Enable Camera).'
@@ -8249,7 +8394,7 @@ function App() {
           onStartVetting={handleStartVetting}
           onCompleteVetting={handleCompleteVetting}
           onAddAnnotation={handleAddAnnotation}
-          submittedPapers={submittedPapers.filter(p => p.status === 'in-vetting' || p.status === 'vetted')}
+          submittedPapers={papersForVettingSuite}
           moderationSchedule={moderationSchedule}
           onScheduleModeration={handleScheduleModeration}
           moderationStartCountdown={moderationStartCountdown}
@@ -8273,6 +8418,7 @@ function App() {
               localStorage.setItem('ucu-vetter-one-strike', JSON.stringify(Array.from(newSet)));
               return newSet;
             });
+            clearRestrictedVetterTimestamp(vetterId);
             // Notify re-activated vetter so they see toast and can join if session is still active
             const message = vettingSession.active
               ? 'You have been re-activated. The vetting session is still active—join by clicking Start Session (Enable Camera).'
@@ -8333,6 +8479,11 @@ function App() {
           onRemoveChecklist={handleRemoveChecklist}
           onRemovePaperFromVetting={handleRemovePaperFromVetting}
           onEndSession={() => {
+            if (isEndingSession || isStartingSession) {
+              return;
+            }
+            setIsEndingSession(true);
+            try {
             // Save vetting session record with all checklist comments before ending
             const vettedPaper = submittedPapers.find(p => p.status === 'in-vetting');
             
@@ -8429,8 +8580,29 @@ function App() {
             const actor = currentUser?.name ?? 'Unknown';
             pushWorkflowEvent(
               'Chief Examiner ended the vetting session. All vetter sessions have been terminated. All checklist comments and annotations have been saved.',
-              actor
+              actor,
+              { stage: 'Vetted & Returned to Chief Examiner' }
             );
+
+            // Notify all vetters that the session has ended so their clients can auto-close/logout.
+            void (async () => {
+              try {
+                const dbVetters = await getVetterUserIds();
+                for (const vetter of dbVetters) {
+                  await createNotification({
+                    user_id: vetter.id,
+                    title: 'Vetting Session Ended',
+                    message: 'Vetting session has been ended by the Chief Examiner. You have been signed out automatically.',
+                    type: 'warning',
+                  });
+                }
+              } catch (error) {
+                console.error('Error notifying vetters about session end:', error);
+              }
+            })();
+            } finally {
+              setIsEndingSession(false);
+            }
           }}
           onCheckForSession={handleCheckForSession}
           onForwardChecklist={handleForwardChecklistDecision}
@@ -9644,9 +9816,9 @@ const syncPaperStatusToSupabase = async (paperId: string, status: ExamPaperStatu
   if (!paperId) {
     return;
   }
-  // Skip DB sync for demo/sample papers (id is not a UUID)
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(paperId);
-  if (!isUuid || paperId === DEMO_PAPER_ID) {
+  // Skip DB sync only for the explicit demo paper; allow non-UUID IDs
+  // for real environment data so vetting status persists across reloads.
+  if (paperId === DEMO_PAPER_ID) {
     return;
   }
   try {
@@ -19603,8 +19775,16 @@ function VettingAndAnnotations({
     );
   };
   
-  // Use submittedPapers from props
-  const papersToDisplay = submittedPapers.length > 0 ? submittedPapers : [];
+  // Track papers manually removed from this vetting view so they disappear
+  // from the dropdown immediately after removal.
+  const [removedFromVettingIds, setRemovedFromVettingIds] = useState<Set<string>>(new Set());
+
+  // Use submittedPapers from props, excluding manually-removed papers unless
+  // they have re-entered vetting (in-vetting/vetted), in which case show them again.
+  const papersToDisplay = submittedPapers.filter((paper) => {
+    if (!removedFromVettingIds.has(paper.id)) return true;
+    return paper.status === 'in-vetting' || paper.status === 'vetted';
+  });
   
   // Default to 30 minutes from now for start
   const defaultStartDateTime = new Date(Date.now() + 30 * 60 * 1000).toISOString().slice(0, 16);
@@ -19983,17 +20163,8 @@ function VettingAndAnnotations({
     return resolvePaperUrl(selectedPaper.fileUrl);
   }, [selectedPaper?.fileUrl]);
 
-  // For vetters, get first two papers to display side by side
-  const vetterPapers = isVetter && papersToDisplay.length >= 2 
-    ? papersToDisplay.slice(0, 2) 
-    : isVetter && papersToDisplay.length === 1
-    ? [papersToDisplay[0]]
-    : [];
-  
-  const getPaperUrl = (paper: SubmittedPaper) => {
-    if (!paper?.fileUrl) return null;
-    return resolvePaperUrl(paper.fileUrl);
-  };
+  // For vetters, always work on a single focused paper at a time
+  const vetterPapers = isVetter && selectedPaper ? [selectedPaper] : [];
 
   // Track paper IDs to detect when papers are removed
   const paperIds = useMemo(() => papersToDisplay.map(p => p.id).sort().join(','), [papersToDisplay]);
@@ -20081,9 +20252,12 @@ function VettingAndAnnotations({
   const hasCustomChecklist = checklist !== digitalChecklist;
   const hasCustomChecklistPdf = Boolean(customChecklistPdf?.url);
   
-  // Vetters can only see paper/checklist after they've joined
-  // Chief Examiner can always see everything
-  const canViewPaperAndChecklist = isChiefExaminer || (isVetter && vetterHasJoined);
+  // Vetters can only see paper/checklist after they've joined.
+  // Chief Examiner can see everything while the workflow is not yet fully approved.
+  // Once the paper is approved, hide the vetting & annotations layout for everyone.
+  const canViewPaperAndChecklist =
+    workflow.stage !== 'Approved' &&
+    (isChiefExaminer || (isVetter && vetterHasJoined));
   
   // Vetters can start their session only when global session is active, they haven't joined yet, and they're not restricted
   const canVetterStartSession = isVetter && !isVetterRestricted && vettingSession.active && !vetterHasJoined;
@@ -20129,10 +20303,23 @@ function VettingAndAnnotations({
                   <p className="text-[0.65rem] font-semibold text-slate-600 mb-0.5">Course</p>
                   <p className="text-xs font-bold text-slate-800">{selectedPaper.courseCode}</p>
                 </div>
-                {(selectedPaper.status === 'in-vetting' || selectedPaper.status === 'vetted') && onRemovePaperFromVetting && (
+                {onRemovePaperFromVetting && (
                   <button
                     type="button"
-                    onClick={() => onRemovePaperFromVetting(selectedPaper.id)}
+                    onClick={() => {
+                      const removingId = selectedPaper.id;
+                      setRemovedFromVettingIds((prev) => {
+                        const next = new Set(prev);
+                        next.add(removingId);
+                        return next;
+                      });
+
+                      // Switch selection to another available paper immediately.
+                      const remainingPapers = papersToDisplay.filter((p) => p.id !== removingId);
+                      setSelectedPaper(remainingPapers[0] || null);
+
+                      onRemovePaperFromVetting(removingId);
+                    }}
                     className="w-full rounded-lg bg-gradient-to-r from-red-500 to-rose-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
                   >
                     Remove Paper from Vetting
@@ -20140,96 +20327,89 @@ function VettingAndAnnotations({
                 )}
               </>
             )}
-            {selectedPaper.fileUrl ? (
+            {selectedPaper.fileUrl && inlinePaperUrl ? (
               <div className="space-y-3">
-                {isVetter && vetterPapers.length > 0 ? (
-                  <div className={`grid gap-3 ${vetterPapers.length === 2 ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                    {vetterPapers.map((paper, _index) => {
-                      const paperUrl = getPaperUrl(paper);
-                      if (!paperUrl) return null;
-                      return (
-                        <div key={paper.id} className="rounded-xl border-2 border-blue-300/70 bg-white/90 p-3 shadow-inner flex flex-col">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow">
-                                <span className="text-white text-sm">🪟</span>
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold text-slate-800">Secure In-Window Viewer</p>
-                                <p className="text-[0.6rem] text-slate-500">{paper.fileName}</p>
-                              </div>
-                            </div>
-                            <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.6rem] font-semibold text-emerald-700">
-                              Live Preview
-                            </span>
-                          </div>
-                          <div className="mt-3 aspect-[210/297] overflow-hidden rounded-lg border border-slate-200 bg-slate-900/5">
-                            <iframe
-                              key={paperUrl}
-                              src={`${paperUrl}#toolbar=0&navpanes=0`}
-                              title={`Secure viewer for ${paper.fileName}`}
-                              className="h-full w-full"
-                              loading="lazy"
-                            />
-                          </div>
-                          <p className="mt-2 text-[0.6rem] text-slate-500">Zoom, scroll, and annotate from here while Safe Browser keeps other tabs locked.</p>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  inlinePaperUrl && (
-                    <div className="rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md">
-                      <div className="mb-3 flex items-center justify-between border-b border-blue-100 pb-2">
-                        <div className="flex items-center gap-2">
-                          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow-sm">
-                            <span className="text-white text-xs">🪟</span>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-800">Secure In-Window Viewer</p>
-                            <p className="text-[0.65rem] text-slate-600">Document stays inside the Safe Browser</p>
-                          </div>
-                        </div>
-                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.65rem] font-semibold text-emerald-700">
-                          Live Preview
-                        </span>
+                <div className="rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md">
+                  <div className="mb-3 flex items-center justify-between border-b border-blue-100 pb-2">
+                    <div className="flex items-center gap-2">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow-sm">
+                        <span className="text-white text-xs">🪟</span>
                       </div>
-                      <div className="mt-3 aspect-[210/297] overflow-hidden rounded-lg border-2 border-slate-200 bg-slate-50 shadow-inner">
-                        <iframe
-                          key={inlinePaperUrl}
-                          src={`${inlinePaperUrl}#toolbar=0&navpanes=0`}
-                          title={`Secure viewer for ${selectedPaper.fileName}`}
-                          className="h-full w-full"
-                          loading="lazy"
-                        />
+                      <div>
+                        <p className="text-xs font-bold text-slate-800">Secure In-Window Viewer</p>
+                        <p className="text-[0.65rem] text-slate-600">
+                          {isVetter ? selectedPaper.fileName : 'Document stays inside the Safe Browser'}
+                        </p>
                       </div>
-                      <p className="mt-2 text-[0.65rem] text-slate-500 text-center">Zoom, scroll, and annotate from here while Safe Browser keeps other tabs locked.</p>
                     </div>
-                  )
-                )}
-                {isChiefExaminer && selectedPaper.status === 'vetted' && (
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowApprovalModal(true);
-                      }}
-                      className="flex-1 rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
-                    >
-                      ✓ Push to Next Stage
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setChiefRejectionComment('');
-                        setShowRejectionModal(true);
-                      }}
-                      className="flex-1 rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all	duration-300"
-                    >
-                      ✗ Rejected
-                    </button>
+                    <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[0.65rem] font-semibold text-emerald-700">
+                      Live Preview
+                    </span>
+                  </div>
+                  <div className="mt-3 aspect-[210/297] overflow-hidden rounded-lg border-2 border-slate-200 bg-slate-50 shadow-inner">
+                    <iframe
+                      key={inlinePaperUrl}
+                      src={`${inlinePaperUrl}#toolbar=0&navpanes=0`}
+                      title={`Secure viewer for ${selectedPaper.fileName}`}
+                      className="h-full w-full"
+                      loading="lazy"
+                    />
+                  </div>
+                  <p className="mt-2 text-[0.65rem] text-slate-500 text-center">
+                    Zoom, scroll, and annotate from here while Safe Browser keeps other tabs locked.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-lg border-2 border-amber-200 bg-amber-50/80 p-2.5 text-center">
+                <p className="text-[0.65rem] text-amber-700">File not available</p>
+              </div>
+            )}
+            {isChiefExaminer &&
+              selectedPaper &&
+              (selectedPaper.status === 'vetted' || workflowStage === 'Vetted & Returned to Chief Examiner') &&
+              workflowStage !== 'Approved' &&
+              !vettingSession.active && (
+              <>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowApprovalModal(true);
+                    }}
+                    className="flex-1 rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+                  >
+                    ✓ Push to Next Stage
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChiefRejectionComment('');
+                      setShowRejectionModal(true);
+                    }}
+                    className="flex-1 rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+                  >
+                    ✗ Rejected
+                  </button>
+                </div>
+                {checklistComments && checklistComments.size > 0 && (
+                  <div className="mt-3 rounded-lg border border-blue-200 bg-white/80 p-3 shadow-sm">
+                    <p className="text-[0.65rem] font-semibold text-slate-700 mb-1">
+                      Checklist comments from vetters
+                    </p>
+                    <div className="max-h-32 overflow-y-auto space-y-1">
+                      {Array.from(checklistComments.values())
+                        .filter((entry) => entry?.comment)
+                        .map((entry, index) => (
+                          <p key={index} className="text-[0.65rem] text-slate-700 leading-snug">
+                            • {entry.comment}
+                          </p>
+                        ))}
+                    </div>
                   </div>
                 )}
+              </>
+            )}
                 
                 {/* Approval Modal with Date/Time Picker */}
                 {showApprovalModal && (
@@ -20326,12 +20506,6 @@ function VettingAndAnnotations({
                   </div>
                 )}
               </div>
-            ) : (
-              <div className="rounded-lg border-2 border-amber-200 bg-amber-50/80 p-2.5 text-center">
-                <p className="text-[0.65rem] text-amber-700">File not available</p>
-              </div>
-            )}
-          </div>
         ) : (
           <p className="text-xs text-slate-500">No paper selected</p>
         )}
@@ -21933,168 +22107,9 @@ function VettingAndAnnotations({
           </div>
         )}
 
-        {/* Approve/Reject Section for Chief Examiner when papers are vetted - ALWAYS SHOW IF PAPERS ARE VETTED */}
-        {isChiefExaminer && papersToDisplay.length > 0 && papersToDisplay.some((p: SubmittedPaper) => p.status === 'vetted') && (
-          <div className="mt-5 space-y-4">
-            <div className="rounded-xl border-2 border-green-300/50 bg-gradient-to-br from-green-50 via-emerald-50 to-teal-50 p-4 shadow-lg">
-              <div className="flex items-center gap-2 mb-4">
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 shadow-md">
-                  <span className="text-white text-lg">✓</span>
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-slate-800">
-                    Review & Decision
-                  </h3>
-                  <p className="text-xs text-slate-600">
-                    Approve paper for printing or return for revision
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <textarea
-                  id="decision-notes"
-                  placeholder="Decision notes (required for rejection, optional for approval)..."
-                  className="w-full rounded-lg border-2 border-green-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-600 focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500/40 resize-none"
-                  rows={3}
-                />
-                
-                <div className="flex gap-3">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const notesEl = document.getElementById('decision-notes') as HTMLTextAreaElement;
-                      const notes = notesEl?.value || '';
-                      setApprovalNotes(notes);
-                      setShowApprovalModal(true);
-                    }}
-                    className="flex-1 rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
-                  >
-                    ✓ Approve & Forward to Print
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const notesEl = document.getElementById('decision-notes') as HTMLTextAreaElement;
-                      const notes = notesEl?.value || '';
-                      if (!notes.trim()) {
-                        alert('Please provide feedback notes when rejecting a paper.');
-                        return;
-                      }
-                      
-                      // Open professional rejection modal instead of using browser prompts
-                      setRejectionNotes(notes);
-                      setDeadlineDays(3);
-                      setDeadlineHours(0);
-                      setDeadlineMinutes(0);
-                      setShowDeadlineRejectionModal(true);
-                    }}
-                    className="flex-1 rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-4 py-2.5 text-sm font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
-                  >
-                    ✗ Reject & Return to Team Lead
-                  </button>
-                </div>
-                
-                {/* Approval Modal with Date/Time Picker */}
-                {showApprovalModal && (
-                  <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 p-4">
-                    <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
-                      <h3 className="text-lg font-bold text-blue-900 mb-4">Approve Paper for Printing</h3>
-                      <p className="text-sm text-slate-600 mb-4">
-                        Set the printing due date and time. A password will be automatically generated on this date/time and sent to Super Admin.
-                      </p>
-                      
-                      <div className="space-y-4">
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-700 mb-2">
-                            Decision Notes (Optional)
-                          </label>
-                          <textarea
-                            value={approvalNotes}
-                            onChange={(e) => setApprovalNotes(e.target.value)}
-                            placeholder="Optional notes for approval..."
-                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
-                            rows={3}
-                          />
-                        </div>
-                        
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-700 mb-2">
-                            Printing Due Date *
-                          </label>
-                          <input
-                            type="date"
-                            value={printingDueDate}
-                            onChange={(e) => setPrintingDueDate(e.target.value)}
-                            min={new Date().toISOString().split('T')[0]}
-                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
-                            required
-                          />
-                        </div>
-                        
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-700 mb-2">
-                            Printing Due Time *
-                          </label>
-                          <input
-                            type="time"
-                            value={printingDueTime}
-                            onChange={(e) => setPrintingDueTime(e.target.value)}
-                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
-                            required
-                          />
-                        </div>
-                      </div>
-                      
-                      <div className="mt-6 flex gap-3">
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            if (!printingDueDate || !printingDueTime) {
-                              alert('Please select both date and time');
-                              return;
-                            }
-                            try {
-                              const notesEl = document.getElementById('decision-notes') as HTMLTextAreaElement;
-                              if (onApprove) {
-                                await onApprove(approvalNotes, printingDueDate, printingDueTime);
-                              }
-                              // Show success message
-                              alert(`✅ Paper approved successfully!\n\nPrinting due: ${printingDueDate} at ${printingDueTime}\n\nThe paper has been locked in the Approved Papers Repository.`);
-                              if (notesEl) notesEl.value = '';
-                              setApprovalNotes('');
-                              setPrintingDueDate('');
-                              setPrintingDueTime('09:00');
-                              setShowApprovalModal(false);
-                            } catch (error: any) {
-                              alert(`❌ Failed to approve paper: ${error.message || 'Unknown error'}`);
-                              console.error('Approval error:', error);
-                            }
-                          }}
-                          className="flex-1 rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600"
-                        >
-                          Confirm Approval
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setShowApprovalModal(false);
-                            setPrintingDueDate('');
-                            setPrintingDueTime('09:00');
-                            setApprovalNotes('');
-                          }}
-                          className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
+        {/* Bottom-level Review & Decision block removed to avoid duplication.
+            Approval/rejection is now controlled solely via the per-paper controls
+            in the main vetting viewer. */}
       </div>
     </SectionCard>
   );

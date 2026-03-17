@@ -37,11 +37,16 @@ export async function getApprovedPapersRepository(): Promise<ApprovedPaper[]> {
     console.log('📊 All papers (first 10):', allPapers);
     console.log('📊 Statuses found:', allPapers?.map(p => ({ id: p.id, status: p.status, is_locked: p.is_locked })));
     
-    // Now fetch approved papers using approval_status (not status)
+    // Now fetch approved/locked papers.
+    // Primary filter: approval_status = 'approved_for_printing'.
+    // Backwards compatibility: also include any papers where the legacy
+    // workflow `status` is 'approved_for_printing'.
+    // Extra safety: also include any papers where is_locked = true, in case
+    // approval_status didn't update correctly due to RLS or other issues.
     const { data, error } = await supabase
       .from('exam_papers')
       .select('*')
-      .eq('approval_status', 'approved_for_printing')
+      .or('approval_status.eq.approved_for_printing,status.eq.approved_for_printing,is_locked.eq.true')
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -54,7 +59,7 @@ export async function getApprovedPapersRepository(): Promise<ApprovedPaper[]> {
       return [];
     }
 
-    console.log('✅ Approved papers query result:', {
+    console.log('✅ Approved papers query result (raw):', {
       count: data?.length || 0,
       papers: data?.map(p => ({
         id: p.id,
@@ -121,7 +126,39 @@ export async function getApprovedPapersRepository(): Promise<ApprovedPaper[]> {
       }
     }
 
-    return (data || []) as ApprovedPaper[];
+    // Normalize results so that any paper that has been approved for printing is
+    // treated as locked in the UI, even if the underlying `is_locked` flag was
+    // not set correctly due to older data or partial updates.
+    const normalized = (data || []).map((paper: any) => {
+      const isApproved =
+        paper.approval_status === 'approved_for_printing' ||
+        paper.status === 'approved_for_printing';
+
+      // If the paper is approved but `is_locked` is missing/false, force it to true
+      // in the frontend representation so that Super Admins see it as locked.
+      if (isApproved && (paper.is_locked === null || paper.is_locked === false || typeof paper.is_locked === 'undefined')) {
+        return {
+          ...paper,
+          is_locked: true,
+        };
+      }
+
+      return paper;
+    });
+
+    console.log('✅ Approved papers after normalization:', {
+      count: normalized.length,
+      papers: normalized.map(p => ({
+        id: p.id,
+        course_code: p.course_code,
+        workflow_status: p.status,
+        approval_status: p.approval_status,
+        is_locked: p.is_locked,
+        printing_due_date: p.printing_due_date
+      }))
+    });
+
+    return normalized as ApprovedPaper[];
   } catch (error) {
     console.error('❌ Exception fetching approved papers:', error);
     return [];
@@ -165,34 +202,9 @@ export async function getPapersNeedingPasswordGeneration(): Promise<ApprovedPape
 }
 
 /**
- * Parse printing due date + time into a single Date (exact hour, minute, second).
- * Supports time as "HH:MM" or "HH:MM:SS". Seconds default to 0 if omitted.
- */
-export function getPrintingDueMoment(printingDueDate?: string, printingDueTime?: string): Date | null {
-  if (!printingDueDate || !printingDueTime) return null;
-  const due = new Date(printingDueDate);
-  if (isNaN(due.getTime())) return null;
-  const parts = printingDueTime.trim().split(':').map(Number);
-  const hours = parts[0] ?? 0;
-  const minutes = parts[1] ?? 0;
-  const seconds = parts[2] ?? 0;
-  due.setHours(hours, minutes, seconds, 0);
-  return due;
-}
-
-/**
- * True when current time is at or past the printing due date/time (exact to the second).
- */
-export function isPrintingDuePassed(printingDueDate?: string, printingDueTime?: string): boolean {
-  const due = getPrintingDueMoment(printingDueDate, printingDueTime);
-  if (!due) return false;
-  return new Date() >= due;
-}
-
-/**
  * Generate password for a paper and notify Super Admin
  * @param examPaperId - The paper ID
- * @param force - If true, generate password even if due date hasn't passed (for testing/admin override)
+ * @param force - If true, generate password even if due date hasn't passed (for testing)
  */
 export async function generatePasswordForPaper(
   examPaperId: string,
@@ -220,14 +232,14 @@ export async function generatePasswordForPaper(
       return { success: false, error: 'Paper must be approved and locked before generating password' };
     }
 
-    // Check if due date/time has passed (exact hour, minute, second) unless forcing
+    // Check if due date has passed (unless forcing)
     if (!force && paper.printing_due_date && paper.printing_due_time) {
-      const dueMoment = getPrintingDueMoment(paper.printing_due_date, paper.printing_due_time);
-      if (dueMoment && new Date() < dueMoment) {
-        return {
-          success: false,
-          error: `Paper is not due yet. Password can be generated at ${dueMoment.toLocaleString()}`,
-        };
+      const dueDate = new Date(paper.printing_due_date);
+      const [hours, minutes] = paper.printing_due_time.split(':').map(Number);
+      dueDate.setHours(hours, minutes, 0, 0);
+      const now = new Date();
+      if (dueDate > now) {
+        return { success: false, error: `Paper is not due yet. Due: ${dueDate.toLocaleString()}` };
       }
     }
 

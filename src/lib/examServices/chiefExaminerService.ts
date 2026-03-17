@@ -84,9 +84,12 @@ export async function approveExamForPrinting(
 ): Promise<{ success: boolean; error?: string }> {
   try {
     // Prepare update data
-    // Note: We set approval_status (not status) to separate approval from workflow/vetting status
+    // Note: We set approval_status (not status) to separate approval from workflow/vetting status.
+    // However, some parts of the app and historical data still look at the legacy `status` field,
+    // so we keep both in sync here to ensure approved papers reliably appear everywhere.
     const updateData: any = {
       approval_status: 'approved_for_printing',
+      status: 'approved_for_printing',
       updated_at: new Date().toISOString(),
       is_locked: true, // Lock paper in repository
     };

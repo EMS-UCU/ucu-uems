@@ -5,8 +5,8 @@ import {
   getApprovedPapersRepository,
   unlockPaper,
   reLockPaper,
+  getPapersNeedingPasswordGeneration,
   generatePasswordForPaper,
-  isPrintingDuePassed,
   type ApprovedPaper,
 } from '../lib/examServices/repositoryService';
 import { supabase } from '../lib/supabase';
@@ -441,36 +441,50 @@ export default function ApprovedPapersRepository({
     printWindow.document.close();
   };
 
-  // Papers that need a password and whose printing due date/time has been reached (exact hour, minute, second)
-  const papersDueForPasswordGeneration = papers.filter(
-    (p) =>
-      p.is_locked &&
-      !p.unlock_password_hash &&
-      p.approval_status === 'approved_for_printing' &&
-      p.printing_due_date &&
-      p.printing_due_time &&
-      isPrintingDuePassed(p.printing_due_date, p.printing_due_time)
-  );
-
   const handleGeneratePasswords = async () => {
-    if (papersDueForPasswordGeneration.length === 0) {
-      alert(
-        'No papers are currently due for password generation. The button will activate when the exact printing due date and time has been reached for at least one locked paper.'
-      );
+    // Check if there are locked papers without passwords
+    const lockedPapersWithoutPasswords = papers.filter(
+      p => p.is_locked && !p.unlock_password_hash && p.approval_status === 'approved_for_printing'
+    );
+
+    if (lockedPapersWithoutPasswords.length === 0) {
+      alert('No locked papers found that need password generation.');
       return;
     }
 
+    const force = confirm(
+      `Found ${lockedPapersWithoutPasswords.length} locked paper(s) without passwords.\n\n` +
+      `Click OK to generate passwords for all of them (even if due date hasn't passed).\n` +
+      `Click Cancel to only generate for papers that are due.`
+    );
+
     setGeneratingPasswords(true);
     try {
+      let papersToProcess: ApprovedPaper[];
+      
+      if (force) {
+        // Generate for all locked papers without passwords
+        papersToProcess = lockedPapersWithoutPasswords;
+      } else {
+        // Only generate for papers that are due
+        papersToProcess = await getPapersNeedingPasswordGeneration();
+        if (papersToProcess.length === 0) {
+          alert('No papers are currently due for password generation. Papers need to have a printing due date/time that has passed.');
+          setGeneratingPasswords(false);
+          return;
+        }
+      }
+
+      // Generate passwords for each paper
       const results = [];
-      for (const paper of papersDueForPasswordGeneration) {
-        const result = await generatePasswordForPaper(paper.id, false);
+      for (const paper of papersToProcess) {
+        const result = await generatePasswordForPaper(paper.id, force);
         results.push({
           paperId: paper.id,
           courseCode: paper.course_code,
           success: result.success,
           error: result.error,
-          password: result.password,
+          password: result.password
         });
       }
 
@@ -567,13 +581,9 @@ export default function ApprovedPapersRepository({
             <button
               type="button"
               onClick={handleGeneratePasswords}
-              disabled={generatingPasswords || papersDueForPasswordGeneration.length === 0}
+              disabled={generatingPasswords}
               className="rounded-lg border border-green-300 bg-green-50 px-3 py-1.5 text-sm font-semibold text-green-700 transition hover:bg-green-100 disabled:opacity-50 disabled:cursor-not-allowed"
-              title={
-                papersDueForPasswordGeneration.length === 0
-                  ? 'Generate Passwords activates when the printing due date and time has been reached for at least one paper'
-                  : `Generate passwords for ${papersDueForPasswordGeneration.length} paper(s) due for printing`
-              }
+              title="Generate passwords for papers that are due for printing"
             >
               {generatingPasswords ? 'Generating...' : 'Generate Passwords'}
             </button>
