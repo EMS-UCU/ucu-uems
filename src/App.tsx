@@ -1503,6 +1503,25 @@ function App() {
     return typeof value === 'number' && Number.isFinite(value) ? value : null;
   };
   const [restrictedVetters, setRestrictedVetters] = useState<Set<string>>(loadRestrictedVetters);
+
+  // Papers manually removed from vetting (must not re-appear unless Chief re-sends).
+  const loadRemovedFromVettingIds = (): Set<string> => {
+    try {
+      const saved = localStorage.getItem('ucu-removed-from-vetting-ids');
+      if (!saved) return new Set();
+      const parsed = JSON.parse(saved) as string[];
+      return new Set(parsed);
+    } catch (error) {
+      console.error('Error loading removed-from-vetting ids:', error);
+      return new Set();
+    }
+  };
+  const [removedFromVettingIds, setRemovedFromVettingIds] = useState<Set<string>>(loadRemovedFromVettingIds);
+  const removedFromVettingIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    removedFromVettingIdsRef.current = removedFromVettingIds;
+  }, [removedFromVettingIds]);
+
   // One-strike list: vetters who left the window once (signed out). Persisted so that when they try to rejoin we restrict them.
   const loadOneStrikeVetters = (): Set<string> => {
     try {
@@ -1535,6 +1554,7 @@ function App() {
   // Track draft text for real-time collaboration - Map<commentKey, Map<vetterId, { text: string; vetterName: string }>>
   const [checklistDraftText, setChecklistDraftText] = useState<Map<string, Map<string, { text: string; vetterName: string }>>>(new Map());
   const checklistCommentsChannelRef = useRef<BroadcastChannel | null>(null);
+  const previousInVettingIdsRef = useRef<Set<string>>(new Set());
   const activeChecklist = customChecklist ?? digitalChecklist;
   // Vetting session records - stores completed sessions
   const loadVettingRecords = (): VettingSessionRecord[] => {
@@ -1842,6 +1862,46 @@ function App() {
     };
   }, [currentUser?.id]);
 
+  const clearChecklistStateForNewVettingCycle = useCallback(() => {
+    setChecklistComments(new Map());
+    setChecklistDraftText(new Map());
+    setChecklistTypingState(new Map());
+    setChecklistForwardedToTeamLead(false);
+    setForwardedChecklistPayload(null);
+    try {
+      localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
+      localStorage.removeItem('ucu-checklist-forwarded');
+    } catch (error) {
+      console.error('Error clearing checklist state for new vetting cycle:', error);
+    }
+    if (checklistCommentsChannelRef.current) {
+      checklistCommentsChannelRef.current.postMessage({
+        type: 'comments_cleared',
+        payload: {
+          sourceUserId: currentUser?.id,
+        },
+      });
+    }
+  }, [currentUser?.id]);
+
+  // Safety net: whenever a paper newly enters in-vetting, treat that as a fresh cycle
+  // and clear stale checklist context even if status changed from another code path.
+  useEffect(() => {
+    const currentInVettingIds = new Set(
+      submittedPapers.filter((paper) => paper.status === 'in-vetting').map((paper) => paper.id)
+    );
+    let hasNewInVettingPaper = false;
+    currentInVettingIds.forEach((paperId) => {
+      if (!previousInVettingIdsRef.current.has(paperId)) {
+        hasNewInVettingPaper = true;
+      }
+    });
+    if (hasNewInVettingPaper) {
+      clearChecklistStateForNewVettingCycle();
+    }
+    previousInVettingIdsRef.current = currentInVettingIds;
+  }, [submittedPapers, clearChecklistStateForNewVettingCycle]);
+
   useEffect(() => {
     const interval = window.setInterval(() => {
       setChecklistTypingState((prev) => {
@@ -2066,6 +2126,38 @@ function App() {
     }
   }, [vettingSession]);
 
+  // Persist removed-from-vetting ids locally (so removed papers stay removed after refresh).
+  useEffect(() => {
+    try {
+      localStorage.setItem('ucu-removed-from-vetting-ids', JSON.stringify(Array.from(removedFromVettingIds)));
+    } catch (error) {
+      console.error('Error saving removed-from-vetting ids to localStorage:', error);
+    }
+  }, [removedFromVettingIds]);
+
+  const setEquals = (a: Set<string>, b: Set<string>) => {
+    if (a === b) return true;
+    if (a.size !== b.size) return false;
+    for (const v of a) {
+      if (!b.has(v)) return false;
+    }
+    return true;
+  };
+
+  const vettingSessionEquals = (a: VettingSessionState, b: VettingSessionState) => {
+    return (
+      a.active === b.active &&
+      a.startedAt === b.startedAt &&
+      a.durationMinutes === b.durationMinutes &&
+      a.expiresAt === b.expiresAt &&
+      a.safeBrowserEnabled === b.safeBrowserEnabled &&
+      a.cameraOn === b.cameraOn &&
+      a.screenshotBlocked === b.screenshotBlocked &&
+      a.switchingLocked === b.switchingLocked &&
+      a.lastClosedReason === b.lastClosedReason
+    );
+  };
+
   // ---- Multi-browser sync: moderation_state in Supabase ----
   // Load vetting_session and moderation_schedule from Supabase when user context is ready
   useEffect(() => {
@@ -2074,7 +2166,7 @@ function App() {
         const { data, error } = await supabase
           .from('moderation_state')
           .select('key, value')
-          .in('key', ['vetting_session', 'moderation_schedule']);
+          .in('key', ['vetting_session', 'moderation_schedule', 'restricted_vetters', 'removed_from_vetting_ids']);
 
         if (error) {
           console.warn('Moderation state load failed (table may not exist yet):', error.message);
@@ -2086,8 +2178,7 @@ function App() {
           const value = row.value as Record<string, unknown>;
           if (row.key === 'vetting_session' && value && typeof value === 'object') {
             const vs = value as Record<string, unknown>;
-            setVettingSession(
-              normalizeVettingSessionState({
+            const next = normalizeVettingSessionState({
                 active: Boolean(vs.active),
                 startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
                 durationMinutes:
@@ -2104,8 +2195,8 @@ function App() {
                   | 'expired'
                   | 'cancelled'
                   | undefined,
-              })
-            );
+              });
+            setVettingSession((prev) => (vettingSessionEquals(prev, next) ? prev : next));
           }
           if (row.key === 'moderation_schedule' && value && typeof value === 'object') {
             const ms = value as Record<string, unknown>;
@@ -2116,6 +2207,28 @@ function App() {
               scheduledStartTime: ms.scheduledStartTime != null ? Number(ms.scheduledStartTime) : undefined,
               scheduledEndTime: ms.scheduledEndTime != null ? Number(ms.scheduledEndTime) : undefined,
             });
+          }
+          if (row.key === 'restricted_vetters' && value && typeof value === 'object') {
+            const ids = (value as { ids?: unknown }).ids;
+            const parsed = Array.isArray(ids) ? ids.map((v) => String(v)) : [];
+            const next = new Set(parsed);
+            setRestrictedVetters((prev) => (setEquals(prev, next) ? prev : next));
+            try {
+              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+            } catch {
+              /* ignore */
+            }
+          }
+          if (row.key === 'removed_from_vetting_ids' && value && typeof value === 'object') {
+            const ids = (value as { ids?: unknown }).ids;
+            const parsed = Array.isArray(ids) ? ids.map((v) => String(v)) : [];
+            const next = new Set(parsed);
+            setRemovedFromVettingIds((prev) => (setEquals(prev, next) ? prev : next));
+            try {
+              localStorage.setItem('ucu-removed-from-vetting-ids', JSON.stringify(Array.from(next)));
+            } catch {
+              /* ignore */
+            }
           }
           if (row.key === 'forwarded_checklist' && value && typeof value === 'object') {
             const fc = value as { forwarded?: boolean; checklistComments?: Record<string, unknown> };
@@ -2153,6 +2266,31 @@ function App() {
       });
   }, [vettingSession]);
 
+  // Persist restrictedVetters to Supabase for real-time Chief visibility (cross-browser)
+  useEffect(() => {
+    const payload = { ids: Array.from(restrictedVetters) };
+    supabase
+      .from('moderation_state')
+      .upsert({ key: 'restricted_vetters', value: payload, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+      .then(({ error }) => {
+        if (error) console.warn('Failed to persist restricted_vetters to Supabase:', error.message);
+      });
+  }, [restrictedVetters]);
+
+  // Persist removed-from-vetting ids so removed papers do not re-appear across devices.
+  useEffect(() => {
+    const payload = { ids: Array.from(removedFromVettingIds) };
+    supabase
+      .from('moderation_state')
+      .upsert(
+        { key: 'removed_from_vetting_ids', value: payload, updated_at: new Date().toISOString() },
+        { onConflict: 'key' }
+      )
+      .then(({ error }) => {
+        if (error) console.warn('Failed to persist removed_from_vetting_ids to Supabase:', error.message);
+      });
+  }, [removedFromVettingIds]);
+
   // Persist moderationSchedule to Supabase for multi-browser sync
   useEffect(() => {
     const payload = {
@@ -2178,12 +2316,12 @@ function App() {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'moderation_state' },
         (payload) => {
-          const row = (payload as { new?: { key: string; value: Record<string, unknown> } }).new;
+          const row = (payload as unknown as { new?: { key: string; value: Record<string, unknown> } })
+            .new;
           if (!row?.key) return;
           if (row.key === 'vetting_session' && row.value && typeof row.value === 'object') {
             const vs = row.value as Record<string, unknown>;
-            setVettingSession(
-              normalizeVettingSessionState({
+            const next = normalizeVettingSessionState({
                 active: Boolean(vs.active),
                 startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
                 durationMinutes:
@@ -2200,8 +2338,8 @@ function App() {
                   | 'expired'
                   | 'cancelled'
                   | undefined,
-              })
-            );
+              });
+            setVettingSession((prev) => (vettingSessionEquals(prev, next) ? prev : next));
           }
           if (row.key === 'moderation_schedule' && row.value && typeof row.value === 'object') {
             const ms = row.value as Record<string, unknown>;
@@ -2212,6 +2350,28 @@ function App() {
               scheduledStartTime: ms.scheduledStartTime != null ? Number(ms.scheduledStartTime) : undefined,
               scheduledEndTime: ms.scheduledEndTime != null ? Number(ms.scheduledEndTime) : undefined,
             });
+          }
+          if (row.key === 'restricted_vetters' && row.value && typeof row.value === 'object') {
+            const ids = (row.value as { ids?: unknown }).ids;
+            const parsed = Array.isArray(ids) ? ids.map((v) => String(v)) : [];
+            const next = new Set(parsed);
+            setRestrictedVetters((prev) => (setEquals(prev, next) ? prev : next));
+            try {
+              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+            } catch {
+              /* ignore */
+            }
+          }
+          if (row.key === 'removed_from_vetting_ids' && row.value && typeof row.value === 'object') {
+            const ids = (row.value as { ids?: unknown }).ids;
+            const parsed = Array.isArray(ids) ? ids.map((v) => String(v)) : [];
+            const next = new Set(parsed);
+            setRemovedFromVettingIds((prev) => (setEquals(prev, next) ? prev : next));
+            try {
+              localStorage.setItem('ucu-removed-from-vetting-ids', JSON.stringify(Array.from(next)));
+            } catch {
+              /* ignore */
+            }
           }
           if (row.key === 'forwarded_checklist' && row.value && typeof row.value === 'object') {
             const fc = row.value as { forwarded?: boolean; checklistComments?: Record<string, unknown> };
@@ -2340,9 +2500,19 @@ function App() {
         // IMPORTANT: Only merge papers that exist in Supabase - don't add back deleted papers from localStorage
         // IMPORTANT: Always use Supabase status - don't preserve old localStorage statuses that might be stale
         const persistedPapers = loadPersistedPapers();
-        const mergedPapers: SubmittedPaper[] = submitted.map(supabasePaper => {
-          // Always use Supabase status - it's the source of truth
-          // Only merge other fields from persisted if needed (but status comes from Supabase)
+        const mergedPapers: SubmittedPaper[] = submitted.map((supabasePaper) => {
+          // Prefer Supabase as the source of truth, but if the local UI
+          // previously had this paper in an advanced state (in-vetting/vetted)
+          // and Supabase still reports "submitted", keep the local status so
+          // refresh doesn't make the paper disappear from the vetting suite.
+          const persisted = persistedPapers.find((p) => p.id === supabasePaper.id);
+          if (
+            persisted &&
+            (persisted.status === 'in-vetting' || persisted.status === 'vetted') &&
+            supabasePaper.status === 'submitted'
+          ) {
+            return { ...supabasePaper, status: persisted.status };
+          }
           return supabasePaper;
         });
         // Only add persisted papers that aren't in Supabase if they're truly new (not deleted)
@@ -2616,13 +2786,17 @@ function App() {
             };
           });
 
-          // Only use papers from Supabase - don't merge with localStorage to avoid showing deleted papers
+          // Merge with persisted state to prevent refresh/focus from downgrading
+          // vetting papers back to "submitted" before backend status propagation completes.
           const persistedPapers = loadPersistedPapers();
-          const mergedPapers: SubmittedPaper[] = submitted.map(supabasePaper => {
-            const persisted = persistedPapers.find(p => p.id === supabasePaper.id);
-            // If paper exists in persisted and has "in-vetting" status, keep that status
-            if (persisted && persisted.status === 'in-vetting') {
-              return { ...supabasePaper, status: 'in-vetting' as const };
+          const mergedPapers: SubmittedPaper[] = submitted.map((supabasePaper) => {
+            const persisted = persistedPapers.find((p) => p.id === supabasePaper.id);
+            if (
+              persisted &&
+              (persisted.status === 'in-vetting' || persisted.status === 'vetted') &&
+              supabasePaper.status === 'submitted'
+            ) {
+              return { ...supabasePaper, status: persisted.status };
             }
             return supabasePaper;
           });
@@ -3041,10 +3215,8 @@ function App() {
     setJoinedVetters(new Set());
     setVetterMonitoring(new Map());
 
-    // Force logout immediately as requested.
+    // End only the vetting session context; keep the account logged in.
     setShowUserDropdown(false);
-    setAuthUserId(null);
-    setAuthError(null);
   }, [currentUser?.roles]);
 
   const maybeClearRestrictionFromReactivation = (notificationTimestamp?: string) => {
@@ -3678,37 +3850,35 @@ function App() {
       };
     };
 
-    // 4. Camera monitoring - Only if cameraOn is true
-    const monitorCamera = async () => {
-      if (!vettingSession.cameraOn) {
+    // 4. Camera monitoring - rely on the stream captured during "Start Session (Enable Camera)"
+    // so we don't create competing camera streams (which can cause flicker and random failures).
+    const monitorCamera = () => {
+      if (!vettingSession.cameraOn || !currentUser?.id) {
         return () => {}; // No-op cleanup
       }
 
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        // Camera is active - we can monitor it
-        // Store stream reference for cleanup
-        (window as any).__vettingCameraStream = stream;
-        
-        // Monitor camera status
-        const checkCamera = setInterval(() => {
-          if (stream.active) {
-            // Camera is active
-          } else {
-            alert('Camera disconnected. Please ensure your camera remains active during the session.');
-          }
-        }, 5000);
+      const stream =
+        vetterCameraStreams.current.get(currentUser.id) ??
+        vetterMonitoringRef.current.get(currentUser.id)?.cameraStream ??
+        null;
 
-        return () => {
-          clearInterval(checkCamera);
-          stream.getTracks().forEach(track => track.stop());
-          delete (window as any).__vettingCameraStream;
-        };
-      } catch (error) {
-        console.error('Camera access error:', error);
-        alert('Camera access is required for the vetting session. Please enable camera permissions.');
-        return () => {}; // No-op cleanup on error
+      if (!stream) {
+        console.warn('Camera monitoring skipped: no stream found for current vetter');
+        return () => {};
       }
+
+      let alerted = false;
+      const tracks = stream.getVideoTracks();
+      const handleEnded = () => {
+        if (alerted) return;
+        alerted = true;
+        alert('Camera disconnected. Please ensure your camera remains active during the session.');
+      };
+
+      tracks.forEach((t) => t.addEventListener('ended', handleEnded));
+      return () => {
+        tracks.forEach((t) => t.removeEventListener('ended', handleEnded));
+      };
     };
 
     // 5. Fullscreen enforcement (optional - makes it harder to switch)
@@ -3757,15 +3927,9 @@ function App() {
     let cleanupCamera: (() => void) | undefined;
     const cleanupFullscreen = enforceFullscreen();
 
-    // Start camera monitoring (async) - only if cameraOn is true AND user is a Vetter
-    // Chief Examiners can start the session but don't need camera access
-    // Vetters will be prompted for camera when they join the active session
+    // Start camera monitoring - only if cameraOn is true AND user is a joined Vetter
     if (vettingSession.cameraOn && currentUserHasRole('Vetter')) {
-      monitorCamera().then(cleanup => {
-        cleanupCamera = cleanup;
-      }).catch(err => {
-        console.error('Camera monitoring setup error:', err);
-      });
+      cleanupCamera = monitorCamera();
     }
 
     // Cleanup when session ends
@@ -3790,7 +3954,7 @@ function App() {
         logVetterWarning?.(
           vetterId,
           'window_leave',
-          'Session expired. Camera feed terminated and vetter signed out automatically.',
+          'Session expired. Camera feed terminated and vetter removed from session automatically.',
           'critical'
         );
       });
@@ -3873,14 +4037,6 @@ function App() {
         console.log(`📹 Stopped camera stream for vetter ${vetterId} (moderation ended)`);
       });
       vetterCameraStreams.current.clear();
-      
-      // Stop global monitoring camera stream if it exists
-      if ((window as any).__vettingCameraStream) {
-        const globalStream = (window as any).__vettingCameraStream as MediaStream;
-        globalStream.getTracks().forEach(track => track.stop());
-        delete (window as any).__vettingCameraStream;
-        console.log('📹 Stopped global monitoring camera stream (moderation ended)');
-      }
       
       // Remove all vetters from joined set
       setJoinedVetters(new Set());
@@ -3994,7 +4150,8 @@ function App() {
     setAuthError(null);
   };
 
-  // Auto-sign out vetters when a session is closed by expiry/cancel/completion.
+  // Notify pure vetters when a session is closed by expiry/cancel/completion.
+  // Account stays logged in; only the vetting session is closed.
   useEffect(() => {
     if (vettingSession.active) return;
     if (!vettingSession.lastClosedReason) return;
@@ -4005,8 +4162,7 @@ function App() {
     if (processedSessionClosureRef.current === closureKey) return;
     processedSessionClosureRef.current = closureKey;
 
-    alert('Vetting session has ended. You have been signed out automatically.');
-    handleLogout();
+    alert('Vetting session has ended. You have been removed from the vetting session. Your account is still logged in.');
   }, [
     vettingSession.active,
     vettingSession.lastClosedReason,
@@ -5031,7 +5187,7 @@ function App() {
       // Ensure there is an active paper in vetting when the session starts.
       // Without this, Start Session can appear to "do nothing" in the UI.
       const paperForVetting = submittedPapers.find(
-        (p) => p.status !== 'approved' && p.status !== 'vetted'
+        (p) => !removedFromVettingIds.has(p.id) && p.status !== 'approved' && p.status !== 'vetted'
       );
       if (paperForVetting?.id) {
         setSubmittedPapers((prev) =>
@@ -5131,84 +5287,80 @@ function App() {
         return;
       }
 
-      // STRICT: Require camera access before vetter can start
+      // STRICT: Require camera access before vetter can start.
+      // Request the camera ONCE and reuse that stream for preview, monitoring, and recording.
+      let cameraStream: MediaStream;
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        // Camera access granted - stop the stream for now, will be reactivated by safe browser effect
-        stream.getTracks().forEach(track => track.stop());
+        cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       } catch (error) {
         alert('Camera access is REQUIRED to join the vetting session. Please enable camera permissions and try again.');
         console.error('Vetter join blocked: Camera access denied', error);
         return;
       }
 
-      // Mark this vetter as joined
-      setJoinedVetters(prev => new Set(prev).add(currentUser.id!));
-      
-      // Store camera stream for Chief Examiner monitoring and recording
-      try {
-        const cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        vetterCameraStreams.current.set(currentUser.id!, cameraStream);
-        
-        // Start video recording for audit purposes
-        try {
-          const mediaRecorder = new MediaRecorder(cameraStream, {
-            mimeType: 'video/webm;codecs=vp9',
-            videoBitsPerSecond: 2500000, // 2.5 Mbps for good quality
-          });
-          
-          const recordingChunks: Blob[] = [];
-          
-          // Store chunks reference for this recorder
-          vetterRecordingChunks.current.set(currentUser.id!, recordingChunks);
-          
-          mediaRecorder.ondataavailable = (event) => {
-            if (event.data && event.data.size > 0) {
-              const chunks = vetterRecordingChunks.current.get(currentUser.id!);
-              if (chunks) {
-                chunks.push(event.data);
-                vetterRecordingChunks.current.set(currentUser.id!, chunks);
-              }
-            }
-          };
-          
-          mediaRecorder.onstop = () => {
-            const chunks = vetterRecordingChunks.current.get(currentUser.id!) || [];
-            const blob = new Blob(chunks, { type: 'video/webm' });
-            console.log(`📹 Recording stopped for vetter ${currentUser.id}, size: ${blob.size} bytes, chunks: ${chunks.length}`);
-          };
-          
-          mediaRecorder.onerror = (event) => {
-            console.error('MediaRecorder error:', event);
-          };
-          
-          // Start recording
-          mediaRecorder.start(1000); // Collect data every second
-          vetterMediaRecorders.current.set(currentUser.id!, mediaRecorder);
-          
-          console.log(`📹 Started video recording for vetter ${currentUser.id}`);
-        } catch (recordingError) {
-          console.error('Failed to start video recording:', recordingError);
-          // Continue even if recording fails - monitoring is more important
-        }
-        
-        // Initialize monitoring data for this vetter (preserve existing violation count if rejoining)
-        setVetterMonitoring(prev => {
-          const newMap = new Map(prev);
-          const existing = newMap.get(currentUser.id!);
-          const preservedViolations = existing && typeof existing.violations === 'number' ? existing.violations : 0;
-          newMap.set(currentUser.id!, {
-            vetterId: currentUser.id!,
-            vetterName: currentUser.name ?? 'Unknown',
-            joinedAt: Date.now(),
-            cameraStream,
-            warnings: existing?.warnings ?? [],
-            violations: preservedViolations,
-          });
-          return newMap;
+      // Mark this vetter as joined (enables safe browser enforcement effect)
+      setJoinedVetters((prev) => new Set(prev).add(currentUser.id!));
+
+      // Store camera stream for Chief Examiner monitoring and later cleanup
+      vetterCameraStreams.current.set(currentUser.id!, cameraStream);
+
+      // Initialize monitoring data for this vetter (preserve existing violation count if any)
+      setVetterMonitoring((prev) => {
+        const newMap = new Map(prev);
+        const existing = newMap.get(currentUser.id!);
+        const preservedViolations =
+          existing && typeof existing.violations === 'number' ? existing.violations : 0;
+        newMap.set(currentUser.id!, {
+          vetterId: currentUser.id!,
+          vetterName: currentUser.name ?? 'Unknown',
+          joinedAt: Date.now(),
+          cameraStream,
+          warnings: existing?.warnings ?? [],
+          violations: preservedViolations,
         });
-      } catch (error) {
-        console.error('Failed to capture camera stream for monitoring:', error);
+        return newMap;
+      });
+
+      // Start video recording for audit purposes (best-effort)
+      try {
+        const mediaRecorder = new MediaRecorder(cameraStream, {
+          mimeType: 'video/webm;codecs=vp9',
+          videoBitsPerSecond: 2500000, // 2.5 Mbps for good quality
+        });
+
+        const recordingChunks: Blob[] = [];
+
+        // Store chunks reference for this recorder
+        vetterRecordingChunks.current.set(currentUser.id!, recordingChunks);
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data && event.data.size > 0) {
+            const chunks = vetterRecordingChunks.current.get(currentUser.id!);
+            if (chunks) {
+              chunks.push(event.data);
+              vetterRecordingChunks.current.set(currentUser.id!, chunks);
+            }
+          }
+        };
+
+        mediaRecorder.onstop = () => {
+          const chunks = vetterRecordingChunks.current.get(currentUser.id!) || [];
+          const blob = new Blob(chunks, { type: 'video/webm' });
+          console.log(`📹 Recording stopped for vetter ${currentUser.id}, size: ${blob.size} bytes, chunks: ${chunks.length}`);
+        };
+
+        mediaRecorder.onerror = (event) => {
+          console.error('MediaRecorder error:', event);
+        };
+
+        // Start recording
+        mediaRecorder.start(1000); // Collect data every second
+        vetterMediaRecorders.current.set(currentUser.id!, mediaRecorder);
+
+        console.log(`📹 Started video recording for vetter ${currentUser.id}`);
+      } catch (recordingError) {
+        console.error('Failed to start video recording:', recordingError);
+        // Continue even if recording fails - monitoring is more important
       }
       
       const actor = currentUser.name ?? 'Unknown';
@@ -5622,11 +5774,11 @@ function App() {
     }
   };
 
-  const handleRemovePaperFromVetting = async (paperId: string) => {
+  const handleRemovePaperFromVetting = async (paperId: string): Promise<boolean> => {
     const paper = submittedPapers.find(p => p.id === paperId);
     if (!paper) {
       alert('Paper not found.');
-      return;
+      return false;
     }
     
     if (confirm(`Are you sure you want to remove "${paper.fileName}" from vetting? This will change its status back to "submitted".`)) {
@@ -5641,12 +5793,12 @@ function App() {
           if (error) {
             console.error('Error updating paper status in Supabase:', error);
             alert(`Failed to sync status change to database: ${error.message}`);
-            return;
+            return false;
           }
         } catch (error: any) {
           console.error('Unexpected error syncing paper status:', error);
           alert(`Failed to sync status change: ${error?.message || 'Unknown error'}`);
-          return;
+          return false;
         }
       }
 
@@ -5665,11 +5817,20 @@ function App() {
         }
         return updated;
       });
+
+      // Ensure this paper stays removed from the vetting suite until the Chief explicitly re-sends it.
+      setRemovedFromVettingIds((prev) => {
+        const next = new Set(prev);
+        next.add(paperId);
+        return next;
+      });
       
       // Note: The realtime UPDATE handler will also update the paper when the DB change propagates,
       // but since we're setting status to 'submitted', it will be filtered out of the vetting view
       alert(`Paper "${paper.fileName}" has been removed from vetting and returned to submitted status.`);
+      return true;
     }
+    return false;
   };
 
   const handleUploadChecklistFile = (file: File) => {
@@ -6026,14 +6187,6 @@ function App() {
       }
     }
     
-    // Stop global monitoring camera stream if it exists
-    if ((window as any).__vettingCameraStream) {
-      const globalStream = (window as any).__vettingCameraStream as MediaStream;
-      globalStream.getTracks().forEach(track => track.stop());
-      delete (window as any).__vettingCameraStream;
-      console.log('📹 Stopped global monitoring camera stream');
-    }
-    
     // Disable safe browser mode and stop all camera streams
     setVettingSession((prev) => ({
       ...prev,
@@ -6361,14 +6514,6 @@ function App() {
       console.log(`📹 Stopped camera stream for vetter ${vetterId}`);
     });
     vetterCameraStreams.current.clear();
-    
-    // Stop global monitoring camera stream if it exists
-    if ((window as any).__vettingCameraStream) {
-      const globalStream = (window as any).__vettingCameraStream as MediaStream;
-      globalStream.getTracks().forEach(track => track.stop());
-      delete (window as any).__vettingCameraStream;
-      console.log('📹 Stopped global monitoring camera stream (session expired)');
-    }
     
     // Capture who was in this session before clearing (so we only notify them, not all vetters)
     const sessionVetterIds = new Set(joinedVetters);
@@ -8250,6 +8395,15 @@ function App() {
           repositoryPapers={repositoryPapers}
           submittedPapers={submittedPapers}
           setSubmittedPapers={setSubmittedPapers}
+          onSendToVetting={(paperId) => {
+            setRemovedFromVettingIds((prev) => {
+              if (!prev.has(paperId)) return prev;
+              const next = new Set(prev);
+              next.delete(paperId);
+              return next;
+            });
+            clearChecklistStateForNewVettingCycle();
+          }}
         />
       ),
     });
@@ -8402,6 +8556,7 @@ function App() {
           currentUserId={currentUser?.id}
           joinedVetters={joinedVetters}
           restrictedVetters={restrictedVetters}
+          removedFromVettingIds={removedFromVettingIds}
           vetterMonitoring={vetterMonitoring}
           logVetterWarning={logVetterWarning}
           users={users}
@@ -8555,14 +8710,6 @@ function App() {
             });
             vetterCameraStreams.current.clear();
             
-            // Stop global monitoring camera stream if it exists
-            if ((window as any).__vettingCameraStream) {
-              const globalStream = (window as any).__vettingCameraStream as MediaStream;
-              globalStream.getTracks().forEach(track => track.stop());
-              delete (window as any).__vettingCameraStream;
-              console.log('📹 Stopped global monitoring camera stream (session ended by Chief Examiner)');
-            }
-            
             // End the global session and disable safe browser mode
             setVettingSession({
               active: false,
@@ -8584,7 +8731,7 @@ function App() {
               { stage: 'Vetted & Returned to Chief Examiner' }
             );
 
-            // Notify all vetters that the session has ended so their clients can auto-close/logout.
+            // Notify all vetters that the session has ended so their clients can auto-close the vetting session.
             void (async () => {
               try {
                 const dbVetters = await getVetterUserIds();
@@ -8592,7 +8739,7 @@ function App() {
                   await createNotification({
                     user_id: vetter.id,
                     title: 'Vetting Session Ended',
-                    message: 'Vetting session has been ended by the Chief Examiner. You have been signed out automatically.',
+                    message: 'Vetting session has been ended by the Chief Examiner. You have been removed from the vetting session.',
                     type: 'warning',
                   });
                 }
@@ -9812,25 +9959,42 @@ const statToneClasses: Record<
   amber: 'border-amber-300 bg-amber-50 text-amber-800',
 };
 
-const syncPaperStatusToSupabase = async (paperId: string, status: ExamPaperStatus) => {
+const syncPaperStatusToSupabase = async (paperId: string, status: ExamPaperStatus): Promise<boolean> => {
   if (!paperId) {
-    return;
+    return false;
   }
   // Skip DB sync only for the explicit demo paper; allow non-UUID IDs
   // for real environment data so vetting status persists across reloads.
   if (paperId === DEMO_PAPER_ID) {
-    return;
+    return true;
   }
   try {
+    const updatePayload: Record<string, any> = {
+      status,
+      updated_at: new Date().toISOString(),
+    };
+
+    // If a previously approved/locked paper is sent back into vetting,
+    // clear approval + lock fields so status mapping no longer forces "approved".
+    if (status === 'appointed_for_vetting' || status === 'vetting_in_progress') {
+      updatePayload.approval_status = null;
+      updatePayload.is_locked = false;
+      updatePayload.printing_due_date = null;
+      updatePayload.printing_due_time = null;
+    }
+
     const { error } = await supabase
       .from('exam_papers')
-      .update({ status })
+      .update(updatePayload)
       .eq('id', paperId);
     if (error) {
       console.error(`Error updating paper ${paperId} to status "${status}":`, error);
+      return false;
     }
+    return true;
   } catch (error) {
     console.error(`Unexpected error syncing paper ${paperId} status "${status}" to Supabase:`, error);
+    return false;
   }
 };
 
@@ -12272,6 +12436,7 @@ interface ChiefExaminerConsoleProps {
   }>;
   submittedPapers: SubmittedPaper[];
   setSubmittedPapers: React.Dispatch<React.SetStateAction<SubmittedPaper[]>>;
+  onSendToVetting?: (paperId: string) => void;
   restrictedVetters?: Set<string>;
   onReactivateVetter?: (vetterId: string) => void;
   sectionId?: string;
@@ -12389,6 +12554,7 @@ function ChiefExaminerConsole({
   repositoryPapers,
   submittedPapers,
   setSubmittedPapers,
+  onSendToVetting,
   restrictedVetters = new Set(),
   onReactivateVetter,
   sectionId,
@@ -13625,6 +13791,7 @@ function ChiefExaminerConsole({
         repositoryPapers={repositoryPapers} 
         submittedPapers={submittedPapers}
         setSubmittedPapers={setSubmittedPapers}
+        onSendToVetting={onSendToVetting}
       />
     </div>
   );
@@ -15529,9 +15696,15 @@ interface AISimilarityDetectionPanelProps {
   }>;
   submittedPapers: SubmittedPaper[];
   setSubmittedPapers: React.Dispatch<React.SetStateAction<SubmittedPaper[]>>;
+  onSendToVetting?: (paperId: string) => void;
 }
 
-function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubmittedPapers }: AISimilarityDetectionPanelProps) {
+function AISimilarityDetectionPanel({
+  repositoryPapers,
+  submittedPapers,
+  setSubmittedPapers,
+  onSendToVetting,
+}: AISimilarityDetectionPanelProps) {
   const [selectedCourse, setSelectedCourse] = useState<string>('');
   const [isScanning, setIsScanning] = useState(false);
   const [similarityResults, setSimilarityResults] = useState<SimilarityResult[]>([]);
@@ -15786,7 +15959,10 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
     return 'text-blue-600';
   };
 
-  const handleSendToVetting = (paperId: string) => {
+  const handleSendToVetting = async (paperId: string) => {
+    // Chief explicitly re-sent this paper to vetting: allow it to appear again.
+    onSendToVetting?.(paperId);
+
     setSubmittedPapers((prev) => {
       const base = stripDemoPaper(prev);
       const updated = base.map((paper) => {
@@ -15798,7 +15974,11 @@ function AISimilarityDetectionPanel({ repositoryPapers, submittedPapers, setSubm
       return ensureDemoPaper(updated);
     });
     
-    void syncPaperStatusToSupabase(paperId, 'vetting_in_progress');
+    const synced = await syncPaperStatusToSupabase(paperId, 'appointed_for_vetting');
+    if (!synced) {
+      alert('Paper moved to vetting in this browser, but we could not persist the change to the database. Please refresh and try again.');
+      return;
+    }
     alert('Paper has been sent to vetting successfully! It will remain in the vetting suite until the session is completed or advanced.');
   };
 
@@ -19463,7 +19643,8 @@ interface VettingAndAnnotationsProps {
   onChecklistDraftChange?: (key: string, draftText: string) => void;
   onUploadChecklist?: (file: File) => void;
   onRemoveChecklist?: () => void;
-  onRemovePaperFromVetting?: (paperId: string) => void;
+  onRemovePaperFromVetting?: (paperId: string) => boolean | Promise<boolean>;
+  removedFromVettingIds?: Set<string>;
   onEndSession?: () => void;
   onCheckForSession?: () => void | Promise<void>;
   onApprove?: (notes: string, printingDueDate?: string, printingDueTime?: string) => void | Promise<void>;
@@ -19540,6 +19721,7 @@ function VettingAndAnnotations({
           currentUserId,
           joinedVetters = new Set(),
           restrictedVetters = new Set(),
+          removedFromVettingIds = new Set(),
           vetterMonitoring,
           logVetterWarning: _logVetterWarning,
           onReactivateVetter,
@@ -19610,7 +19792,8 @@ function VettingAndAnnotations({
   };
 
   // Vetter circular preview: attach camera stream to video element when available (fixes black/no-face)
-  const vetterPreviewStream = (isVetter && currentUserId && vetterMonitoring?.get(currentUserId)?.cameraStream) || (window as any).__vettingCameraStream;
+  const vetterPreviewStream =
+    (isVetter && currentUserId && vetterMonitoring?.get(currentUserId)?.cameraStream) || null;
   useEffect(() => {
     const video = vetterSelfVideoRef.current;
     if (!video || !vetterPreviewStream || !vetterPreviewStream.active) return;
@@ -19775,10 +19958,6 @@ function VettingAndAnnotations({
     );
   };
   
-  // Track papers manually removed from this vetting view so they disappear
-  // from the dropdown immediately after removal.
-  const [removedFromVettingIds, setRemovedFromVettingIds] = useState<Set<string>>(new Set());
-
   // Use submittedPapers from props, excluding manually-removed papers unless
   // they have re-entered vetting (in-vetting/vetted), in which case show them again.
   const papersToDisplay = submittedPapers.filter((paper) => {
@@ -20261,6 +20440,12 @@ function VettingAndAnnotations({
   
   // Vetters can start their session only when global session is active, they haven't joined yet, and they're not restricted
   const canVetterStartSession = isVetter && !isVetterRestricted && vettingSession.active && !vetterHasJoined;
+  const canChiefShowDecisionControls =
+    Boolean(isChiefExaminer) &&
+    Boolean(selectedPaper) &&
+    workflowStage !== 'Approved' &&
+    !vettingSession.active &&
+    selectedPaper?.status === 'vetted';
 
   const examWindow = (
     <div className="rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50/90 via-indigo-50/90 to-cyan-50/90 p-4 shadow-md">
@@ -20308,17 +20493,11 @@ function VettingAndAnnotations({
                     type="button"
                     onClick={() => {
                       const removingId = selectedPaper.id;
-                      setRemovedFromVettingIds((prev) => {
-                        const next = new Set(prev);
-                        next.add(removingId);
-                        return next;
+                      Promise.resolve(onRemovePaperFromVetting(removingId)).then((ok) => {
+                        if (!ok) return;
+                        // Let the "papersToDisplay" effect pick a valid next paper.
+                        setSelectedPaper(null);
                       });
-
-                      // Switch selection to another available paper immediately.
-                      const remainingPapers = papersToDisplay.filter((p) => p.id !== removingId);
-                      setSelectedPaper(remainingPapers[0] || null);
-
-                      onRemovePaperFromVetting(removingId);
                     }}
                     className="w-full rounded-lg bg-gradient-to-r from-red-500 to-rose-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
                   >
@@ -20365,11 +20544,7 @@ function VettingAndAnnotations({
                 <p className="text-[0.65rem] text-amber-700">File not available</p>
               </div>
             )}
-            {isChiefExaminer &&
-              selectedPaper &&
-              (selectedPaper.status === 'vetted' || workflowStage === 'Vetted & Returned to Chief Examiner') &&
-              workflowStage !== 'Approved' &&
-              !vettingSession.active && (
+            {canChiefShowDecisionControls && (
               <>
                 <div className="flex gap-2">
                   <button
@@ -21330,9 +21505,13 @@ function VettingAndAnnotations({
     }
 
     if (showVetterFocusedLayout && !vetterHasJoined) {
-      return (
+      return vettingSession.active ? (
         <div className="rounded-2xl border-2 border-dashed border-blue-200 bg-white/80 px-4 py-6 text-center text-sm text-slate-600">
           Join the secure session to reveal the exam paper and moderation checklist.
+        </div>
+      ) : (
+        <div className="rounded-2xl border-2 border-amber-200 bg-amber-50 px-4 py-6 text-center text-sm text-amber-700">
+          The vetting session has ended and all vetters have been signed out. Waiting for the Chief Examiner to start a new session.
         </div>
       );
     }
@@ -21361,25 +21540,36 @@ function VettingAndAnnotations({
           </div>
         </div>
       ) : !vetterHasJoined ? (
-        <div className="space-y-2">
-          <button
-            type="button"
-            onClick={() => onStartVetting(customDuration)}
-            disabled={!vettingSession.active}
-            className="w-full rounded-xl bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-3 text-sm font-bold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {vettingSession.active ? 'Start Session' : 'Waiting for Chief…'}
-          </button>
-          {!vettingSession.active && onCheckForSession && (
+        vettingSession.active ? (
+          // Session is active but this vetter has not joined yet
+          <div className="space-y-2">
             <button
               type="button"
-              onClick={() => void onCheckForSession()}
-              className="w-full rounded-xl border-2 border-slate-300 bg-slate-50 px-4 py-2 text-xs font-semibold text-slate-700 shadow transition hover:bg-slate-100"
+              onClick={() => onStartVetting(customDuration)}
+              disabled={!vettingSession.active}
+              className="w-full rounded-xl bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-3 text-sm font-bold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Check for session
+              Start Session
             </button>
-          )}
-        </div>
+            {!vettingSession.active && onCheckForSession && (
+              <button
+                type="button"
+                onClick={() => void onCheckForSession()}
+                className="w-full rounded-xl border-2 border-slate-300 bg-slate-50 px-4 py-2 text-xs font-semibold text-slate-700 shadow transition hover:bg-slate-100"
+              >
+                Check for session
+              </button>
+            )}
+          </div>
+        ) : (
+          // Global session is not active anymore – vetter is removed from vetting session
+          <div className="rounded-lg border-2 border-amber-300 bg-amber-50 p-4 text-center">
+            <h3 className="text-sm font-bold text-amber-800 mb-1">Session Ended</h3>
+            <p className="text-xs text-amber-700">
+              The vetting session has ended. You have been removed from this vetting session, but your account remains signed in. Please wait for the Chief Examiner to start a new session if further vetting is required.
+            </p>
+          </div>
+        )
       ) : vettingSession.active ? (
         <div className="space-y-2">
           {isChiefExaminer ? (
