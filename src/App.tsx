@@ -44,6 +44,7 @@ import { getVettingRecordings } from './lib/examServices/chiefExaminerService';
 import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead, clearAllNotifications } from './lib/examServices/notificationService';
 import ucuLogo from './assets/ucu-logo.png';
 import RecordingReviewPanel from './components/RecordingReviewPanel';
+import { VettingConference } from './components/VettingConference';
 import type { RecordingEntry } from './types/recordings';
 import type { VettingSession } from './lib/supabase';
 
@@ -665,6 +666,24 @@ const normalizeVettingSessionState = (
     lastClosedReason: session.lastClosedReason,
   };
 };
+
+const isSameVettingSessionState = (a: VettingSessionState, b: VettingSessionState): boolean =>
+  a.active === b.active &&
+  a.startedAt === b.startedAt &&
+  a.durationMinutes === b.durationMinutes &&
+  a.expiresAt === b.expiresAt &&
+  a.safeBrowserEnabled === b.safeBrowserEnabled &&
+  a.cameraOn === b.cameraOn &&
+  a.screenshotBlocked === b.screenshotBlocked &&
+  a.switchingLocked === b.switchingLocked &&
+  a.lastClosedReason === b.lastClosedReason;
+
+const isSameModerationScheduleState = (a: ModerationSchedule, b: ModerationSchedule): boolean =>
+  a.scheduled === b.scheduled &&
+  a.startDateTime === b.startDateTime &&
+  a.endDateTime === b.endDateTime &&
+  a.scheduledStartTime === b.scheduledStartTime &&
+  a.scheduledEndTime === b.scheduledEndTime;
 
 const DEMO_PAPER_ID = 'demo-networking';
 
@@ -2178,7 +2197,8 @@ function App() {
           const value = row.value as Record<string, unknown>;
           if (row.key === 'vetting_session' && value && typeof value === 'object') {
             const vs = value as Record<string, unknown>;
-            const next = normalizeVettingSessionState({
+            setVettingSession(
+              normalizeVettingSessionState({
                 active: Boolean(vs.active),
                 startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
                 durationMinutes:
@@ -2195,18 +2215,21 @@ function App() {
                   | 'expired'
                   | 'cancelled'
                   | undefined,
-              });
-            setVettingSession((prev) => (vettingSessionEquals(prev, next) ? prev : next));
+              })
+            );
           }
           if (row.key === 'moderation_schedule' && value && typeof value === 'object') {
             const ms = value as Record<string, unknown>;
-            setModerationSchedule({
+            const nextSchedule: ModerationSchedule = {
               scheduled: Boolean(ms.scheduled),
               startDateTime: typeof ms.startDateTime === 'string' ? ms.startDateTime : undefined,
               endDateTime: typeof ms.endDateTime === 'string' ? ms.endDateTime : undefined,
               scheduledStartTime: ms.scheduledStartTime != null ? Number(ms.scheduledStartTime) : undefined,
               scheduledEndTime: ms.scheduledEndTime != null ? Number(ms.scheduledEndTime) : undefined,
-            });
+            };
+            setModerationSchedule((prev) =>
+              isSameModerationScheduleState(prev, nextSchedule) ? prev : nextSchedule
+            );
           }
           if (row.key === 'restricted_vetters' && value && typeof value === 'object') {
             const ids = (value as { ids?: unknown }).ids;
@@ -2321,7 +2344,8 @@ function App() {
           if (!row?.key) return;
           if (row.key === 'vetting_session' && row.value && typeof row.value === 'object') {
             const vs = row.value as Record<string, unknown>;
-            const next = normalizeVettingSessionState({
+            setVettingSession(
+              normalizeVettingSessionState({
                 active: Boolean(vs.active),
                 startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
                 durationMinutes:
@@ -2338,18 +2362,21 @@ function App() {
                   | 'expired'
                   | 'cancelled'
                   | undefined,
-              });
-            setVettingSession((prev) => (vettingSessionEquals(prev, next) ? prev : next));
+              })
+            );
           }
           if (row.key === 'moderation_schedule' && row.value && typeof row.value === 'object') {
             const ms = row.value as Record<string, unknown>;
-            setModerationSchedule({
+            const nextSchedule: ModerationSchedule = {
               scheduled: Boolean(ms.scheduled),
               startDateTime: typeof ms.startDateTime === 'string' ? ms.startDateTime : undefined,
               endDateTime: typeof ms.endDateTime === 'string' ? ms.endDateTime : undefined,
               scheduledStartTime: ms.scheduledStartTime != null ? Number(ms.scheduledStartTime) : undefined,
               scheduledEndTime: ms.scheduledEndTime != null ? Number(ms.scheduledEndTime) : undefined,
-            });
+            };
+            setModerationSchedule((prev) =>
+              isSameModerationScheduleState(prev, nextSchedule) ? prev : nextSchedule
+            );
           }
           if (row.key === 'restricted_vetters' && row.value && typeof row.value === 'object') {
             const ids = (row.value as { ids?: unknown }).ids;
@@ -19764,6 +19791,18 @@ function VettingAndAnnotations({
   const vetterHasJoined = currentUserId ? joinedVetters.has(currentUserId) : false;
   const isVetterRestricted = currentUserId ? restrictedVetters.has(currentUserId) : false;
   const showVetterFocusedLayout = isVetter && !isChiefExaminer;
+  const currentVettedPaper =
+    submittedPapers.find((p) => p.status === 'in-vetting' || p.status === 'vetted') || null;
+  const currentPaperId = currentVettedPaper?.id ?? null;
+  const enabledVetters = useMemo(() => Array.from(joinedVetters), [joinedVetters]);
+  const joinedVetterDetails = useMemo(
+    () =>
+      users
+        .filter((user) => user.id && joinedVetters.has(user.id))
+        .map((user) => ({ id: user.id, name: user.name || 'Vetter' })),
+    [users, joinedVetters]
+  );
+  const conferenceRoomSeed = currentPaperId ?? (vettingSession.startedAt ? String(vettingSession.startedAt) : null);
   
   // Simple color selection for text comments (like Word document text color)
   const [selectedColor, setSelectedColor] = useState('#2563EB');
@@ -21646,6 +21685,19 @@ function VettingAndAnnotations({
                 </div>
               </div>
             </div>
+        )}
+        {/* Shared vetting conference: Chief Examiner + selected vetters only */}
+        {vettingSession.active && (
+          <VettingConference
+            currentUserName={users.find((u) => u.id === currentUserId)?.name || undefined}
+            currentUserId={currentUserId || null}
+            roomSeed={conferenceRoomSeed}
+            enabledVetters={enabledVetters}
+            joinedVetters={joinedVetterDetails}
+            isVetter={isVetter}
+            isChiefExaminer={isChiefExaminer}
+            compactMode={isVetter && !isChiefExaminer}
+          />
         )}
         {showVetterFocusedLayout && vetterSessionPanel}
         {paperChecklistColumns}
