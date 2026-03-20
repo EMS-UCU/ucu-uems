@@ -136,6 +136,44 @@ interface AppNotification {
   type?: 'info' | 'warning' | 'error' | 'success' | 'deadline';
 }
 
+type NotificationDisplayType = NonNullable<AppNotification['type']>;
+
+const getNotificationDisplayType = (
+  notification: Pick<AppNotification, 'type' | 'title' | 'message'>
+): NotificationDisplayType => {
+  const content = `${notification.title || ''} ${notification.message || ''}`.toLowerCase();
+
+  if (content.includes('deadline') || content.includes('due')) return 'deadline';
+  if (
+    content.includes('failed') ||
+    content.includes('error') ||
+    content.includes('denied') ||
+    content.includes('rejected')
+  ) {
+    return 'error';
+  }
+  if (
+    content.includes('success') ||
+    content.includes('completed') ||
+    content.includes('approved') ||
+    content.includes('forwarded') ||
+    content.includes('delivered')
+  ) {
+    return 'success';
+  }
+  if (
+    content.includes('expired') ||
+    content.includes('warning') ||
+    content.includes('restricted') ||
+    content.includes('deactivated') ||
+    content.includes('revoked')
+  ) {
+    return 'warning';
+  }
+
+  return notification.type ?? 'info';
+};
+
 interface TimelineEvent {
   id: string;
   timestamp: string;
@@ -143,6 +181,28 @@ interface TimelineEvent {
   message: string;
   stage: WorkflowStage;
 }
+
+const SESSION_END_NOTIFICATION_TITLES = new Set([
+  'Vetting Session Ended',
+  'Vetting Session Expired',
+  'Session Expired',
+]);
+
+const dedupeSessionEndNotifications = (notifications: AppNotification[]): AppNotification[] => {
+  const seen = new Set<string>();
+  return notifications.filter((notification) => {
+    const title = notification.title || '';
+    if (!SESSION_END_NOTIFICATION_TITLES.has(title)) {
+      return true;
+    }
+    const key = `${title}|${notification.message}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+};
 
 const STUDY_YEAR_PATTERNS = [
   { label: 'First Year', keywords: ['first', 'yr1', 'year 1', '1st', '1'] },
@@ -1476,6 +1536,8 @@ function App() {
   const [isStartingSession, setIsStartingSession] = useState(false);
   const [isEndingSession, setIsEndingSession] = useState(false);
   const processedSessionClosureRef = useRef<string | null>(null);
+  const processedSessionExpiredNotificationsRef = useRef<string | null>(null);
+  const processedSessionEndNotificationIdsRef = useRef<Set<string>>(new Set());
   // Track which vetters have joined the session (enabled camera and started their individual session)
   const [joinedVetters, setJoinedVetters] = useState<Set<string>>(new Set());
   // Track restricted vetters (violated rules - cannot rejoin until reactivated by Chief Examiner)
@@ -2197,26 +2259,25 @@ function App() {
           const value = row.value as Record<string, unknown>;
           if (row.key === 'vetting_session' && value && typeof value === 'object') {
             const vs = value as Record<string, unknown>;
-            setVettingSession(
-              normalizeVettingSessionState({
-                active: Boolean(vs.active),
-                startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
-                durationMinutes:
-                  typeof vs.durationMinutes === 'number'
-                    ? vs.durationMinutes
-                    : undefined,
-                expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
-                safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
-                cameraOn: Boolean(vs.cameraOn),
-                screenshotBlocked: Boolean(vs.screenshotBlocked),
-                switchingLocked: Boolean(vs.switchingLocked),
-                lastClosedReason: vs.lastClosedReason as
-                  | 'completed'
-                  | 'expired'
-                  | 'cancelled'
-                  | undefined,
-              })
-            );
+            const nextSession = normalizeVettingSessionState({
+              active: Boolean(vs.active),
+              startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
+              durationMinutes:
+                typeof vs.durationMinutes === 'number'
+                  ? vs.durationMinutes
+                  : undefined,
+              expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
+              safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
+              cameraOn: Boolean(vs.cameraOn),
+              screenshotBlocked: Boolean(vs.screenshotBlocked),
+              switchingLocked: Boolean(vs.switchingLocked),
+              lastClosedReason: vs.lastClosedReason as
+                | 'completed'
+                | 'expired'
+                | 'cancelled'
+                | undefined,
+            });
+            setVettingSession((prev) => (isSameVettingSessionState(prev, nextSession) ? prev : nextSession));
           }
           if (row.key === 'moderation_schedule' && value && typeof value === 'object') {
             const ms = value as Record<string, unknown>;
@@ -2344,25 +2405,26 @@ function App() {
           if (!row?.key) return;
           if (row.key === 'vetting_session' && row.value && typeof row.value === 'object') {
             const vs = row.value as Record<string, unknown>;
-            setVettingSession(
-              normalizeVettingSessionState({
-                active: Boolean(vs.active),
-                startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
-                durationMinutes:
-                  typeof vs.durationMinutes === 'number'
-                    ? vs.durationMinutes
-                    : undefined,
-                expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
-                safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
-                cameraOn: Boolean(vs.cameraOn),
-                screenshotBlocked: Boolean(vs.screenshotBlocked),
-                switchingLocked: Boolean(vs.switchingLocked),
-                lastClosedReason: vs.lastClosedReason as
-                  | 'completed'
-                  | 'expired'
-                  | 'cancelled'
-                  | undefined,
-              })
+            const nextSession = normalizeVettingSessionState({
+              active: Boolean(vs.active),
+              startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
+              durationMinutes:
+                typeof vs.durationMinutes === 'number'
+                  ? vs.durationMinutes
+                  : undefined,
+              expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
+              safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
+              cameraOn: Boolean(vs.cameraOn),
+              screenshotBlocked: Boolean(vs.screenshotBlocked),
+              switchingLocked: Boolean(vs.switchingLocked),
+              lastClosedReason: vs.lastClosedReason as
+                | 'completed'
+                | 'expired'
+                | 'cancelled'
+                | undefined,
+            });
+            setVettingSession((prev) =>
+              isSameVettingSessionState(prev, nextSession) ? prev : nextSession
             );
           }
           if (row.key === 'moderation_schedule' && row.value && typeof row.value === 'object') {
@@ -3144,6 +3206,11 @@ function App() {
     };
   }, [authUserId, refreshUsers]);
 
+  const currentUserRolesSignature = useMemo(
+    () => (currentUser?.roles ?? []).map((role) => String(role).toLowerCase()).sort().join('|'),
+    [currentUser?.roles]
+  );
+
   const activateVetterSessionFromNotification = useCallback(async (notificationTimestamp?: string) => {
     if (!currentUser?.roles) {
       return;
@@ -3209,7 +3276,7 @@ function App() {
       screenshotBlocked: true,
       switchingLocked: true,
     }));
-  }, [currentUser?.roles]);
+  }, [currentUserRolesSignature]);
 
   const forceCloseVetterSessionFromNotification = useCallback((notificationTimestamp?: string) => {
     if (!currentUser?.roles) return;
@@ -3244,7 +3311,7 @@ function App() {
 
     // End only the vetting session context; keep the account logged in.
     setShowUserDropdown(false);
-  }, [currentUser?.roles]);
+  }, [currentUserRolesSignature]);
 
   const maybeClearRestrictionFromReactivation = (notificationTimestamp?: string) => {
     if (!currentUser?.id) return;
@@ -3290,6 +3357,7 @@ function App() {
     // On login (or user change), clear toast-seen set so vetter always sees "Vetting Session Started" / "Vetter re-activated" toast and can join
     if (currentUser) {
       shownVettingStartedToastIds.current.clear();
+      processedSessionEndNotificationIdsRef.current.clear();
     }
 
     const loadNotifications = async () => {
@@ -3313,6 +3381,7 @@ function App() {
           read: n.is_read,
           type: n.type,
         }));
+        mapped = dedupeSessionEndNotifications(mapped);
         // Revoked vetters must not see vetting session notifications – only current vetters do
         if (!isVetter) {
           const vettingTitles = new Set(['Vetting Session Started', 'Vetter re-activated']);
@@ -3328,11 +3397,11 @@ function App() {
             .slice(0, 50);
         });
 
-        const sessionEndTitles = new Set(['Vetting Session Ended', 'Vetting Session Expired', 'Session Expired']);
         const endSignal = mapped
-          .filter((n) => sessionEndTitles.has(n.title || '') && !n.read)
+          .filter((n) => SESSION_END_NOTIFICATION_TITLES.has(n.title || '') && !n.read)
           .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
         if (endSignal) {
+          processedSessionEndNotificationIdsRef.current.add(endSignal.id);
           forceCloseVetterSessionFromNotification(endSignal.timestamp);
         }
 
@@ -3396,12 +3465,12 @@ function App() {
               };
               const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
               const isVettingSessionNotif = newNotification.title === 'Vetting Session Started' || newNotification.title === 'Vetter re-activated';
-              const isVettingSessionEndNotif =
-                newNotification.title === 'Vetting Session Ended' ||
-                newNotification.title === 'Vetting Session Expired' ||
-                newNotification.title === 'Session Expired';
+              const isVettingSessionEndNotif = SESSION_END_NOTIFICATION_TITLES.has(newNotification.title || '');
               // Revoked vetters must not see vetting session notifications – skip add and toast
               if (isVettingSessionNotif && !isVetter) return;
+              if (isVettingSessionEndNotif && processedSessionEndNotificationIdsRef.current.has(newNotification.id)) {
+                return;
+              }
               const mapped: AppNotification = {
                 id: newNotification.id,
                 message: newNotification.message,
@@ -3410,6 +3479,9 @@ function App() {
                 read: newNotification.is_read,
                 type: newNotification.type || 'info',
               };
+              if (isVettingSessionEndNotif) {
+                processedSessionEndNotificationIdsRef.current.add(mapped.id);
+              }
               setNotifications((prev) => [mapped, ...prev].slice(0, 50));
               // Show toast for new notification (so vetter sees "Vetting Session Started" / "Vetter re-activated" same as session-end)
               if (isVettingSessionNotif) {
@@ -3479,7 +3551,7 @@ function App() {
         supabase.removeChannel(channel);
       };
     }
-  }, [currentUser, forceCloseVetterSessionFromNotification]);
+  }, [currentUser?.id, currentUserRolesSignature, forceCloseVetterSessionFromNotification]);
 
   // Vetters: fetch on login only - real-time subscription handles updates
   // Removed polling - notifications only come from real-time subscriptions or user actions
@@ -3491,14 +3563,14 @@ function App() {
     const fetchOnce = async () => {
       try {
         const dbNotifications = await getUserNotifications(currentUser.id);
-        const mapped: AppNotification[] = dbNotifications.map((n) => ({
+        const mapped: AppNotification[] = dedupeSessionEndNotifications(dbNotifications.map((n) => ({
           id: n.id,
           message: n.message,
           title: n.title,
           timestamp: n.created_at,
           read: n.is_read,
           type: n.type,
-        }));
+        })));
         setNotifications((prev) => {
           const dbIds = new Set(mapped.map((m) => m.id));
           const localOnly = prev.filter((n) => !dbIds.has(n.id));
@@ -3531,14 +3603,14 @@ function App() {
     if (!currentUser?.id || !isVetter) return;
     const onFocus = () => {
       getUserNotifications(currentUser.id).then((dbNotifications) => {
-        const mapped: AppNotification[] = dbNotifications.map((n) => ({
+        const mapped: AppNotification[] = dedupeSessionEndNotifications(dbNotifications.map((n) => ({
           id: n.id,
           message: n.message,
           title: n.title,
           timestamp: n.created_at,
           read: n.is_read,
           type: n.type,
-        }));
+        })));
         setNotifications((prev) => {
           const dbIds = new Set(mapped.map((m) => m.id));
           const localOnly = prev.filter((n) => !dbIds.has(n.id));
@@ -3576,14 +3648,14 @@ function App() {
     const refetch = async () => {
       try {
         const dbNotifications = await getUserNotifications(currentUser.id);
-        const mapped: AppNotification[] = dbNotifications.map((n) => ({
+        const mapped: AppNotification[] = dedupeSessionEndNotifications(dbNotifications.map((n) => ({
           id: n.id,
           message: n.message,
           title: n.title,
           timestamp: n.created_at,
           read: n.is_read,
           type: n.type,
-        }));
+        })));
         setNotifications((prev) => {
           const dbIds = new Set(mapped.map((m) => m.id));
           const localOnly = prev.filter((n) => !dbIds.has(n.id));
@@ -3977,135 +4049,7 @@ function App() {
       currentTime >= moderationSchedule.scheduledEndTime &&
       vettingSession.active
     ) {
-      joinedVetters.forEach((vetterId) => {
-        logVetterWarning?.(
-          vetterId,
-          'window_leave',
-          'Session expired. Camera feed terminated and vetter removed from session automatically.',
-          'critical'
-        );
-      });
-      // Save records for all joined vetters before ending session
-      const vettedPaper = submittedPapers.find(p => p.status === 'in-vetting');
-      
-      if (vettedPaper && vettingSession.startedAt) {
-        const completedAt = Date.now();
-        const startedAt = vettingSession.startedAt;
-        const durationMinutes = vettingSession.durationMinutes || DEFAULT_SESSION_MINUTES;
-        
-        // Create vetting session record with all vetter data
-        const sessionRecord: VettingSessionRecord = {
-          id: createId(),
-          paperId: vettedPaper.id,
-          paperName: vettedPaper.fileName,
-          courseCode: vettedPaper.courseCode || 'Unknown',
-          courseUnit: vettedPaper.courseUnit || 'Unknown',
-          startedAt,
-          completedAt,
-          durationMinutes,
-          vetters: Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
-            const allWarnings = monitoring.warnings ? [...monitoring.warnings] : [];
-            // Count violations from critical warnings as backup, but prefer the tracked violations count
-            const criticalWarningsCount = allWarnings.filter(w => w.severity === 'critical').length;
-            const violations = typeof monitoring.violations === 'number' ? monitoring.violations : criticalWarningsCount;
-            
-            console.log(`📋 Recording vetter ${monitoring.vetterName} (moderation ended):`, {
-              vetterId,
-              warningsCount: allWarnings.length,
-              violations,
-              criticalWarningsCount,
-              monitoringViolations: monitoring.violations,
-            });
-            
-            return {
-              vetterId,
-              vetterName: monitoring.vetterName,
-              joinedAt: monitoring.joinedAt,
-              warnings: allWarnings,
-              violations: violations, // ALL violations recorded - use tracked count or count from critical warnings
-            };
-          }),
-          annotations: [...annotations],
-          checklistComments: new Map(checklistComments),
-          status: 'completed',
-        };
-        
-        // Store the session record
-        setVettingSessionRecords(prev => [sessionRecord, ...prev]);
-        
-        // Persist to localStorage
-        try {
-          const existing = JSON.parse(localStorage.getItem('ucu-vetting-records') || '[]');
-          const recordToSave = {
-            ...sessionRecord,
-            checklistComments: Object.fromEntries(sessionRecord.checklistComments),
-          };
-          existing.unshift(recordToSave);
-          localStorage.setItem('ucu-vetting-records', JSON.stringify(existing.slice(0, 50)));
-        } catch (error) {
-          console.error('Error saving vetting record:', error);
-        }
-        
-        // Update submitted papers status to 'vetted'
-        setSubmittedPapers(prev => {
-          const base = stripDemoPaper(prev);
-          const updated = base.map(paper =>
-            paper.status === 'in-vetting'
-              ? { ...paper, status: 'vetted' as const }
-              : paper
-          );
-          return ensureDemoPaper(updated);
-        });
-      }
-      
-      // Stop all camera streams for all vetters
-      vetterCameraStreams.current.forEach((stream, vetterId) => {
-        stream.getTracks().forEach(track => track.stop());
-        console.log(`📹 Stopped camera stream for vetter ${vetterId} (moderation ended)`);
-      });
-      vetterCameraStreams.current.clear();
-      
-      // Remove all vetters from joined set
-      setJoinedVetters(new Set());
-      
-      // Clear monitoring data
-      setVetterMonitoring(new Map());
-      
-      // Auto-submit all pending annotations (they're already saved, just log it)
-      if (annotations.length > 0) {
-        pushWorkflowEvent(
-          `Moderation session ended. ${annotations.length} annotation(s) automatically submitted.`,
-          'System'
-        );
-      }
-
-      // Close safe browser and end session
-      setVettingSession({
-        active: false,
-        safeBrowserEnabled: false,
-        cameraOn: false,
-        screenshotBlocked: false,
-        switchingLocked: false,
-        lastClosedReason: 'expired',
-      });
-
-      pushWorkflowEvent(
-        'Moderation Session Ended: Session time expired. All vetter records saved, cameras stopped, and safe browser closed.',
-        'System',
-        { stage: 'Vetted & Returned to Chief Examiner' }
-      );
-
-      // Show notification
-      const notification: AppNotification = {
-        id: createId(),
-        message: 'Moderation Session Ended: Session time expired. All vetter records have been saved and cameras stopped.',
-        timestamp: new Date().toISOString(),
-        read: false,
-        title: 'Session Expired',
-        type: 'warning',
-      };
-      setNotifications((prev) => [notification, ...prev]);
-      setActiveToast(notification);
+      handleVettingExpired();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [moderationSchedule.scheduled, moderationSchedule.scheduledEndTime, currentTime, vettingSession.active, annotations.length]);
@@ -5186,6 +5130,11 @@ function App() {
       screenshotBlocked: true,
       switchingLocked: true,
     });
+
+      // IMPORTANT: Clear any previously scheduled moderation window.
+      // Otherwise, stale `moderationSchedule.scheduledEndTime` can immediately trigger
+      // the auto-expiry effect and stop the session a few seconds after Chief starts.
+      setModerationSchedule({ scheduled: false });
 
       // Clear all comments from previous vetting session to start fresh
       setChecklistComments(new Map());
@@ -6584,6 +6533,19 @@ function App() {
     // Persist "Session Expired" only to Chief + vetters who were in THIS session (not all vetters)
     const expiredMessage = 'Vetting Session Expired: Session time finished. All vetter records have been saved and cameras stopped.';
     (async () => {
+      // Prevent notification flooding:
+      // `handleVettingExpired()` runs on every vetter client when the session ends.
+      // Only the Chief should write DB notifications, and only once per session end.
+      if (!currentUserHasRole('Chief Examiner')) {
+        return;
+      }
+
+      const sessionNotificationKey = `expired:${vettingSession.startedAt ?? 0}:${vettedPaper?.id ?? 'unknown'}`;
+      if (processedSessionExpiredNotificationsRef.current === sessionNotificationKey) {
+        return;
+      }
+      processedSessionExpiredNotificationsRef.current = sessionNotificationKey;
+
       const recipients: { id: string; name: string }[] = [];
       if (currentUser?.id) {
         recipients.push({ id: currentUser.id, name: currentUser.name ?? 'Chief' });
@@ -6592,7 +6554,15 @@ function App() {
         const details = sessionVetterDetails.get(vetterId);
         recipients.push({ id: vetterId, name: details?.vetterName ?? 'Vetter' });
       });
-      for (const user of recipients) {
+
+      // Dedupe recipients (can happen if chief is also a vetter or duplicated ids appear)
+      const recipientsById = new Map<string, { id: string; name: string }>();
+      recipients.forEach((r) => {
+        if (!r.id) return;
+        recipientsById.set(r.id, r);
+      });
+
+      for (const user of Array.from(recipientsById.values())) {
         const result = await createNotification({
           user_id: user.id,
           title: 'Vetting Session Expired',
@@ -9689,9 +9659,32 @@ function App() {
                   </div>
                 ) : (
                   notifications.map((note) => (
-                    <div
-                      key={note.id}
-                      onClick={async () => {
+                    (() => {
+                      const displayType = getNotificationDisplayType(note);
+                      const cardTone =
+                        displayType === 'error'
+                          ? 'border-red-200 bg-red-50 text-red-900'
+                          : displayType === 'warning'
+                          ? 'border-amber-200 bg-amber-50 text-amber-900'
+                          : displayType === 'success'
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                          : displayType === 'deadline'
+                          ? 'border-orange-200 bg-orange-50 text-orange-900'
+                          : 'border-blue-200 bg-blue-50 text-blue-900';
+                      const unreadDotTone =
+                        displayType === 'error'
+                          ? 'bg-red-500'
+                          : displayType === 'warning'
+                          ? 'bg-amber-500'
+                          : displayType === 'success'
+                          ? 'bg-emerald-500'
+                          : displayType === 'deadline'
+                          ? 'bg-orange-500'
+                          : 'bg-blue-500';
+                      return (
+                        <div
+                          key={note.id}
+                          onClick={async () => {
                         // Mark notification as read when clicked
                         if (!note.read && currentUser) {
                           try {
@@ -9706,21 +9699,23 @@ function App() {
                           }
                         }
                       }}
-                      className={`group relative z-10 overflow-hidden rounded-xl border px-3 py-2 text-xs text-slate-800 shadow-sm transition-all duration-300 cursor-pointer ${
+                          className={`group relative z-10 overflow-hidden rounded-xl border px-3 py-2 text-xs shadow-sm transition-all duration-300 cursor-pointer ${
                         note.read
                           ? 'border-slate-100 bg-slate-50'
-                          : 'border-blue-200 bg-gradient-to-r from-blue-50 via-indigo-50 to-cyan-50 shadow-[0_0_0_1px_rgba(129,140,248,0.35)]'
+                          : `${cardTone} shadow-[0_0_0_1px_rgba(129,140,248,0.2)]`
                       } hover:translate-y-[-1px] hover:shadow-md hover:shadow-blue-200/80`}
-                    >
-                      <div className="pointer-events-none absolute inset-y-0 right-0 w-16 bg-gradient-to-l from-indigo-200/70 via-transparent to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
-                      {!note.read && (
-                        <div className="absolute top-2 right-2 h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
-                      )}
-                      <p className="relative pr-4">{note.message}</p>
-                      <p className="relative mt-1 text-[0.7rem] text-slate-400">
-                        {new Date(note.timestamp).toLocaleString()}
-                      </p>
-                    </div>
+                        >
+                          <div className="pointer-events-none absolute inset-y-0 right-0 w-16 bg-gradient-to-l from-indigo-200/50 via-transparent to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
+                          {!note.read && (
+                            <div className={`absolute top-2 right-2 h-2 w-2 rounded-full ${unreadDotTone} animate-pulse`} />
+                          )}
+                          <p className="relative pr-4">{note.message}</p>
+                          <p className="relative mt-1 text-[0.7rem] text-slate-500">
+                            {new Date(note.timestamp).toLocaleString()}
+                          </p>
+                        </div>
+                      );
+                    })()
                   ))
                 )}
               </div>
@@ -9761,13 +9756,13 @@ function App() {
               className={`
                 relative overflow-hidden rounded-2xl border-2 shadow-2xl backdrop-blur-md
                 ${
-                  activeToast.type === 'error'
+                  getNotificationDisplayType(activeToast) === 'error'
                     ? 'border-red-500/50 bg-gradient-to-br from-red-50 via-red-50/95 to-red-100/90'
-                    : activeToast.type === 'warning'
+                    : getNotificationDisplayType(activeToast) === 'warning'
                     ? 'border-amber-500/50 bg-gradient-to-br from-amber-50 via-amber-50/95 to-amber-100/90'
-                    : activeToast.type === 'success'
+                    : getNotificationDisplayType(activeToast) === 'success'
                     ? 'border-emerald-500/50 bg-gradient-to-br from-emerald-50 via-emerald-50/95 to-emerald-100/90'
-                    : activeToast.type === 'deadline'
+                    : getNotificationDisplayType(activeToast) === 'deadline'
                     ? 'border-orange-500/50 bg-gradient-to-br from-orange-50 via-orange-50/95 to-orange-100/90'
                     : 'border-blue-500/50 bg-gradient-to-br from-blue-50 via-white/95 to-indigo-50/90'
                 }
@@ -9778,13 +9773,13 @@ function App() {
                 className={`
                   absolute -right-10 -top-10 h-32 w-32 rounded-full blur-3xl opacity-40
                   ${
-                    activeToast.type === 'error'
+                    getNotificationDisplayType(activeToast) === 'error'
                       ? 'bg-red-400'
-                      : activeToast.type === 'warning'
+                      : getNotificationDisplayType(activeToast) === 'warning'
                       ? 'bg-amber-400'
-                      : activeToast.type === 'success'
+                      : getNotificationDisplayType(activeToast) === 'success'
                       ? 'bg-emerald-400'
-                      : activeToast.type === 'deadline'
+                      : getNotificationDisplayType(activeToast) === 'deadline'
                       ? 'bg-orange-400'
                       : 'bg-blue-400'
                   }
@@ -9799,31 +9794,31 @@ function App() {
                     className={`
                       mt-0.5 flex h-12 w-12 shrink-0 items-center justify-center rounded-xl shadow-lg
                       ${
-                        activeToast.type === 'error'
+                        getNotificationDisplayType(activeToast) === 'error'
                           ? 'bg-gradient-to-br from-red-500 to-red-600 text-white'
-                          : activeToast.type === 'warning'
+                          : getNotificationDisplayType(activeToast) === 'warning'
                           ? 'bg-gradient-to-br from-amber-500 to-amber-600 text-white'
-                          : activeToast.type === 'success'
+                          : getNotificationDisplayType(activeToast) === 'success'
                           ? 'bg-gradient-to-br from-emerald-500 to-emerald-600 text-white'
-                          : activeToast.type === 'deadline'
+                          : getNotificationDisplayType(activeToast) === 'deadline'
                           ? 'bg-gradient-to-br from-orange-500 to-orange-600 text-white'
                           : 'bg-gradient-to-br from-blue-500 to-indigo-600 text-white'
                       }
                     `}
                   >
-                    {activeToast.type === 'error' ? (
+                    {getNotificationDisplayType(activeToast) === 'error' ? (
                       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                       </svg>
-                    ) : activeToast.type === 'warning' ? (
+                    ) : getNotificationDisplayType(activeToast) === 'warning' ? (
                       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                       </svg>
-                    ) : activeToast.type === 'success' ? (
+                    ) : getNotificationDisplayType(activeToast) === 'success' ? (
                       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
-                    ) : activeToast.type === 'deadline' ? (
+                    ) : getNotificationDisplayType(activeToast) === 'deadline' ? (
                       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
@@ -9842,13 +9837,13 @@ function App() {
                         className={`
                           text-xs font-bold uppercase tracking-wider
                           ${
-                            activeToast.type === 'error'
+                            getNotificationDisplayType(activeToast) === 'error'
                               ? 'text-red-700'
-                              : activeToast.type === 'warning'
+                              : getNotificationDisplayType(activeToast) === 'warning'
                               ? 'text-amber-700'
-                              : activeToast.type === 'success'
+                              : getNotificationDisplayType(activeToast) === 'success'
                               ? 'text-emerald-700'
-                              : activeToast.type === 'deadline'
+                              : getNotificationDisplayType(activeToast) === 'deadline'
                               ? 'text-orange-700'
                               : 'text-blue-700'
                           }
@@ -9888,13 +9883,13 @@ function App() {
                 className={`
                   h-1
                   ${
-                    activeToast.type === 'error'
+                    getNotificationDisplayType(activeToast) === 'error'
                       ? 'bg-red-500'
-                      : activeToast.type === 'warning'
+                      : getNotificationDisplayType(activeToast) === 'warning'
                       ? 'bg-amber-500'
-                      : activeToast.type === 'success'
+                      : getNotificationDisplayType(activeToast) === 'success'
                       ? 'bg-emerald-500'
-                      : activeToast.type === 'deadline'
+                      : getNotificationDisplayType(activeToast) === 'deadline'
                       ? 'bg-orange-500'
                       : 'bg-blue-500'
                   }
@@ -19785,7 +19780,6 @@ function VettingAndAnnotations({
   const [deadlineHours, setDeadlineHours] = useState(0);
   const [deadlineMinutes, setDeadlineMinutes] = useState(0);
   const checklistUploadInputRef = useRef<HTMLInputElement | null>(null);
-  const vetterSelfVideoRef = useRef<HTMLVideoElement | null>(null);
   const isChiefExaminer = userHasRole('Chief Examiner');
   const isVetter = userHasRole('Vetter');
   const vetterHasJoined = currentUserId ? joinedVetters.has(currentUserId) : false;
@@ -19830,20 +19824,6 @@ function VettingAndAnnotations({
     return `${names[0]}, ${names[1]} +${names.length - 2} more are typing…`;
   };
 
-  // Vetter circular preview: attach camera stream to video element when available (fixes black/no-face)
-  const vetterPreviewStream =
-    (isVetter && currentUserId && vetterMonitoring?.get(currentUserId)?.cameraStream) || null;
-  useEffect(() => {
-    const video = vetterSelfVideoRef.current;
-    if (!video || !vetterPreviewStream || !vetterPreviewStream.active) return;
-    video.srcObject = vetterPreviewStream;
-    const play = () => video.play().catch(() => {});
-    play();
-    video.addEventListener('loadedmetadata', play);
-    return () => {
-      video.removeEventListener('loadedmetadata', play);
-    };
-  }, [vetterPreviewStream, isVetter, vetterHasJoined, vettingSession.cameraOn, currentUserId]);
 
   const _SectionCommentArea = ({
     sectionKey,
@@ -21668,24 +21648,6 @@ function VettingAndAnnotations({
       }
     >
       <div className="space-y-5">
-        {/* Circular video preview for vetter - shows their recorded face (useEffect attaches stream for reliable display) */}
-        {isVetter && vetterHasJoined && vettingSession.cameraOn && currentUserId && (
-            <div className="fixed bottom-6 right-6 z-50">
-              <div className="relative w-32 h-32 rounded-full border-4 border-green-500 bg-slate-900 overflow-hidden shadow-2xl">
-                <video
-                  ref={vetterSelfVideoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover scale-x-[-1]"
-                />
-                <div className="absolute top-2 left-2 bg-green-600 text-white text-[0.6rem] px-1.5 py-0.5 rounded font-bold flex items-center gap-1">
-                  <span className="h-1 w-1 rounded-full bg-white animate-pulse"></span>
-                  LIVE
-                </div>
-              </div>
-            </div>
-        )}
         {/* Shared vetting conference: Chief Examiner + selected vetters only */}
         {vettingSession.active && (
           <VettingConference

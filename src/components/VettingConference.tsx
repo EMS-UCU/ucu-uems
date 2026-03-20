@@ -64,7 +64,7 @@ export function VettingConference({
     <div
       className={
         compactMode
-          ? 'fixed bottom-6 left-6 z-40 w-72 rounded-xl border border-slate-300 bg-slate-900/95 overflow-hidden shadow-2xl'
+          ? 'fixed bottom-6 right-6 z-40 w-72 rounded-xl border border-slate-300 bg-slate-900/95 overflow-hidden shadow-2xl'
           : 'mt-4 rounded-xl border border-slate-300 bg-slate-900/90 overflow-hidden'
       }
     >
