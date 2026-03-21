@@ -96,6 +96,8 @@ export function VettingConference({
         }}
         configOverwrite={{
           startWithAudioMuted: true,
+          // Vetters must send video so Chief sees tiles; Chief can stay muted if they prefer.
+          startWithVideoMuted: compactMode ? false : true,
           prejoinPageEnabled: false,
           disableModeratorIndicator: true,
         }}

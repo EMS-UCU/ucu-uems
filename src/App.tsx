@@ -19796,7 +19796,13 @@ function VettingAndAnnotations({
         .map((user) => ({ id: user.id, name: user.name || 'Vetter' })),
     [users, joinedVetters]
   );
-  const conferenceRoomSeed = currentPaperId ?? (vettingSession.startedAt ? String(vettingSession.startedAt) : null);
+  // Jitsi room MUST match for Chief + all Vetters. Do not use paper id — Chief often has
+  // `in-vetting` paper while a Vetter may not (yet), which previously split everyone into
+  // two different rooms. `startedAt` is the single source of truth from the active session.
+  const conferenceRoomSeed =
+    vettingSession.active && vettingSession.startedAt != null
+      ? String(vettingSession.startedAt)
+      : null;
   
   // Simple color selection for text comments (like Word document text color)
   const [selectedColor, setSelectedColor] = useState('#2563EB');
