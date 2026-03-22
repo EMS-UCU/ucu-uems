@@ -44,7 +44,7 @@ import { getVettingRecordings } from './lib/examServices/chiefExaminerService';
 import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead, clearAllNotifications } from './lib/examServices/notificationService';
 import ucuLogo from './assets/ucu-logo.png';
 import RecordingReviewPanel from './components/RecordingReviewPanel';
-import { VettingConference } from './components/VettingConference';
+import { SafeVettingConference } from './components/SafeVettingConference';
 import type { RecordingEntry } from './types/recordings';
 import type { VettingSession } from './lib/supabase';
 
@@ -19796,14 +19796,6 @@ function VettingAndAnnotations({
         .map((user) => ({ id: user.id, name: user.name || 'Vetter' })),
     [users, joinedVetters]
   );
-  // Jitsi room MUST match for Chief + all Vetters. Do not use paper id — Chief often has
-  // `in-vetting` paper while a Vetter may not (yet), which previously split everyone into
-  // two different rooms. `startedAt` is the single source of truth from the active session.
-  const conferenceRoomSeed =
-    vettingSession.active && vettingSession.startedAt != null
-      ? String(vettingSession.startedAt)
-      : null;
-  
   // Simple color selection for text comments (like Word document text color)
   const [selectedColor, setSelectedColor] = useState('#2563EB');
   const textColors = [
@@ -21656,15 +21648,14 @@ function VettingAndAnnotations({
       <div className="space-y-5">
         {/* Shared vetting conference: Chief Examiner + selected vetters only */}
         {vettingSession.active && (
-          <VettingConference
+          <SafeVettingConference
             currentUserName={users.find((u) => u.id === currentUserId)?.name || undefined}
             currentUserId={currentUserId || null}
-            roomSeed={conferenceRoomSeed}
+            paperId={currentPaperId}
             enabledVetters={enabledVetters}
-            joinedVetters={joinedVetterDetails}
             isVetter={isVetter}
             isChiefExaminer={isChiefExaminer}
-            compactMode={isVetter && !isChiefExaminer}
+            visibleForUser={Boolean(vettingSession.active && currentUserId)}
           />
         )}
         {showVetterFocusedLayout && vetterSessionPanel}
