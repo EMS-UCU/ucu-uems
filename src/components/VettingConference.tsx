@@ -1,23 +1,25 @@
 import { JitsiMeeting } from '@jitsi/react-sdk';
-import { useMemo } from 'react';
+import { memo, useCallback, useMemo } from 'react';
+
+const JITSI_ROOM = 'ucu-uems-vetting-main';
+const JITSI_DOMAIN = 'meet.jit.si';
 
 interface VettingConferenceProps {
   currentUserName?: string | null;
   currentUserId?: string | null;
   paperId?: string | null;
-  enabledVetters: string[]; // user IDs allowed to join this call
+  enabledVetters: string[];
   isVetter: boolean;
   isChiefExaminer: boolean;
 }
 
-export function VettingConference({
+function VettingConferenceInner({
   currentUserName,
   currentUserId,
   enabledVetters,
   isVetter,
   isChiefExaminer,
 }: VettingConferenceProps) {
-  // Chief Examiner and vetters both join the Jitsi conference so tiles appear for Chief.
   const canJoin = useMemo(() => {
     if (!currentUserId) return false;
     if (isChiefExaminer) return true;
@@ -28,13 +30,44 @@ export function VettingConference({
     return false;
   }, [currentUserId, enabledVetters, isVetter, isChiefExaminer]);
 
+  const displayName = (currentUserName || 'Participant').trim();
+
+  // Stable identities — new literals every parent render make @jitsi/react-sdk tear down and reload the iframe.
+  const userInfo = useMemo(() => ({ displayName }), [displayName]);
+
+  const configOverwrite = useMemo(
+    () => ({
+      startWithAudioMuted: true,
+      prejoinPageEnabled: false,
+    }),
+    []
+  );
+
+  const interfaceConfigOverwrite = useMemo(
+    () => ({
+      HIDE_INVITE_MORE_HEADER: true,
+    }),
+    []
+  );
+
+  const getIFrameRef = useCallback((node: HTMLIFrameElement | null) => {
+    if (!node) return;
+    node.setAttribute(
+      'allow',
+      'camera; microphone; fullscreen; display-capture; autoplay; clipboard-write;'
+    );
+    if (isChiefExaminer) {
+      node.style.height = '420px';
+      node.style.width = '100%';
+    } else {
+      node.style.height = '224px';
+      node.style.width = '320px';
+    }
+  }, [isChiefExaminer]);
+
   if (!canJoin) {
     return null;
   }
-
-  // Shared room so Chief Examiner and all vetters land in the same conference.
-  const roomName = 'ucu-uems-vetting-main';
-  const displayName = currentUserName || 'Participant';
 
   const containerClassName = isChiefExaminer
     ? 'mt-4 rounded-xl border border-slate-300 bg-slate-900/90 overflow-hidden'
@@ -43,33 +76,33 @@ export function VettingConference({
   return (
     <div className={containerClassName}>
       <JitsiMeeting
-        roomName={roomName}
-        domain="meet.jit.si"
-        userInfo={{
-          displayName,
-        }}
-        configOverwrite={{
-          startWithAudioMuted: true,
-          prejoinPageEnabled: false,
-        }}
-        interfaceConfigOverwrite={{
-          HIDE_INVITE_MORE_HEADER: true,
-        }}
-        getIFrameRef={(node) => {
-          if (!node) return;
-          node.setAttribute(
-            'allow',
-            'camera; microphone; fullscreen; display-capture; autoplay; clipboard-write;'
-          );
-          if (isChiefExaminer) {
-            node.style.height = '420px';
-            node.style.width = '100%';
-          } else {
-            node.style.height = '224px';
-            node.style.width = '320px';
-          }
-        }}
+        key="ucu-uems-vetting-jitsi"
+        roomName={JITSI_ROOM}
+        domain={JITSI_DOMAIN}
+        userInfo={userInfo}
+        configOverwrite={configOverwrite}
+        interfaceConfigOverwrite={interfaceConfigOverwrite}
+        getIFrameRef={getIFrameRef}
       />
     </div>
   );
 }
+
+function vettersEqual(a: string[], b: string[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+export const VettingConference = memo(VettingConferenceInner, (prev, next) => {
+  return (
+    prev.currentUserId === next.currentUserId &&
+    prev.isChiefExaminer === next.isChiefExaminer &&
+    prev.isVetter === next.isVetter &&
+    (prev.currentUserName || '') === (next.currentUserName || '') &&
+    vettersEqual(prev.enabledVetters, next.enabledVetters)
+  );
+});

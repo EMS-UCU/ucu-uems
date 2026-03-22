@@ -1,5 +1,6 @@
 
 import {
+  startTransition,
   useCallback,
   useEffect,
   useMemo,
@@ -685,6 +686,29 @@ const emptyVettingSession: VettingSessionState = {
   switchingLocked: false,
 };
 
+/** Supabase JSON often returns timestamps/durations as strings — coalesce so we don't drop the session. */
+const parseModerationMs = (v: unknown): number | undefined => {
+  if (v == null) return undefined;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+    const t = Date.parse(v);
+    if (!Number.isNaN(t)) return t;
+  }
+  return undefined;
+};
+
+const parseDurationMinutesField = (v: unknown): number | undefined => {
+  if (v == null) return undefined;
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return undefined;
+};
+
 const normalizeVettingSessionState = (
   session: Partial<VettingSessionState> | null | undefined
 ): VettingSessionState => {
@@ -692,38 +716,36 @@ const normalizeVettingSessionState = (
     return emptyVettingSession;
   }
 
-  const startedAt =
-    typeof session.startedAt === 'number' && Number.isFinite(session.startedAt)
-      ? session.startedAt
-      : undefined;
-  const expiresAt =
-    typeof session.expiresAt === 'number' && Number.isFinite(session.expiresAt)
-      ? session.expiresAt
-      : undefined;
+  const raw = session as Record<string, unknown>;
+  const active = Boolean(raw.active);
+
+  let startedAt = parseModerationMs(raw.startedAt);
   const durationMinutes =
-    typeof session.durationMinutes === 'number' &&
-    Number.isFinite(session.durationMinutes)
-      ? session.durationMinutes
-      : undefined;
+    parseDurationMinutesField(raw.durationMinutes) ?? MIN_SESSION_MINUTES;
+  let expiresAt = parseModerationMs(raw.expiresAt);
+
+  if (expiresAt == null && startedAt != null) {
+    expiresAt = startedAt + durationMinutes * 60 * 1000;
+  }
 
   const hasLiveWindow = Boolean(expiresAt && expiresAt > Date.now());
-  if (!session.active || !hasLiveWindow) {
+  if (!active || !hasLiveWindow) {
     return {
       ...emptyVettingSession,
-      lastClosedReason: session.active ? 'expired' : session.lastClosedReason,
+      lastClosedReason: active ? 'expired' : (session.lastClosedReason as VettingSessionState['lastClosedReason']),
     };
   }
 
   return {
     active: true,
     startedAt,
-    durationMinutes: durationMinutes ?? MIN_SESSION_MINUTES,
+    durationMinutes,
     expiresAt,
-    safeBrowserEnabled: Boolean(session.safeBrowserEnabled),
-    cameraOn: Boolean(session.cameraOn),
-    screenshotBlocked: Boolean(session.screenshotBlocked),
-    switchingLocked: Boolean(session.switchingLocked),
-    lastClosedReason: session.lastClosedReason,
+    safeBrowserEnabled: Boolean(raw.safeBrowserEnabled),
+    cameraOn: Boolean(raw.cameraOn),
+    screenshotBlocked: Boolean(raw.screenshotBlocked),
+    switchingLocked: Boolean(raw.switchingLocked),
+    lastClosedReason: session.lastClosedReason as VettingSessionState['lastClosedReason'],
   };
 };
 
@@ -1538,6 +1560,11 @@ function App() {
   const processedSessionClosureRef = useRef<string | null>(null);
   const processedSessionExpiredNotificationsRef = useRef<string | null>(null);
   const processedSessionEndNotificationIdsRef = useRef<Set<string>>(new Set());
+  /** Skip applying vetting_session from Supabase realtime briefly after Chief starts (avoids echo / type-mismatch flicker). */
+  const vettingSessionRealtimeSuppressUntilRef = useRef<number>(0);
+  /** Debounce persisting vetting_session so rapid local updates don't spam Supabase/realtime (reduces UI flicker). */
+  const vettingSessionPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastVettingSessionPersistJsonRef = useRef<string>('');
   // Track which vetters have joined the session (enabled camera and started their individual session)
   const [joinedVetters, setJoinedVetters] = useState<Set<string>>(new Set());
   // Track restricted vetters (violated rules - cannot rejoin until reactivated by Chief Examiner)
@@ -2259,24 +2286,7 @@ function App() {
           const value = row.value as Record<string, unknown>;
           if (row.key === 'vetting_session' && value && typeof value === 'object') {
             const vs = value as Record<string, unknown>;
-            const nextSession = normalizeVettingSessionState({
-              active: Boolean(vs.active),
-              startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
-              durationMinutes:
-                typeof vs.durationMinutes === 'number'
-                  ? vs.durationMinutes
-                  : undefined,
-              expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
-              safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
-              cameraOn: Boolean(vs.cameraOn),
-              screenshotBlocked: Boolean(vs.screenshotBlocked),
-              switchingLocked: Boolean(vs.switchingLocked),
-              lastClosedReason: vs.lastClosedReason as
-                | 'completed'
-                | 'expired'
-                | 'cancelled'
-                | undefined,
-            });
+            const nextSession = normalizeVettingSessionState(vs as Partial<VettingSessionState>);
             setVettingSession((prev) => (isSameVettingSessionState(prev, nextSession) ? prev : nextSession));
           }
           if (row.key === 'moderation_schedule' && value && typeof value === 'object') {
@@ -2329,7 +2339,7 @@ function App() {
     loadModerationState();
   }, [authUserId]);
 
-  // Persist vettingSession to Supabase for multi-browser sync
+  // Persist vettingSession to Supabase for multi-browser sync (debounced + deduped JSON to avoid realtime storms)
   useEffect(() => {
     const payload = {
       active: vettingSession.active,
@@ -2342,12 +2352,32 @@ function App() {
       switchingLocked: vettingSession.switchingLocked,
       lastClosedReason: vettingSession.lastClosedReason,
     };
-    supabase
-      .from('moderation_state')
-      .upsert({ key: 'vetting_session', value: payload, updated_at: new Date().toISOString() }, { onConflict: 'key' })
-      .then(({ error }) => {
-        if (error) console.warn('Failed to persist vetting_session to Supabase:', error.message);
-      });
+    const json = JSON.stringify(payload);
+    if (json === lastVettingSessionPersistJsonRef.current) {
+      return;
+    }
+    if (vettingSessionPersistTimerRef.current) {
+      clearTimeout(vettingSessionPersistTimerRef.current);
+    }
+    vettingSessionPersistTimerRef.current = setTimeout(() => {
+      vettingSessionPersistTimerRef.current = null;
+      lastVettingSessionPersistJsonRef.current = json;
+      void supabase
+        .from('moderation_state')
+        .upsert(
+          { key: 'vetting_session', value: payload, updated_at: new Date().toISOString() },
+          { onConflict: 'key' }
+        )
+        .then(({ error }) => {
+          if (error) console.warn('Failed to persist vetting_session to Supabase:', error.message);
+        });
+    }, 450);
+    return () => {
+      if (vettingSessionPersistTimerRef.current) {
+        clearTimeout(vettingSessionPersistTimerRef.current);
+        vettingSessionPersistTimerRef.current = null;
+      }
+    };
   }, [vettingSession]);
 
   // Persist restrictedVetters to Supabase for real-time Chief visibility (cross-browser)
@@ -2404,25 +2434,11 @@ function App() {
             .new;
           if (!row?.key) return;
           if (row.key === 'vetting_session' && row.value && typeof row.value === 'object') {
+            if (Date.now() < vettingSessionRealtimeSuppressUntilRef.current) {
+              return;
+            }
             const vs = row.value as Record<string, unknown>;
-            const nextSession = normalizeVettingSessionState({
-              active: Boolean(vs.active),
-              startedAt: vs.startedAt != null ? Number(vs.startedAt) : undefined,
-              durationMinutes:
-                typeof vs.durationMinutes === 'number'
-                  ? vs.durationMinutes
-                  : undefined,
-              expiresAt: vs.expiresAt != null ? Number(vs.expiresAt) : undefined,
-              safeBrowserEnabled: Boolean(vs.safeBrowserEnabled),
-              cameraOn: Boolean(vs.cameraOn),
-              screenshotBlocked: Boolean(vs.screenshotBlocked),
-              switchingLocked: Boolean(vs.switchingLocked),
-              lastClosedReason: vs.lastClosedReason as
-                | 'completed'
-                | 'expired'
-                | 'cancelled'
-                | undefined,
-            });
+            const nextSession = normalizeVettingSessionState(vs as Partial<VettingSessionState>);
             setVettingSession((prev) =>
               isSameVettingSessionState(prev, nextSession) ? prev : nextSession
             );
@@ -5118,6 +5134,9 @@ function App() {
         startedAt,
         expiresAt,
       });
+
+      // Ignore realtime echoes while local state + debounced persist settle (type quirks / duplicate events).
+      vettingSessionRealtimeSuppressUntilRef.current = Date.now() + 8000;
       
       // Start global vetting session - this enables the "Start Session" button for vetters
     setVettingSession({
@@ -5131,16 +5150,19 @@ function App() {
       switchingLocked: true,
     });
 
-      // IMPORTANT: Clear any previously scheduled moderation window.
-      // Otherwise, stale `moderationSchedule.scheduledEndTime` can immediately trigger
-      // the auto-expiry effect and stop the session a few seconds after Chief starts.
-      setModerationSchedule({ scheduled: false });
+      // Defer non-critical state so the first paint after "Start session" stays stable (less layout thrash / flicker).
+      startTransition(() => {
+        // IMPORTANT: Clear any previously scheduled moderation window.
+        // Otherwise, stale `moderationSchedule.scheduledEndTime` can immediately trigger
+        // the auto-expiry effect and stop the session a few seconds after Chief starts.
+        setModerationSchedule({ scheduled: false });
 
-      // Clear all comments from previous vetting session to start fresh
-      setChecklistComments(new Map());
-      setChecklistDraftText(new Map());
-      setChecklistTypingState(new Map());
-      
+        // Clear all comments from previous vetting session to start fresh
+        setChecklistComments(new Map());
+        setChecklistDraftText(new Map());
+        setChecklistTypingState(new Map());
+      });
+
       // Clear localStorage to ensure comments don't persist across sessions
       try {
         localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
@@ -7414,18 +7436,6 @@ function App() {
     return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   }, [moderationSchedule, currentTime]);
 
-  const vettingCountdown = useMemo(() => {
-    if (!vettingSession.active || !vettingSession.expiresAt) {
-      return null;
-    }
-    const remainingMs = Math.max(0, vettingSession.expiresAt - currentTime);
-    const minutes = Math.floor(remainingMs / 60000);
-    const seconds = Math.floor((remainingMs % 60000) / 1000);
-    return `${minutes.toString().padStart(2, '0')}:${seconds
-      .toString()
-      .padStart(2, '0')}`;
-  }, [currentTime, vettingSession.active, vettingSession.expiresAt]);
-
   const isAuthenticated = Boolean(currentUser);
   const isAdmin = currentUserHasRole('Admin');
   const isChiefExaminer = currentUserHasRole('Chief Examiner');
@@ -8533,6 +8543,7 @@ function App() {
       visible: true,
       render: () => (
         <VettingAndAnnotations
+          key="vetting-suite-panel"
           workflowStage={workflow.stage}
           workflow={workflow}
           vettingSession={vettingSession}
@@ -8540,7 +8551,6 @@ function App() {
           safeBrowserPolicies={safeBrowserPolicies}
           checklist={activeChecklist}
           customChecklistPdf={customChecklistPdf}
-          vettingCountdown={vettingCountdown}
           userHasRole={currentUserHasRole}
           onStartVetting={handleStartVetting}
           onCompleteVetting={handleCompleteVetting}
@@ -19631,6 +19641,45 @@ function ActionButton({
   );
 }
 
+/** Isolated 1s updates so the large Vetting panel does not re-render every tick (reduces glass/backdrop flicker). */
+function VettingSessionCountdownBadge({ expiresAt }: { expiresAt: number }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [expiresAt]);
+  const remainingMs = Math.max(0, expiresAt - Date.now());
+  const minutes = Math.floor(remainingMs / 60000);
+  const seconds = Math.floor((remainingMs % 60000) / 1000);
+  const text = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  return (
+    <div className="rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-center text-sm font-semibold text-blue-700">
+      Session Countdown
+      <div className="mt-1 text-2xl tracking-widest text-blue-800">{text}</div>
+    </div>
+  );
+}
+
+function VettingSessionActiveHint({ expiresAt }: { expiresAt?: number }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (expiresAt == null) return;
+    const id = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [expiresAt]);
+  if (expiresAt == null) {
+    return <>Session active. Time expired</>;
+  }
+  const remainingMs = Math.max(0, expiresAt - Date.now());
+  const minutes = Math.floor(remainingMs / 60000);
+  const seconds = Math.floor((remainingMs % 60000) / 1000);
+  const text = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  if (remainingMs <= 0) {
+    return <>Session active. Time expired</>;
+  }
+  return <>Session active. Time remaining: {text}</>;
+}
+
 interface VettingAndAnnotationsProps {
   workflowStage: WorkflowStage;
   workflow?: WorkflowState;
@@ -19639,7 +19688,6 @@ interface VettingAndAnnotationsProps {
   safeBrowserPolicies: string[];
   checklist: typeof digitalChecklist;
   customChecklistPdf?: { url: string; name: string; isWordDoc?: boolean } | null;
-  vettingCountdown: string | null;
   userHasRole: (role: Role) => boolean;
   onStartVetting: (minutes: number) => void;
   onCompleteVetting: () => void;
@@ -19729,7 +19777,6 @@ function VettingAndAnnotations({
   safeBrowserPolicies: _safeBrowserPolicies,
   checklist,
   customChecklistPdf,
-  vettingCountdown,
   userHasRole,
   onStartVetting,
   onCompleteVetting,
@@ -21633,13 +21680,8 @@ function VettingAndAnnotations({
               {moderationEndCountdown}
             </div>
           </div>
-        ) : vettingSession.active && vettingCountdown ? (
-          <div className="rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-center text-sm font-semibold text-blue-700">
-            Session Countdown
-            <div className="mt-1 text-2xl tracking-widest text-blue-800">
-              {vettingCountdown}
-            </div>
-          </div>
+        ) : vettingSession.active && vettingSession.expiresAt ? (
+          <VettingSessionCountdownBadge expiresAt={vettingSession.expiresAt} />
         ) : (
           <StatusPill label="Session Idle" active={false} tone="slate" />
         )
@@ -22029,13 +22071,15 @@ function VettingAndAnnotations({
                         )}
                       </div>
                       <p className="mt-1 text-[0.6rem] text-slate-600">
-                        {vettingSession.active
-                          ? `Session active. ${vettingCountdown ? `Time remaining: ${vettingCountdown}` : 'Time expired'}`
-                          : moderationSchedule?.scheduled && moderationStartCountdown
-                          ? `Waiting for scheduled time... ${moderationStartCountdown} remaining`
-                          : moderationSchedule?.scheduled
-                          ? `Scheduled time reached. Ready to start session.`
-                          : `Set schedule to auto-calculate`}
+                        {vettingSession.active ? (
+                          <VettingSessionActiveHint expiresAt={vettingSession.expiresAt} />
+                        ) : moderationSchedule?.scheduled && moderationStartCountdown ? (
+                          `Waiting for scheduled time... ${moderationStartCountdown} remaining`
+                        ) : moderationSchedule?.scheduled ? (
+                          `Scheduled time reached. Ready to start session.`
+                        ) : (
+                          `Set schedule to auto-calculate`
+                        )}
                       </p>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
