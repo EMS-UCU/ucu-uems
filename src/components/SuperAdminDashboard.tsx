@@ -178,6 +178,69 @@ export default function SuperAdminDashboard({
     return data;
   }, [users]);
 
+  const qaAnalytics = useMemo(() => {
+    const totalPapers = examPapers.length;
+    const approved = examPapers.filter(
+      (p) => p.approval_status === 'approved_for_printing' || p.status === 'approved_for_printing'
+    ).length;
+    const rejected = examPapers.filter((p) => p.status === 'rejected_restart_process').length;
+    const inVetting = examPapers.filter(
+      (p) =>
+        p.status === 'appointed_for_vetting' ||
+        p.status === 'vetting_in_progress' ||
+        p.status === 'vetted_with_comments'
+    ).length;
+
+    const approvalRate = totalPapers > 0 ? Math.round((approved / totalPapers) * 100) : 0;
+    const rejectionRate = totalPapers > 0 ? Math.round((rejected / totalPapers) * 100) : 0;
+
+    const now = Date.now();
+    const ms7 = 7 * 24 * 60 * 60 * 1000;
+    const ms30 = 30 * 24 * 60 * 60 * 1000;
+
+    // Proxy for login activity if explicit login_audit table is unavailable.
+    const active7d = users.filter((u) => {
+      const t = u.updated_at ? new Date(u.updated_at).getTime() : NaN;
+      return Number.isFinite(t) && now - t <= ms7;
+    }).length;
+    const active30d = users.filter((u) => {
+      const t = u.updated_at ? new Date(u.updated_at).getTime() : NaN;
+      return Number.isFinite(t) && now - t <= ms30;
+    }).length;
+    const loginActivityRate30d = users.length > 0 ? Math.round((active30d / users.length) * 100) : 0;
+
+    const decided = examPapers.filter(
+      (p) =>
+        p.created_at &&
+        p.updated_at &&
+        (p.approval_status === 'approved_for_printing' || p.status === 'approved_for_printing' || p.status === 'rejected_restart_process')
+    );
+    const avgTurnaroundDays =
+      decided.length > 0
+        ? (
+            decided.reduce((sum, p) => {
+              const start = new Date(p.created_at).getTime();
+              const end = new Date(p.updated_at).getTime();
+              const days = Math.max(0, (end - start) / (1000 * 60 * 60 * 24));
+              return sum + days;
+            }, 0) / decided.length
+          ).toFixed(1)
+        : '0.0';
+
+    return {
+      totalPapers,
+      approved,
+      rejected,
+      inVetting,
+      approvalRate,
+      rejectionRate,
+      active7d,
+      active30d,
+      loginActivityRate30d,
+      avgTurnaroundDays,
+    };
+  }, [examPapers, users]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center p-12 bg-white">
@@ -198,7 +261,7 @@ export default function SuperAdminDashboard({
             Overview, audit reports, recordings, consent logs, and approved papers repository.
           </p>
         </div>
-        <div className="grid w-full max-w-4xl grid-cols-2 gap-1 rounded-2xl border border-blue-200 bg-white/90 p-1 text-sm font-semibold text-blue-700 shadow-sm sm:grid-cols-3 lg:grid-cols-5">
+        <div className="grid w-full max-w-4xl grid-cols-2 gap-2 rounded-2xl border border-blue-200 bg-white/90 p-2 text-sm font-semibold text-blue-700 shadow-sm sm:grid-cols-3 lg:grid-cols-5">
           {[
             { id: 'overview', label: 'Overview' },
             { id: 'reports', label: 'Reports' },
@@ -214,8 +277,10 @@ export default function SuperAdminDashboard({
                   tab.id as 'overview' | 'reports' | 'recordings' | 'consents' | 'repository'
                 )
               }
-              className={`w-full rounded-xl px-3 py-2.5 text-center transition ${
-                activeTab === tab.id ? 'bg-blue-600 text-white' : 'hover:bg-blue-50'
+              className={`w-full rounded-xl border px-3 py-2.5 text-center transition-all duration-200 shadow-sm ${
+                activeTab === tab.id
+                  ? 'border-blue-600 bg-blue-600 text-white shadow-md'
+                  : 'border-blue-200 bg-white text-blue-700 hover:border-blue-400 hover:bg-blue-50 hover:shadow'
               }`}
             >
               {tab.label}
@@ -299,6 +364,48 @@ export default function SuperAdminDashboard({
             </div>
           </motion.div>
         ))}
+      </div>
+
+      {/* QA analytics snapshot */}
+      <div className="rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50/70 to-white p-4 shadow-sm">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-bold text-indigo-900">Quality Assurance Analytics Snapshot</h3>
+          <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">
+            Live
+          </span>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          <div className="rounded-xl border border-indigo-100 bg-white p-3">
+            <p className="text-[11px] font-semibold text-slate-500">Paper Approvals</p>
+            <p className="mt-1 text-2xl font-bold text-emerald-600">{qaAnalytics.approved}</p>
+            <p className="text-[11px] text-slate-500">{qaAnalytics.approvalRate}% of all papers</p>
+          </div>
+          <div className="rounded-xl border border-indigo-100 bg-white p-3">
+            <p className="text-[11px] font-semibold text-slate-500">Paper Rejections</p>
+            <p className="mt-1 text-2xl font-bold text-rose-600">{qaAnalytics.rejected}</p>
+            <p className="text-[11px] text-slate-500">{qaAnalytics.rejectionRate}% rejection rate</p>
+          </div>
+          <div className="rounded-xl border border-indigo-100 bg-white p-3">
+            <p className="text-[11px] font-semibold text-slate-500">Under Moderation</p>
+            <p className="mt-1 text-2xl font-bold text-amber-600">{qaAnalytics.inVetting}</p>
+            <p className="text-[11px] text-slate-500">Awaiting final decision</p>
+          </div>
+          <div className="rounded-xl border border-indigo-100 bg-white p-3">
+            <p className="text-[11px] font-semibold text-slate-500">User Activity (30 days)</p>
+            <p className="mt-1 text-2xl font-bold text-blue-600">{qaAnalytics.loginActivityRate30d}%</p>
+            <p className="text-[11px] text-slate-500">
+              Active users: {qaAnalytics.active30d}/{users.length}
+            </p>
+          </div>
+          <div className="rounded-xl border border-indigo-100 bg-white p-3">
+            <p className="text-[11px] font-semibold text-slate-500">Avg Turnaround</p>
+            <p className="mt-1 text-2xl font-bold text-indigo-700">{qaAnalytics.avgTurnaroundDays}d</p>
+            <p className="text-[11px] text-slate-500">Create to final decision</p>
+          </div>
+        </div>
+        <p className="mt-3 text-[10px] text-slate-500">
+          Login activity uses profile-update timestamps as a proxy when a dedicated login audit table is unavailable.
+        </p>
       </div>
 
       {/* Charts Section */}
