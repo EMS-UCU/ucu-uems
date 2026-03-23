@@ -8,6 +8,7 @@ import RecordingReviewPanel from './RecordingReviewPanel';
 import type { RecordingEntry } from '../types/recordings';
 import ConsentAcceptancesReport from './ConsentAcceptancesReport';
 import ApprovedPapersRepository from './ApprovedPapersRepository';
+import SuperAdminReportsPanel from './SuperAdminReportsPanel';
 
 interface SuperAdminDashboardProps {
   currentUserId: string;
@@ -34,7 +35,9 @@ export default function SuperAdminDashboard({
   });
   const [loading, setLoading] = useState(true);
   const [hoveredCard, setHoveredCard] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'recordings' | 'consents' | 'repository'>('overview');
+  const [activeTab, setActiveTab] = useState<
+    'overview' | 'recordings' | 'consents' | 'repository' | 'reports'
+  >('overview');
 
   useEffect(() => {
     loadData();
@@ -188,16 +191,17 @@ export default function SuperAdminDashboard({
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-blue-100 bg-gradient-to-r from-blue-50 to-white px-4 py-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
-            Super Admin Command
+            Quality Assurance Command
           </p>
           <h2 className="text-xl font-bold text-blue-900">National Moderation Console</h2>
           <p className="text-xs text-blue-600">
-            Switch between operational insights and recording archives.
+            Overview, audit reports, recordings, consent logs, and approved papers repository.
           </p>
         </div>
-        <div className="flex rounded-full border border-blue-200 bg-white/80 p-0.5 text-xs font-semibold text-blue-700 shadow-sm">
+        <div className="grid w-full max-w-4xl grid-cols-2 gap-1 rounded-2xl border border-blue-200 bg-white/90 p-1 text-sm font-semibold text-blue-700 shadow-sm sm:grid-cols-3 lg:grid-cols-5">
           {[
             { id: 'overview', label: 'Overview' },
+            { id: 'reports', label: 'Reports' },
             { id: 'recordings', label: 'Recordings' },
             { id: 'consents', label: 'Consent Reports' },
             { id: 'repository', label: 'Approved Papers' },
@@ -205,8 +209,12 @@ export default function SuperAdminDashboard({
             <button
               key={tab.id}
               type="button"
-              onClick={() => setActiveTab(tab.id as 'overview' | 'recordings' | 'consents' | 'repository')}
-              className={`px-3 py-1.5 rounded-full transition ${
+              onClick={() =>
+                setActiveTab(
+                  tab.id as 'overview' | 'reports' | 'recordings' | 'consents' | 'repository'
+                )
+              }
+              className={`w-full rounded-xl px-3 py-2.5 text-center transition ${
                 activeTab === tab.id ? 'bg-blue-600 text-white' : 'hover:bg-blue-50'
               }`}
             >
@@ -216,10 +224,18 @@ export default function SuperAdminDashboard({
         </div>
       </div>
 
-      {activeTab === 'recordings' ? (
+      {activeTab === 'reports' ? (
+        <SuperAdminReportsPanel
+          currentUserId={currentUserId}
+          currentUserName={
+            users.find((u) => u.id === currentUserId)?.name || 'QA Officer'
+          }
+          currentUserRole="Quality Assurance"
+        />
+      ) : activeTab === 'recordings' ? (
         <RecordingReviewPanel
           recordings={recordingEntries}
-          contextLabel="Super Admin"
+          contextLabel="Quality Assurance"
         />
       ) : activeTab === 'consents' ? (
         <ConsentAcceptancesReport />

@@ -48,6 +48,7 @@ import RecordingReviewPanel from './components/RecordingReviewPanel';
 import { SafeVettingConference } from './components/SafeVettingConference';
 import type { RecordingEntry } from './types/recordings';
 import type { VettingSession } from './lib/supabase';
+import { getSemesterForDate } from './lib/semester';
 
 type BaseRole = 'Admin' | 'Lecturer';
 type Role =
@@ -8120,12 +8121,12 @@ function App() {
       }
     : null;
 
-  // Super Admin Dashboard
+  // Quality Assurance Dashboard
   const superAdminDashboard: PanelConfig | null = 
     isAuthenticated && currentUser?.isSuperAdmin
       ? {
           id: 'super-admin-dashboard',
-          label: 'Super Admin Dashboard',
+          label: 'Quality Assurance Dashboard',
           visible: true,
           render: () => (
             <SuperAdminDashboard
@@ -13856,7 +13857,7 @@ function SetterSubmissionForm({
   defaultCampus,
 }: SetterSubmissionFormProps) {
   const currentYear = new Date().getFullYear().toString();
-  const currentSemester = 'Advent'; // default liturgical semester; adjust if you track this elsewhere
+  const currentSemester = getSemesterForDate();
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [courseUnit, setCourseUnit] = useState(defaultCourseUnit ?? '');

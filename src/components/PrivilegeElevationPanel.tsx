@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { elevateToChiefExaminer, revokeRole } from '../lib/privilegeElevation';
 import { supabase } from '../lib/supabase';
 import type { DatabaseUser } from '../lib/supabase';
+import { ACADEMIC_STRUCTURE, type AcademicFaculty } from '../lib/academicStructure';
 
 interface PrivilegeElevationPanelProps {
   currentUserId: string;
@@ -34,26 +35,11 @@ export default function PrivilegeElevationPanel({
   // Keep track of optimistic updates separately
   const optimisticUpdatesRef = useRef<Map<string, any>>(new Map());
 
-  // Dropdown options with filtering hierarchy
-  const allFaculties = [
-    'Faculty of Engineering, Design and Technology',
-    'Faculty of Nursing and Midwifery'
-  ];
-
-  // Departments filtered by Faculty
-  const allDepartments: Record<string, string[]> = {
-    'Faculty of Engineering, Design and Technology': [
-      'Department of Computing and Technology',
-      'Department of Civil and Environmental Engineering'
-    ],
-    'Faculty of Nursing and Midwifery': [
-      'Department of Nursing',
-      'Department of Midwifery'
-    ]
-  };
+  // Dropdown options with filtering hierarchy (shared source with reports panel)
+  const allFaculties = Object.keys(ACADEMIC_STRUCTURE) as AcademicFaculty[];
 
   // Filtered departments based on selected faculty
-  const departments = faculty ? (allDepartments[faculty] || []) : [];
+  const departments = faculty ? [...ACADEMIC_STRUCTURE[faculty as AcademicFaculty]] : [];
 
   const semesters = [
     'Trinity',
