@@ -419,10 +419,28 @@ type ChecklistCommentsMap = Map<string, ChecklistComment>;
 const DEFAULT_PASSWORD = 'user123';
 const DEFAULT_SESSION_MINUTES = 3;
 const MIN_SESSION_MINUTES = 1;
+const SHARED_COMMENT_KEY_PREFIX = 'shared-comment:';
 const CHECKLIST_COMMENTS_STORAGE_KEY = 'ucu-vetting-checklist-comments';
 const CHECKLIST_COMMENTS_CHANNEL = 'ucu-vetting-checklist-sync';
 const CHECKLIST_TYPING_TTL_MS = 6000;
 const RESTRICTED_VETTER_TIMESTAMPS_KEY = 'ucu-restricted-vetter-timestamps';
+
+const getChecklistCommentEntries = (comments: ChecklistCommentsMap): Array<{ key: string; entry: ChecklistComment }> =>
+  Array.from(comments.entries())
+    .filter(([, entry]) => Boolean(entry?.comment?.trim()))
+    .sort((a, b) => (b[1].timestamp ?? 0) - (a[1].timestamp ?? 0))
+    .map(([key, entry]) => ({ key, entry }));
+
+const anonymizeChecklistComments = (comments: ChecklistCommentsMap): Record<string, ChecklistComment> =>
+  Object.fromEntries(
+    Array.from(comments.entries()).map(([key, entry]) => [
+      key,
+      {
+        ...entry,
+        vetterName: 'Anonymous Vetter',
+      },
+    ])
+  );
 
 const _defaultLecturerModules = [
   'Lecturer Dashboard',
@@ -1034,23 +1052,20 @@ const buildChecklistExportPayload = ({
     return null;
   }
 
-  const sectionConfigs = hasCustomChecklistPdf ? pdfChecklistSectionConfigs : defaultChecklistSectionConfigs;
+  const commentEntries = getChecklistCommentEntries(comments);
   let checklistText = 'MODERATION CHECKLIST WITH VETTER COMMENTS\n';
   checklistText += '='.repeat(50) + '\n\n';
 
-  checklistText += 'SECTION COMMENTS\n';
+  checklistText += 'VETTER COMMENTS\n';
   checklistText += '-'.repeat(50) + '\n\n';
 
-  sectionConfigs.forEach((section) => {
-    const sectionComment = comments.get(section.id);
-    if (sectionComment?.comment) {
-      checklistText += `${section.title}\n`;
-      checklistText += `Comment: ${sectionComment.comment}\n`;
-      if (!hideVetterNames) {
-        checklistText += `Added by: ${sectionComment.vetterName} on ${new Date(sectionComment.timestamp).toLocaleString()}\n\n`;
-      } else {
-        checklistText += `Added on: ${new Date(sectionComment.timestamp).toLocaleString()}\n\n`;
-      }
+  commentEntries.forEach(({ entry }, index) => {
+    checklistText += `Comment ${index + 1}\n`;
+    checklistText += `Comment: ${entry.comment}\n`;
+    if (!hideVetterNames) {
+      checklistText += `Added by: ${entry.vetterName} on ${new Date(entry.timestamp).toLocaleString()}\n\n`;
+    } else {
+      checklistText += `Added on: ${new Date(entry.timestamp).toLocaleString()}\n\n`;
     }
   });
 
@@ -1241,58 +1256,64 @@ const generateChecklistPDF = ({
   doc.setTextColor(0, 0, 0);
   yPos += 15;
   
-  // Get section configs
-  const sectionConfigs = hasCustomChecklistPdf ? pdfChecklistSectionConfigs : defaultChecklistSectionConfigs;
-  
-  // Section Comments with UCU blue heading
+  const commentEntries = getChecklistCommentEntries(comments);
+  const toRgb = (hex: string): [number, number, number] => {
+    const normalized = hex.replace('#', '');
+    if (normalized.length !== 6) return [0, 0, 0];
+    const r = Number.parseInt(normalized.slice(0, 2), 16);
+    const g = Number.parseInt(normalized.slice(2, 4), 16);
+    const b = Number.parseInt(normalized.slice(4, 6), 16);
+    return [Number.isFinite(r) ? r : 0, Number.isFinite(g) ? g : 0, Number.isFinite(b) ? b : 0];
+  };
+
+  // Vetter Comments with UCU blue heading
   doc.setFontSize(14);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(ucuBlue[0], ucuBlue[1], ucuBlue[2]);
-  doc.text('SECTION COMMENTS', margin, yPos);
+  doc.text('VETTER COMMENTS', margin, yPos);
   doc.setTextColor(0, 0, 0);
   yPos += 10;
-  
+
   doc.setFontSize(10);
   doc.setFont('helvetica', 'normal');
-  
-  sectionConfigs.forEach((section) => {
-    const sectionComment = comments.get(section.id);
-    if (sectionComment?.comment) {
-      // Check if we need a new page
-      if (yPos > pageHeight - 40) {
-        doc.addPage();
-        yPos = margin;
-      }
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setTextColor(ucuBlueLight[0], ucuBlueLight[1], ucuBlueLight[2]);
-      doc.text(section.title, margin, yPos);
-      doc.setTextColor(0, 0, 0);
-      yPos += 7;
-      
-      doc.setFont('helvetica', 'normal');
-      const commentLines = doc.splitTextToSize(`Comment: ${sectionComment.comment}`, pageWidth - 2 * margin);
-      doc.text(commentLines, margin, yPos);
-      yPos += commentLines.length * 5;
-      
-      const timestamp = new Date(sectionComment.timestamp).toLocaleString('en-GB', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
-      
-      if (!hideVetterNames) {
-        doc.text(`Added by: ${sectionComment.vetterName} on ${timestamp}`, margin, yPos);
-      } else {
-        doc.text(`Added on: ${timestamp}`, margin, yPos);
-      }
-      yPos += 10;
+
+  commentEntries.forEach(({ entry }, index) => {
+    if (yPos > pageHeight - 40) {
+      doc.addPage();
+      yPos = margin;
     }
+
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(ucuBlueLight[0], ucuBlueLight[1], ucuBlueLight[2]);
+    doc.text(`Comment ${index + 1}`, margin, yPos);
+    doc.setTextColor(0, 0, 0);
+    yPos += 7;
+
+    doc.setFont('helvetica', 'normal');
+    const [r, g, b] = toRgb(entry.color || '#000000');
+    doc.setTextColor(r, g, b);
+    const commentLines = doc.splitTextToSize(`Comment: ${entry.comment}`, pageWidth - 2 * margin);
+    doc.text(commentLines, margin, yPos);
+    doc.setTextColor(0, 0, 0);
+    yPos += commentLines.length * 5;
+
+    const timestamp = new Date(entry.timestamp).toLocaleString('en-GB', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+
+    if (!hideVetterNames) {
+      doc.text(`Added by: ${entry.vetterName} on ${timestamp}`, margin, yPos);
+    } else {
+      doc.text(`Added on: ${timestamp}`, margin, yPos);
+    }
+    yPos += 10;
   });
-  
+
   // Item-Level Comments section removed as per requirements
   
   // Footer on last page
@@ -5292,7 +5313,9 @@ function App() {
       try {
         cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       } catch (error) {
-        alert('Camera access is REQUIRED to join the vetting session. Please enable camera permissions and try again.');
+        const mediaError = error as DOMException | undefined;
+        const reason = mediaError?.name ? ` (${mediaError.name})` : '';
+        alert(`Camera access is REQUIRED to join the vetting session. Please enable camera permissions and try again${reason}.`);
         console.error('Vetter join blocked: Camera access denied', error);
         return;
       }
@@ -5649,6 +5672,17 @@ function App() {
       `Moderation scheduled: starts ${startDate}. Session will be started manually.`,
       actor
     );
+  };
+
+  const handleClearModerationSchedule = () => {
+    if (!currentUserHasRole('Chief Examiner')) {
+      return;
+    }
+
+    setModerationSchedule({ scheduled: false });
+
+    const actor = currentUser?.name ?? 'Unknown';
+    pushWorkflowEvent('Scheduled moderation cleared by Chief Examiner.', actor);
   };
 
   const handleRemoveChecklist = () => {
@@ -6358,7 +6392,7 @@ function App() {
         paperName: vettedPaper?.fileName,
         courseCode: vettedPaper?.courseCode,
         courseUnit: vettedPaper?.courseUnit,
-        checklistComments: Object.fromEntries(checklistComments.entries()),
+        checklistComments: anonymizeChecklistComments(checklistComments),
       };
       setForwardedChecklistPayload(exportPayload);
       setChecklistForwardedToTeamLead(true);
@@ -8233,16 +8267,24 @@ function App() {
 
   const roleSpecificPanels: PanelConfig[] = [];
   const papersForVettingSuite = (() => {
-    const activeVettingPapers = submittedPapers.filter(
-      (paper) => paper.status === 'in-vetting' || paper.status === 'vetted'
-    );
+    const byNewestFirst = (a: SubmittedPaper, b: SubmittedPaper) =>
+      new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime();
 
-    // Fallback: still surface Team Lead submissions when status sync is delayed.
-    if (activeVettingPapers.length > 0) return activeVettingPapers;
+    const inVetting = submittedPapers
+      .filter((paper) => paper.status === 'in-vetting')
+      .sort(byNewestFirst);
+    if (inVetting.length > 0) {
+      return [inVetting[0]];
+    }
 
-    return submittedPapers.filter(
-      (paper) => paper.status === 'submitted' && paper.submittedRole === 'Team Lead'
-    );
+    const vetted = submittedPapers
+      .filter((paper) => paper.status === 'vetted')
+      .sort(byNewestFirst);
+    if (vetted.length > 0) {
+      return [vetted[0]];
+    }
+
+    return [];
   })();
 
   if (isAuthenticated && isChiefExaminer) {
@@ -8559,6 +8601,7 @@ function App() {
           submittedPapers={papersForVettingSuite}
           moderationSchedule={moderationSchedule}
           onScheduleModeration={handleScheduleModeration}
+          onClearModerationSchedule={handleClearModerationSchedule}
           moderationStartCountdown={moderationStartCountdown}
           moderationEndCountdown={moderationEndCountdown}
           currentUserId={currentUser?.id}
@@ -15110,19 +15153,15 @@ function TeamLeadPanel({
               )}
             </div>
             <div className="overflow-y-auto flex-1 p-6 space-y-4">
-              {(customChecklistPdf ? pdfChecklistSectionConfigs : defaultChecklistSectionConfigs).map((section) => {
-                const sectionComment = checklistViewData.commentsMap.get(section.id);
-                if (!sectionComment?.comment) return null;
-                return (
-                  <div key={section.id} className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-                    <h4 className={`text-sm font-semibold ${section.headingColor} mb-2`}>{section.title}</h4>
-                    <p className="text-sm text-slate-700 whitespace-pre-wrap">{sectionComment.comment}</p>
-                    <p className="text-xs text-slate-500 mt-2">Added on {new Date(sectionComment.timestamp).toLocaleString()}</p>
-                  </div>
-                );
-              })}
-              {!(customChecklistPdf ? pdfChecklistSectionConfigs : defaultChecklistSectionConfigs).some(s => checklistViewData.commentsMap.get(s.id)?.comment) && (
-                <p className="text-sm text-slate-500">No section comments in this checklist.</p>
+              {getChecklistCommentEntries(checklistViewData.commentsMap).map(({ key, entry }, index) => (
+                <div key={key} className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+                  <h4 className="text-sm font-semibold text-slate-800 mb-2">Comment {index + 1}</h4>
+                  <p className="text-sm whitespace-pre-wrap" style={{ color: entry.color || '#334155' }}>{entry.comment}</p>
+                  <p className="text-xs text-slate-500 mt-2">Added on {new Date(entry.timestamp).toLocaleString()}</p>
+                </div>
+              ))}
+              {getChecklistCommentEntries(checklistViewData.commentsMap).length === 0 && (
+                <p className="text-sm text-slate-500">No comments in this checklist.</p>
               )}
             </div>
             <div className="px-6 py-4 border-t border-slate-200 flex flex-wrap gap-3 flex-shrink-0">
@@ -19696,6 +19735,7 @@ interface VettingAndAnnotationsProps {
   submittedPapers?: SubmittedPaper[];
   moderationSchedule?: ModerationSchedule;
   onScheduleModeration?: (startDateTime: string) => void;
+  onClearModerationSchedule?: () => void;
   moderationStartCountdown?: string | null;
   moderationEndCountdown?: string | null;
   sectionId?: string;
@@ -19736,36 +19776,31 @@ const ChecklistPreviewContent = ({
   hasCustomChecklistPdf: boolean;
   showVetterNames: boolean;
 }) => {
-  const sectionConfigs = hasCustomChecklistPdf ? pdfChecklistSectionConfigs : defaultChecklistSectionConfigs;
-  
+  const commentEntries = getChecklistCommentEntries(comments);
+
   return (
     <div className="space-y-6">
       <div className="border-b border-slate-200 pb-4">
-        <h3 className="text-base font-bold text-slate-800 mb-2">SECTION COMMENTS</h3>
+        <h3 className="text-base font-bold text-slate-800 mb-2">VETTER COMMENTS</h3>
         <div className="space-y-4">
-          {sectionConfigs.map((section) => {
-            const sectionComment = comments.get(section.id);
-            if (!sectionComment?.comment) return null;
-            return (
-              <div key={section.id} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-                <h4 className="text-sm font-semibold text-slate-800 mb-2">{section.title}</h4>
-                <p className="text-sm text-slate-700 mb-2">{sectionComment.comment}</p>
-                {showVetterNames ? (
-                  <p className="text-xs text-slate-500">
-                    Added by: <span className="font-semibold">{sectionComment.vetterName}</span> on {new Date(sectionComment.timestamp).toLocaleString()}
-                  </p>
-                ) : (
-                  <p className="text-xs text-slate-500">
-                    Added on: {new Date(sectionComment.timestamp).toLocaleString()}
-                  </p>
-                )}
-              </div>
-            );
-          })}
+          {commentEntries.map(({ key, entry }, index) => (
+            <div key={key} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <h4 className="text-sm font-semibold text-slate-800 mb-2">Comment {index + 1}</h4>
+              <p className="text-sm mb-2 whitespace-pre-wrap" style={{ color: entry.color || '#334155' }}>{entry.comment}</p>
+              {showVetterNames ? (
+                <p className="text-xs text-slate-500">
+                  Added by: <span className="font-semibold">{entry.vetterName}</span> on {new Date(entry.timestamp).toLocaleString()}
+                </p>
+              ) : (
+                <p className="text-xs text-slate-500">
+                  Added on: {new Date(entry.timestamp).toLocaleString()}
+                </p>
+              )}
+            </div>
+          ))}
+          {commentEntries.length === 0 && <p className="text-sm text-slate-500">No comments captured yet.</p>}
         </div>
       </div>
-      
-      {/* Item-Level Comments section removed as per requirements */}
     </div>
   );
 };
@@ -19785,6 +19820,7 @@ function VettingAndAnnotations({
   submittedPapers = [],
   moderationSchedule,
   onScheduleModeration,
+  onClearModerationSchedule,
   moderationStartCountdown,
   moderationEndCountdown,
   sectionId,
@@ -19856,6 +19892,24 @@ function VettingAndAnnotations({
     { name: 'Pink', value: '#EC4899' },
     { name: 'Black', value: '#000000' },
   ];
+  const sharedCommentKey = currentUserId
+    ? `${SHARED_COMMENT_KEY_PREFIX}${currentUserId}`
+    : `${SHARED_COMMENT_KEY_PREFIX}anonymous`;
+  const sharedCommentEntries = useMemo(() => getChecklistCommentEntries(checklistComments || new Map()), [checklistComments]);
+  const ownSharedCommentEntry = checklistComments?.get(sharedCommentKey);
+  const usedSharedColorsByOthers = useMemo(
+    () =>
+      new Set(
+        sharedCommentEntries
+          .filter(({ key, entry }) => key !== sharedCommentKey && Boolean(entry.color))
+          .map(({ entry }) => entry.color)
+      ),
+    [sharedCommentEntries, sharedCommentKey]
+  );
+  const availableSharedColor = textColors.find((color) => !usedSharedColorsByOthers.has(color.value))?.value ?? selectedColor;
+  const effectiveSelectedColor = usedSharedColorsByOthers.has(selectedColor) && !ownSharedCommentEntry?.comment
+    ? availableSharedColor
+    : selectedColor;
   const getTypingStatus = (commentKey: string): string | null => {
     const names = typingIndicators?.get(commentKey) ?? [];
     if (!names || names.length === 0) {
@@ -20388,7 +20442,7 @@ function VettingAndAnnotations({
   
   const [startDateTime, setStartDateTime] = useState(defaultStartDateTime);
   
-  // Session duration: default to 1 minute so Chief's "Session Duration" input and countdown match. User can type a different value.
+  // Session duration defaults to 3 minutes; Chief can still set a different value.
   const calculatedDuration = useMemo(() => {
     if (moderationSchedule?.scheduledStartTime && moderationSchedule?.scheduledEndTime) {
       const diffMs = moderationSchedule.scheduledEndTime - moderationSchedule.scheduledStartTime;
@@ -20397,8 +20451,7 @@ function VettingAndAnnotations({
     return MIN_SESSION_MINUTES;
   }, [moderationSchedule]);
 
-  // Always start with 1 minute so session countdown is 1 min unless Chief changes the input (schedule no longer overrides)
-  const [customDuration, setCustomDuration] = useState<number>(MIN_SESSION_MINUTES);
+  const [customDuration, setCustomDuration] = useState<number>(DEFAULT_SESSION_MINUTES);
   const [selectedPaper, setSelectedPaper] = useState<SubmittedPaper | null>(
     papersToDisplay.find(p => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0] || null
   );
@@ -20785,13 +20838,14 @@ function VettingAndAnnotations({
                     key={color.value}
                     type="button"
                     onClick={() => setSelectedColor(color.value)}
+                            disabled={usedSharedColorsByOthers.has(color.value) && ownSharedCommentEntry?.color !== color.value}
                     className={`h-6 w-6 rounded border-2 transition ${
                       selectedColor === color.value
                         ? 'border-slate-800 scale-110 shadow'
                         : 'border-slate-300 hover:border-slate-500'
                     }`}
                     style={{ backgroundColor: color.value }}
-                    title={color.name}
+                    title={usedSharedColorsByOthers.has(color.value) && ownSharedCommentEntry?.color !== color.value ? `${color.name} (in use by another vetter)` : color.name}
                   />
                 ))}
               </div>
@@ -21180,31 +21234,17 @@ function VettingAndAnnotations({
                   </div>
                   <div className="bg-white/80 backdrop-blur-sm rounded-lg p-4 max-h-64 overflow-y-auto border border-blue-100">
                     {(() => {
-                      const sectionConfigs = customChecklistPdf ? pdfChecklistSectionConfigs : defaultChecklistSectionConfigs;
-                      const hasSectionComments = sectionConfigs.some(section => checklistComments.get(section.id)?.comment);
-
+                      const commentEntries = getChecklistCommentEntries(checklistComments);
                       return (
-                        <div className="space-y-4">
-                          {/* Section Comments */}
-                          {hasSectionComments && (
-                            <div>
-                              <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wide mb-3">Section Comments</h4>
-                              <div className="space-y-3">
-                                {sectionConfigs.map((section) => {
-                                  const sectionComment = checklistComments.get(section.id);
-                                  if (!sectionComment?.comment) return null;
-                                  return (
-                                    <div key={section.id} className="rounded-lg border border-slate-200 bg-slate-50/80 p-3">
-                                      <h5 className="text-xs font-semibold text-slate-800 mb-1">{section.title}</h5>
-                                      <p className="text-xs text-slate-700 leading-relaxed">{sectionComment.comment}</p>
-                                    </div>
-                                  );
-                                })}
-                              </div>
+                        <div className="space-y-3">
+                          {commentEntries.map(({ key, entry }) => (
+                            <div key={key} className="rounded-lg border border-slate-200 bg-slate-50/80 p-3">
+                              <p className="text-[0.65rem] font-semibold text-slate-600 mb-1">
+                                {entry.vetterName} ? {new Date(entry.timestamp).toLocaleString()}
+                              </p>
+                              <p className="text-xs leading-relaxed" style={{ color: entry.color || '#1e293b' }}>{entry.comment}</p>
                             </div>
-                          )}
-
-                          {/* Item-Level Comments section removed as per requirements */}
+                          ))}
                         </div>
                       );
                     })()}
@@ -21540,10 +21580,6 @@ function VettingAndAnnotations({
     </div>
   ) : null;
 
-  const structuredChecklistCommentSections = hasCustomChecklistPdf
-    ? pdfChecklistSectionConfigs
-    : defaultChecklistSectionConfigs;
-
   const paperChecklistColumns = (() => {
     if (canViewPaperAndChecklist && selectedPaper) {
       // Both vetters and Chief Examiners see paper and checklist side by side
@@ -21689,8 +21725,8 @@ function VettingAndAnnotations({
       }
     >
       <div className="space-y-5">
-        {/* Shared vetting conference: Chief Examiner + selected vetters only */}
-        {vettingSession.active && (
+        {/* Shared vetting conference: Chief Examiner always, vetter only after successful join */}
+        {vettingSession.active && (isChiefExaminer || vetterHasJoined) && (
           <SafeVettingConference
             currentUserName={users.find((u) => u.id === currentUserId)?.name || undefined}
             currentUserId={currentUserId || null}
@@ -21730,7 +21766,7 @@ function VettingAndAnnotations({
                             type="button"
                             onClick={() => setSelectedColor(color.value)}
                             className={`h-6 w-6 rounded border-2 transition ${
-                              selectedColor === color.value
+                              effectiveSelectedColor === color.value
                                 ? 'border-slate-800 scale-110 shadow'
                                 : 'border-slate-300 hover:border-slate-500'
                             }`}
@@ -21741,7 +21777,7 @@ function VettingAndAnnotations({
                       </div>
                     </div>
                     <p className="text-[0.6rem] text-slate-500">
-                      Select a color, then add your comments in the sections below
+                      Select a color, then add your comment in the shared window below
                     </p>
                   </div>
                 </div>
@@ -21756,166 +21792,82 @@ function VettingAndAnnotations({
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-slate-800">Glass Styled Checklist Commentary</h3>
-                  <p className="text-[0.7rem] text-slate-600">Hover over any card to reveal the smooth glassmorphic surface and capture remarks per section.</p>
+                  <p className="text-[0.7rem] text-slate-600">Use one shared window for whole-paper vetting remarks from all vetters.</p>
                 </div>
               </div>
               
-              {/* Grid of Section Comment Boards */}
-              <div className="grid gap-4 sm:grid-cols-2">
-                {structuredChecklistCommentSections.slice(0, 4).map((section) => {
-                  const commentEntry = checklistComments?.get(section.id);
-                  const canEditSection = isVetter && vetterHasJoined;
-                  const textareaColor = canEditSection
-                    ? selectedColor
-                    : commentEntry?.color || '#1e293b';
-                  const commentText = commentEntry?.comment || '';
-                  const charCount = commentText.length;
-                  const maxChars = 500;
-                  const isCaptured = commentText.length > 0;
-                  
-                  return (
-                    <div
-                      key={section.id}
-                      className="group relative overflow-hidden rounded-2xl border border-slate-200/60 bg-white/40 backdrop-blur-xl p-5 shadow-lg transition-all duration-300 hover:border-slate-300/80 hover:bg-white/60 hover:shadow-2xl"
-                      style={{
-                        backdropFilter: 'blur(20px)',
-                        WebkitBackdropFilter: 'blur(20px)',
-                      }}
-                    >
-                      {/* Glassmorphic overlay on hover */}
-                      <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 bg-gradient-to-br from-white/30 via-transparent to-white/10 pointer-events-none" />
-                      
-                      {/* Header */}
-                      <div className="relative z-10 flex items-start justify-between mb-4">
-                        <div className="flex items-center gap-3 flex-1">
-                          {/* Purple icon with yellow starburst */}
-                          <div className="relative flex-shrink-0">
-                            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center shadow-md">
-                              <span className="text-white text-lg">✨</span>
-                            </div>
-                            <div className="absolute -top-1 -right-1 w-4 h-4 bg-yellow-400 rounded-full blur-sm opacity-80" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-[0.65rem] font-bold uppercase tracking-wider text-slate-500 mb-1">SECTION COMMENT BOARD</p>
-                            <h4 className="text-xs font-bold text-slate-800 leading-tight">{section.title}</h4>
-                          </div>
-                        </div>
-                        {/* Ready status indicator */}
-                        <div className="flex items-center gap-1.5 flex-shrink-0">
-                          <div className="w-2 h-2 rounded-full bg-blue-500 shadow-lg shadow-blue-500/50" />
-                          <span className="text-[0.65rem] font-semibold text-blue-600">Ready</span>
-                        </div>
+              {(() => {
+                const sharedCommentKey = currentUserId
+                  ? `${SHARED_COMMENT_KEY_PREFIX}${currentUserId}`
+                  : `${SHARED_COMMENT_KEY_PREFIX}anonymous`;
+                const ownCommentEntry = checklistComments?.get(sharedCommentKey);
+                const canEditShared = isVetter && vetterHasJoined;
+                const maxChars = 1200;
+                const usedColorsByOthers = new Set(
+                  getChecklistCommentEntries(checklistComments || new Map())
+                    .filter(({ key, entry }) => key !== sharedCommentKey && Boolean(entry.color))
+                    .map(({ entry }) => entry.color)
+                );
+                const availableColor = textColors.find((color) => !usedColorsByOthers.has(color.value))?.value ?? selectedColor;
+                const effectiveColor = usedColorsByOthers.has(selectedColor) && !ownCommentEntry?.comment
+                  ? availableColor
+                  : selectedColor;
+                const sharedCommentEntries = getChecklistCommentEntries(checklistComments || new Map());
+
+                return (
+                  <div className="space-y-4">
+                    <div className="rounded-xl border border-slate-200/60 bg-white/60 p-4 shadow-sm">
+                      <div className="mb-2 flex items-center justify-between">
+                        <p className="text-[0.7rem] font-bold uppercase tracking-wider text-slate-500">Shared Vetter Comment Board</p>
+                        <span className="text-[0.65rem] text-slate-500">One window for all vetters</span>
                       </div>
-                      
-                      {/* Prompt */}
-                      <div className="relative z-10 mb-3">
-                        <p className="text-[0.7rem] text-slate-600/90">{section.placeholder}</p>
-                      </div>
-                      
-                      {/* Text area with glassmorphic background */}
-                      <div className="relative z-10 mb-3">
-                        <textarea
-                          value={commentText}
-                          onChange={(e) => {
-                            const newValue = e.target.value;
-                            if (newValue.length <= maxChars && onChecklistCommentChange) {
-                              onChecklistCommentChange(section.id, newValue || null, selectedColor);
-                            }
-                          }}
-                          placeholder="Stream your vetting thoughts here..."
-                          maxLength={maxChars}
-                          className="w-full rounded-xl border border-slate-300/50 bg-white/50 backdrop-blur-md px-4 py-3 text-xs text-slate-800 placeholder:text-slate-400 focus:border-blue-400/60 focus:outline-none focus:ring-2 focus:ring-blue-400/20 transition-all duration-300 resize-none"
-                          style={{ 
-                            color: textareaColor,
-                            backdropFilter: 'blur(10px)',
-                            WebkitBackdropFilter: 'blur(10px)',
-                          }}
-                          rows={6}
-                          disabled={!canEditSection}
-                        />
-                      </div>
-                      
-                      {/* Controls */}
-                      <div className="relative z-10 flex items-center justify-between mb-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (onChecklistCommentChange) {
-                              onChecklistCommentChange(section.id, null);
-                            }
-                          }}
-                          disabled={!canEditSection || !commentText}
-                          className="text-[0.7rem] font-medium text-slate-500 hover:text-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Clear
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (onChecklistCommentChange && commentText.trim()) {
-                              onChecklistCommentChange(section.id, commentText, selectedColor);
-                            }
-                          }}
-                          disabled={!canEditSection || !commentText.trim()}
-                          className="text-[0.7rem] font-semibold text-blue-600 hover:text-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Ready to capture
-                        </button>
-                      </div>
-                      
-                      {/* Character count */}
-                      <div className="relative z-10 flex items-center justify-between">
-                        <span className="text-[0.65rem] text-slate-500">
-                          {isCaptured ? 'Captured' : 'Not captured yet'}
-                        </span>
-                        <span className={`text-[0.65rem] font-medium ${charCount > maxChars * 0.9 ? 'text-amber-600' : 'text-slate-500'}`}>
-                          {charCount}/{maxChars}
-                        </span>
+                      <p className="mb-3 text-[0.72rem] text-slate-600">
+                        Add one overall moderation comment for the paper. Each vetter's entry keeps their unique color.
+                      </p>
+                      <textarea
+                        value={ownCommentEntry?.comment || ''}
+                        onChange={(e) => {
+                          const newValue = e.target.value;
+                          if (newValue.length <= maxChars && onChecklistCommentChange) {
+                            onChecklistCommentChange(sharedCommentKey, newValue || null, effectiveColor);
+                          }
+                        }}
+                        placeholder="Write your overall vetting comment for this paper..."
+                        maxLength={maxChars}
+                        className="w-full rounded-xl border border-slate-300/50 bg-white/70 px-4 py-3 text-xs placeholder:text-slate-400 focus:border-blue-400/60 focus:outline-none focus:ring-2 focus:ring-blue-400/20 transition-all resize-none"
+                        style={{ color: canEditShared ? effectiveColor : ownCommentEntry?.color || '#1e293b' }}
+                        rows={6}
+                        disabled={!canEditShared}
+                      />
+                      <div className="mt-2 flex items-center justify-between text-[0.65rem] text-slate-500">
+                        <span>{(ownCommentEntry?.comment || '').trim() ? 'Captured' : 'Not captured yet'}</span>
+                        <span>{(ownCommentEntry?.comment || '').length}/{maxChars}</span>
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-              
-              {/* Additional sections (if any beyond the first 4) */}
-              {structuredChecklistCommentSections.length > 4 && (
-                <div className="mt-4 space-y-3">
-                  {structuredChecklistCommentSections.slice(4).map((section) => {
-                    const commentEntry = checklistComments?.get(section.id);
-                    const canEditSection = isVetter && vetterHasJoined;
-                    const textareaColor = canEditSection
-                      ? selectedColor
-                      : commentEntry?.color || '#1e293b';
-                    return (
-                      <div
-                        key={section.id}
-                        className="group relative overflow-hidden rounded-xl border border-slate-200/60 bg-white/40 backdrop-blur-xl p-4 shadow-lg transition-all duration-300 hover:border-slate-300/80 hover:bg-white/60"
-                      >
-                        <h4 className={`text-xs font-bold mb-2 ${section.headingColor} text-slate-800`}>{section.title}</h4>
-                        <textarea
-                          value={commentEntry?.comment || ''}
-                          onChange={(e) => {
-                            if (onChecklistCommentChange) {
-                              const v = e.target.value;
-                              onChecklistCommentChange(section.id, v.trim() === '' ? null : v, selectedColor);
-                            }
-                          }}
-                          placeholder={section.placeholder}
-                          className="w-full rounded-lg border border-slate-300/50 bg-white/50 backdrop-blur-md px-3 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:border-blue-400/60 focus:outline-none focus:ring-2 focus:ring-blue-400/20"
-                          style={{ color: textareaColor }}
-                          rows={3}
-                          disabled={!canEditSection}
-                        />
-                        {commentEntry?.comment && (
-                          <p className="mt-1 text-[0.55rem] text-slate-500">
-                            Last updated: {new Date(commentEntry.timestamp || Date.now()).toLocaleString()}
-                          </p>
+
+                    <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-4">
+                      <h4 className="mb-3 text-xs font-bold text-slate-700 uppercase tracking-wide">Collected comments</h4>
+                      <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+                        {sharedCommentEntries.length > 0 ? (
+                          sharedCommentEntries.map(({ key, entry }, index) => (
+                            <div key={key} className="rounded-lg border border-slate-200 bg-white p-3">
+                              <div className="mb-1 flex items-center justify-between">
+                                <p className="text-[0.65rem] font-semibold text-slate-700">
+                                  {entry.vetterName || `Vetter ${index + 1}`}
+                                </p>
+                                <span className="text-[0.6rem] text-slate-500">{new Date(entry.timestamp).toLocaleString()}</span>
+                              </div>
+                              <p className="text-xs whitespace-pre-wrap" style={{ color: entry.color || '#1e293b' }}>{entry.comment}</p>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-xs text-slate-500">No comments captured yet.</p>
                         )}
                       </div>
-                    );
-                  })}
-                </div>
-              )}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         )}
@@ -21964,6 +21916,15 @@ function VettingAndAnnotations({
                       >
                         ✓ Schedule Session
                       </button>
+                      {moderationSchedule?.scheduled && onClearModerationSchedule && (
+                        <button
+                          type="button"
+                          onClick={onClearModerationSchedule}
+                          className="w-full rounded-lg border-2 border-rose-300 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 shadow-sm transition-all hover:bg-rose-100"
+                        >
+                          Clear Schedule
+                        </button>
+                      )}
                       {moderationSchedule?.scheduled && moderationSchedule.startDateTime && (
                         <div className="rounded-lg border-2 border-green-300 bg-gradient-to-r from-green-50 to-emerald-50 p-2">
                           <p className="text-[0.65rem] font-bold text-green-700 flex items-center gap-1">
