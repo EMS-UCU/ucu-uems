@@ -219,9 +219,9 @@ const isChecklist = (fileName: string): boolean => {
   return normalized.includes('checklist') || normalized.includes('check-list');
 };
 
-const deriveStudyYearLabel = (rawYear?: string, courseCode?: string): string => {
-  if (rawYear) {
-    const normalized = rawYear.toLowerCase();
+const deriveStudyYearLabel = (rawYear?: string | number, courseCode?: string): string => {
+  if (rawYear != null) {
+    const normalized = String(rawYear).trim().toLowerCase();
     for (const pattern of STUDY_YEAR_PATTERNS) {
       if (pattern.keywords.some((kw) => normalized.includes(kw))) {
         return pattern.label;
@@ -5207,7 +5207,11 @@ function App() {
       // Ensure there is an active paper in vetting when the session starts.
       // Without this, Start Session can appear to "do nothing" in the UI.
       const paperForVetting = submittedPapers.find(
-        (p) => !removedFromVettingIds.has(p.id) && p.status !== 'approved' && p.status !== 'vetted'
+        (p) =>
+          !removedFromVettingIds.has(p.id) &&
+          !isChecklist(p.fileName || '') &&
+          p.status !== 'approved' &&
+          p.status !== 'vetted'
       );
       if (paperForVetting?.id) {
         setSubmittedPapers((prev) =>
@@ -8271,14 +8275,20 @@ function App() {
       new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime();
 
     const inVetting = submittedPapers
-      .filter((paper) => paper.status === 'in-vetting')
+      .filter((paper) => paper.status === 'in-vetting' && !isChecklist(paper.fileName || ''))
       .sort(byNewestFirst);
     if (inVetting.length > 0) {
       return [inVetting[0]];
     }
 
+    // Once Chief Examiner has made a decision (approved/rejected-forwarded),
+    // vetting is considered complete and the paper should no longer appear here.
+    if (workflow.lastDecision) {
+      return [];
+    }
+
     const vetted = submittedPapers
-      .filter((paper) => paper.status === 'vetted')
+      .filter((paper) => paper.status === 'vetted' && !isChecklist(paper.fileName || ''))
       .sort(byNewestFirst);
     if (vetted.length > 0) {
       return [vetted[0]];
@@ -16032,6 +16042,12 @@ function AISimilarityDetectionPanel({
   };
 
   const handleSendToVetting = async (paperId: string) => {
+    const paperToSend = submittedPapers.find((paper) => paper.id === paperId);
+    if (paperToSend && isChecklist(paperToSend.fileName || '')) {
+      alert('Checklist files cannot be sent to vetting as exam papers.');
+      return;
+    }
+
     // Chief explicitly re-sent this paper to vetting: allow it to appear again.
     onSendToVetting?.(paperId);
 
@@ -16041,17 +16057,27 @@ function AISimilarityDetectionPanel({
         if (paper.id === paperId) {
           return { ...paper, status: 'in-vetting' as const };
         }
+        if (paper.status === 'in-vetting') {
+          return { ...paper, status: 'submitted' as const };
+        }
         return paper;
       });
       return ensureDemoPaper(updated);
     });
-    
+
+    const currentlyInVettingIds = submittedPapers
+      .filter((paper) => paper.id !== paperId && paper.status === 'in-vetting')
+      .map((paper) => paper.id);
+
+    const demotions = await Promise.all(
+      currentlyInVettingIds.map((id) => syncPaperStatusToSupabase(id, 'integrated_by_team_lead'))
+    );
     const synced = await syncPaperStatusToSupabase(paperId, 'appointed_for_vetting');
-    if (!synced) {
+    if (!synced || demotions.some((ok) => !ok)) {
       alert('Paper moved to vetting in this browser, but we could not persist the change to the database. Please refresh and try again.');
       return;
     }
-    alert('Paper has been sent to vetting successfully! It will remain in the vetting suite until the session is completed or advanced.');
+    alert('Paper has been sent to vetting successfully. Only this paper is now in vetting.');
   };
 
   return (
