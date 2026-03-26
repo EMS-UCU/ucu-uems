@@ -879,9 +879,13 @@ const resolvePaperUrl = (fileUrl?: string | null): string | null => {
   }
 
   try {
+    const normalizedPath = fileUrl
+      .replace(/^\/+/, '')
+      .replace(/^exam_papers\//, '');
+
     const { data } = supabase.storage
       .from('exam_papers')
-      .getPublicUrl(fileUrl);
+      .getPublicUrl(normalizedPath);
 
     return data?.publicUrl ?? null;
   } catch (error) {
