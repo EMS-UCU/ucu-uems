@@ -305,6 +305,16 @@ interface VetterMonitoring {
   violations: number;
 }
 
+type SerializableVetterMonitoring = {
+  vetterId: string;
+  vetterName: string;
+  joinedAt: number;
+  warnings: VetterWarning[];
+  violations: number;
+  cameraActive: boolean;
+  updatedAt: string;
+};
+
 interface VettingSessionRecord {
   id: string;
   paperId: string;
@@ -1043,6 +1053,23 @@ const serializeChecklistComments = (comments: ChecklistCommentsMap): Record<stri
   return obj;
 };
 
+const isSameChecklistComments = (a: ChecklistCommentsMap, b: ChecklistCommentsMap): boolean => {
+  if (a.size !== b.size) return false;
+  for (const [key, valueA] of a.entries()) {
+    const valueB = b.get(key);
+    if (!valueB) return false;
+    if (
+      valueA.comment !== valueB.comment ||
+      valueA.vetterName !== valueB.vetterName ||
+      valueA.timestamp !== valueB.timestamp ||
+      valueA.color !== valueB.color
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
+
 const buildChecklistExportPayload = ({
   comments,
   hasCustomChecklistPdf,
@@ -1676,6 +1703,22 @@ function App() {
   useEffect(() => {
     vetterMonitoringRef.current = vetterMonitoring;
   }, [vetterMonitoring]);
+  const persistLiveVetterMonitoring = useCallback(async (entry: SerializableVetterMonitoring) => {
+    try {
+      await supabase
+        .from('moderation_state')
+        .upsert(
+          {
+            key: `vetter_live_${entry.vetterId}`,
+            value: entry,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'key' }
+        );
+    } catch (error) {
+      console.warn('Failed to persist live vetter monitoring state:', error);
+    }
+  }, []);
   // Store camera stream references for Chief Examiner monitoring
   const vetterCameraStreams = useRef<Map<string, MediaStream>>(new Map());
   // Store MediaRecorder instances for video recording during vetting sessions
@@ -1688,6 +1731,8 @@ function App() {
   // Track draft text for real-time collaboration - Map<commentKey, Map<vetterId, { text: string; vetterName: string }>>
   const [checklistDraftText, setChecklistDraftText] = useState<Map<string, Map<string, { text: string; vetterName: string }>>>(new Map());
   const checklistCommentsChannelRef = useRef<BroadcastChannel | null>(null);
+  const checklistCommentsPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastChecklistCommentsPersistJsonRef = useRef<string>('');
   const previousInVettingIdsRef = useRef<Set<string>>(new Set());
   const activeChecklist = customChecklist ?? digitalChecklist;
   // Vetting session records - stores completed sessions
@@ -2297,10 +2342,41 @@ function App() {
   useEffect(() => {
     const loadModerationState = async () => {
       try {
+        const { data: liveVetterRows, error: liveVetterError } = await supabase
+          .from('moderation_state')
+          .select('key, value')
+          .like('key', 'vetter_live_%');
+        if (!liveVetterError && liveVetterRows?.length) {
+          setVetterMonitoring((prev) => {
+            const next = new Map(prev);
+            for (const row of liveVetterRows) {
+              const value = row.value as Partial<SerializableVetterMonitoring> | null;
+              if (!value?.vetterId) continue;
+              const existing = next.get(value.vetterId);
+              next.set(value.vetterId, {
+                vetterId: value.vetterId,
+                vetterName: value.vetterName ?? existing?.vetterName ?? 'Vetter',
+                joinedAt: typeof value.joinedAt === 'number' ? value.joinedAt : existing?.joinedAt ?? Date.now(),
+                cameraStream: existing?.cameraStream ?? null,
+                warnings: Array.isArray(value.warnings) ? value.warnings as VetterWarning[] : existing?.warnings ?? [],
+                violations: typeof value.violations === 'number' ? value.violations : existing?.violations ?? 0,
+              });
+            }
+            return next;
+          });
+        }
+
         const { data, error } = await supabase
           .from('moderation_state')
           .select('key, value')
-          .in('key', ['vetting_session', 'moderation_schedule', 'restricted_vetters', 'removed_from_vetting_ids']);
+          .in('key', [
+            'vetting_session',
+            'moderation_schedule',
+            'restricted_vetters',
+            'removed_from_vetting_ids',
+            'checklist_comments_live',
+            'forwarded_checklist',
+          ]);
 
         if (error) {
           console.warn('Moderation state load failed (table may not exist yet):', error.message);
@@ -2356,6 +2432,10 @@ function App() {
               setForwardedChecklistPayload(value as ForwardedChecklistPayload);
               setChecklistForwardedToTeamLead(true);
             }
+          }
+          if (row.key === 'checklist_comments_live' && value && typeof value === 'object') {
+            const nextMap = new Map(Object.entries(value as Record<string, ChecklistComment>));
+            setChecklistComments((prev) => (isSameChecklistComments(prev, nextMap) ? prev : nextMap));
           }
         }
       } catch (err) {
@@ -2430,6 +2510,37 @@ function App() {
         if (error) console.warn('Failed to persist removed_from_vetting_ids to Supabase:', error.message);
       });
   }, [removedFromVettingIds]);
+
+  // Persist checklist comments to Supabase so Chief and Vetters stay in sync across browsers.
+  useEffect(() => {
+    const payload = serializeChecklistComments(checklistComments);
+    const json = JSON.stringify(payload);
+    if (json === lastChecklistCommentsPersistJsonRef.current) {
+      return;
+    }
+    if (checklistCommentsPersistTimerRef.current) {
+      clearTimeout(checklistCommentsPersistTimerRef.current);
+    }
+    checklistCommentsPersistTimerRef.current = setTimeout(() => {
+      checklistCommentsPersistTimerRef.current = null;
+      lastChecklistCommentsPersistJsonRef.current = json;
+      void supabase
+        .from('moderation_state')
+        .upsert(
+          { key: 'checklist_comments_live', value: payload, updated_at: new Date().toISOString() },
+          { onConflict: 'key' }
+        )
+        .then(({ error }) => {
+          if (error) console.warn('Failed to persist checklist_comments_live to Supabase:', error.message);
+        });
+    }, 350);
+    return () => {
+      if (checklistCommentsPersistTimerRef.current) {
+        clearTimeout(checklistCommentsPersistTimerRef.current);
+        checklistCommentsPersistTimerRef.current = null;
+      }
+    };
+  }, [checklistComments]);
 
   // Persist moderationSchedule to Supabase for multi-browser sync
   useEffect(() => {
@@ -2509,6 +2620,28 @@ function App() {
             if (fc?.forwarded && fc.checklistComments && typeof fc.checklistComments === 'object') {
               setForwardedChecklistPayload(row.value as ForwardedChecklistPayload);
               setChecklistForwardedToTeamLead(true);
+            }
+          }
+          if (row.key === 'checklist_comments_live' && row.value && typeof row.value === 'object') {
+            const nextMap = new Map(Object.entries(row.value as Record<string, ChecklistComment>));
+            setChecklistComments((prev) => (isSameChecklistComments(prev, nextMap) ? prev : nextMap));
+          }
+          if (row.key.startsWith('vetter_live_') && row.value && typeof row.value === 'object') {
+            const value = row.value as Partial<SerializableVetterMonitoring>;
+            if (value?.vetterId) {
+              setVetterMonitoring((prev) => {
+                const next = new Map(prev);
+                const existing = next.get(value.vetterId!);
+                next.set(value.vetterId!, {
+                  vetterId: value.vetterId!,
+                  vetterName: value.vetterName ?? existing?.vetterName ?? 'Vetter',
+                  joinedAt: typeof value.joinedAt === 'number' ? value.joinedAt : existing?.joinedAt ?? Date.now(),
+                  cameraStream: existing?.cameraStream ?? null,
+                  warnings: Array.isArray(value.warnings) ? value.warnings as VetterWarning[] : existing?.warnings ?? [],
+                  violations: typeof value.violations === 'number' ? value.violations : existing?.violations ?? 0,
+                });
+                return next;
+              });
             }
           }
         }
@@ -5340,13 +5473,23 @@ function App() {
         const existing = newMap.get(currentUser.id!);
         const preservedViolations =
           existing && typeof existing.violations === 'number' ? existing.violations : 0;
-        newMap.set(currentUser.id!, {
+        const entry: VetterMonitoring = {
           vetterId: currentUser.id!,
           vetterName: currentUser.name ?? 'Unknown',
           joinedAt: Date.now(),
           cameraStream,
           warnings: existing?.warnings ?? [],
           violations: preservedViolations,
+        };
+        newMap.set(currentUser.id!, entry);
+        void persistLiveVetterMonitoring({
+          vetterId: entry.vetterId,
+          vetterName: entry.vetterName,
+          joinedAt: entry.joinedAt,
+          warnings: entry.warnings,
+          violations: entry.violations,
+          cameraActive: true,
+          updatedAt: new Date().toISOString(),
         });
         return newMap;
       });
@@ -5459,10 +5602,26 @@ function App() {
       vetterCameraStreams.current.delete(vetterId);
     }
     
-    // Remove from monitoring
+    // Remove local stream from monitoring and keep summary visible to Chief dashboard
     setVetterMonitoring(prev => {
       const newMap = new Map(prev);
-      newMap.delete(vetterId);
+      const existing = newMap.get(vetterId);
+      if (existing) {
+        const updatedEntry: VetterMonitoring = {
+          ...existing,
+          cameraStream: null,
+        };
+        newMap.set(vetterId, updatedEntry);
+        void persistLiveVetterMonitoring({
+          vetterId: updatedEntry.vetterId,
+          vetterName: updatedEntry.vetterName,
+          joinedAt: updatedEntry.joinedAt,
+          warnings: updatedEntry.warnings,
+          violations: updatedEntry.violations,
+          cameraActive: false,
+          updatedAt: new Date().toISOString(),
+        });
+      }
       return newMap;
     });
     
@@ -5535,18 +5694,38 @@ function App() {
       const newMap = new Map(prev);
       const existing = newMap.get(vetterId);
       if (existing) {
-        newMap.set(vetterId, {
+        const updatedEntry: VetterMonitoring = {
           ...existing,
           violations: newCount,
+        };
+        newMap.set(vetterId, updatedEntry);
+        void persistLiveVetterMonitoring({
+          vetterId: updatedEntry.vetterId,
+          vetterName: updatedEntry.vetterName,
+          joinedAt: updatedEntry.joinedAt,
+          warnings: updatedEntry.warnings,
+          violations: updatedEntry.violations,
+          cameraActive: Boolean(updatedEntry.cameraStream?.active),
+          updatedAt: new Date().toISOString(),
         });
       } else {
-        newMap.set(vetterId, {
+        const updatedEntry: VetterMonitoring = {
           vetterId,
           vetterName: 'Unknown',
           joinedAt: Date.now(),
           cameraStream: null,
           warnings: [],
           violations: newCount,
+        };
+        newMap.set(vetterId, updatedEntry);
+        void persistLiveVetterMonitoring({
+          vetterId: updatedEntry.vetterId,
+          vetterName: updatedEntry.vetterName,
+          joinedAt: updatedEntry.joinedAt,
+          warnings: updatedEntry.warnings,
+          violations: updatedEntry.violations,
+          cameraActive: false,
+          updatedAt: new Date().toISOString(),
         });
       }
       return newMap;
@@ -5624,20 +5803,40 @@ function App() {
       const existing = newMap.get(vetterId);
       if (existing) {
         // Add warning to existing monitoring data - Keep last 100 warnings for complete history
-        newMap.set(vetterId, {
+        const updatedEntry: VetterMonitoring = {
           ...existing,
           warnings: [...(existing.warnings || []), warning].slice(-100), // Keep last 100 warnings
           violations: existing.violations + (severity === 'critical' ? 1 : 0),
+        };
+        newMap.set(vetterId, updatedEntry);
+        void persistLiveVetterMonitoring({
+          vetterId: updatedEntry.vetterId,
+          vetterName: updatedEntry.vetterName,
+          joinedAt: updatedEntry.joinedAt,
+          warnings: updatedEntry.warnings,
+          violations: updatedEntry.violations,
+          cameraActive: Boolean(updatedEntry.cameraStream?.active),
+          updatedAt: new Date().toISOString(),
         });
       } else {
         // Initialize monitoring data if it doesn't exist (shouldn't happen but safety check)
-        newMap.set(vetterId, {
+        const updatedEntry: VetterMonitoring = {
           vetterId,
           vetterName: vetter.name,
           joinedAt: Date.now(),
           cameraStream: null,
           warnings: [warning],
           violations: severity === 'critical' ? 1 : 0,
+        };
+        newMap.set(vetterId, updatedEntry);
+        void persistLiveVetterMonitoring({
+          vetterId: updatedEntry.vetterId,
+          vetterName: updatedEntry.vetterName,
+          joinedAt: updatedEntry.joinedAt,
+          warnings: updatedEntry.warnings,
+          violations: updatedEntry.violations,
+          cameraActive: false,
+          updatedAt: new Date().toISOString(),
         });
       }
       return newMap;
@@ -20493,18 +20692,26 @@ function VettingAndAnnotations({
   // For vetters, always work on a single focused paper at a time
   const vetterPapers = isVetter && selectedPaper ? [selectedPaper] : [];
 
-  // Track paper IDs to detect when papers are removed
-  const paperIds = useMemo(() => papersToDisplay.map(p => p.id).sort().join(','), [papersToDisplay]);
-  
-  // Update selected paper when papers change
+  // Track paper identity + status so UI reacts immediately to in-vetting -> vetted transitions.
+  const paperStateSignature = useMemo(
+    () => papersToDisplay.map((p) => `${p.id}:${p.status}`).sort().join('|'),
+    [papersToDisplay]
+  );
+
+  // Keep selected paper synchronized with latest object from submittedPapers (status/file updates included).
   useEffect(() => {
-    // Clear selectedPaper if it's no longer in the papersToDisplay list
-    if (selectedPaper && !papersToDisplay.find(p => p.id === selectedPaper.id)) {
-      setSelectedPaper(papersToDisplay.find(p => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0] || null);
-    } else if (papersToDisplay.length > 0 && !selectedPaper) {
-      setSelectedPaper(papersToDisplay.find(p => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0] || null);
+    if (papersToDisplay.length === 0) {
+      setSelectedPaper(null);
+      return;
     }
-  }, [paperIds, papersToDisplay, selectedPaper]);
+    setSelectedPaper((prev) => {
+      if (!prev) {
+        return papersToDisplay.find((p) => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0];
+      }
+      const latestMatch = papersToDisplay.find((p) => p.id === prev.id);
+      return latestMatch || papersToDisplay[0];
+    });
+  }, [paperStateSignature, papersToDisplay]);
 
   // Check if scheduled start time has been reached
   // The countdown becomes null when the scheduled time has been reached
@@ -20583,7 +20790,7 @@ function VettingAndAnnotations({
   // Chief Examiner can see everything while the workflow is not yet fully approved.
   // Once the paper is approved, hide the vetting & annotations layout for everyone.
   const canViewPaperAndChecklist =
-    workflow.stage !== 'Approved' &&
+    workflow?.stage !== 'Approved' &&
     (isChiefExaminer || (isVetter && vetterHasJoined));
   
   // Vetters can start their session only when global session is active, they haven't joined yet, and they're not restricted
