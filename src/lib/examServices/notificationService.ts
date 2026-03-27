@@ -1,6 +1,11 @@
 import { supabase } from '../supabase';
 import type { Notification } from '../supabase';
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const isUuid = (value?: string | null): value is string =>
+  typeof value === 'string' &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+
 // Create a notification
 export async function createNotification(data: {
   user_id: string;
@@ -10,31 +15,49 @@ export async function createNotification(data: {
   related_exam_paper_id?: string;
 }): Promise<{ success: boolean; error?: string }> {
   try {
+    if (!data.user_id || !data.title || !data.message) {
+      return { success: false, error: 'Missing required notification fields' };
+    }
+
+    const payload = {
+      ...data,
+      ...(isUuid(data.related_exam_paper_id) ? {} : { related_exam_paper_id: undefined }),
+    };
+
     console.log('📤 Creating notification:', { 
       user_id: data.user_id, 
       title: data.title,
       type: data.type 
     });
-    
-    const { data: insertedData, error } = await supabase
-      .from('notifications')
-      .insert(data)
-      .select()
-      .single();
 
-    if (error) {
-      console.error('❌ Error creating notification:', {
+    // Use plain INSERT without .select() so RLS setups that allow INSERT
+    // but restrict SELECT still work reliably. Retry once for transient failures.
+    let lastError: any = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const { error } = await supabase
+        .from('notifications')
+        .insert(payload);
+
+      if (!error) {
+        console.log('✅ Notification created successfully');
+        return { success: true };
+      }
+
+      lastError = error;
+      console.error(`❌ Error creating notification (attempt ${attempt}/2):`, {
         error: error.message,
         code: error.code,
         details: error.details,
         hint: error.hint,
-        data: data
+        data: data,
       });
-      return { success: false, error: error.message };
+
+      if (attempt < 2) {
+        await sleep(200);
+      }
     }
 
-    console.log('✅ Notification created successfully:', insertedData?.id);
-    return { success: true };
+    return { success: false, error: lastError?.message || 'Failed to create notification' };
   } catch (error: any) {
     console.error('❌ Exception creating notification:', error);
     return { success: false, error: error.message || 'Unknown error' };

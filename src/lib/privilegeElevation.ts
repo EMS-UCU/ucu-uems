@@ -70,7 +70,20 @@ async function upsertPrivilegeElevationByUserId(
 async function insertPrivilegeElevationWithFallback(
   payload: Record<string, unknown>
 ): Promise<{ success: boolean; error?: string }> {
-  let insertResult = await supabase.from('privilege_elevations').insert(payload);
+  const ensureInsertId = (base: Record<string, unknown>): Record<string, unknown> => {
+    if (typeof base.id === 'string' && base.id.trim().length > 0) return base;
+    if (typeof base.user_id === 'string' && base.user_id.trim().length > 0) {
+      return { ...base, id: base.user_id };
+    }
+    const generatedId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `id-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    return { ...base, id: generatedId };
+  };
+
+  const payloadWithId = ensureInsertId(payload);
+  let insertResult = await supabase.from('privilege_elevations').insert(payloadWithId);
 
   if (!insertResult.error) return { success: true };
 
@@ -80,7 +93,7 @@ async function insertPrivilegeElevationWithFallback(
   if (isConstraintError(initialMessage, 'privilege_elevations_elevated_by_fkey')) {
     insertResult = await supabase
       .from('privilege_elevations')
-      .insert({ ...payload, elevated_by: null });
+      .insert({ ...payloadWithId, elevated_by: null });
     if (!insertResult.error) return { success: true };
   }
 
@@ -93,14 +106,14 @@ async function insertPrivilegeElevationWithFallback(
   ) {
     insertResult = await supabase
       .from('privilege_elevations')
-      .insert({ ...payload, id: payload.user_id });
+      .insert({ ...payloadWithId, id: payload.user_id });
     if (!insertResult.error) return { success: true };
 
     // Combine both fallbacks if both constraints are present.
     if (isConstraintError(insertResult.error?.message || '', 'privilege_elevations_elevated_by_fkey')) {
       insertResult = await supabase
         .from('privilege_elevations')
-        .insert({ ...payload, id: payload.user_id, elevated_by: null });
+        .insert({ ...payloadWithId, id: payload.user_id, elevated_by: null });
       if (!insertResult.error) return { success: true };
     }
   }
@@ -151,20 +164,33 @@ export async function elevateToChiefExaminer(
       };
     }
 
-    // Add Chief Examiner role
-    const updatedRoles = [...currentRoles, 'Chief Examiner'];
+    // Block duplicate pending/active operational assignments from privilege_elevations.
+    const { data: existingAssignments, error: existingAssignmentsError } = await supabase
+      .from('privilege_elevations')
+      .select('role_granted, is_active')
+      .eq('user_id', lecturerId)
+      .eq('is_active', true)
+      .in('role_granted', OPERATIONAL_ROLES as unknown as string[]);
 
-    // Update user roles - using user_profiles instead of users
-    const { error: updateError } = await supabase
-      .from('user_profiles')
-      .update({ roles: updatedRoles })
-      .eq('id', lecturerId);
-
-    if (updateError) {
-      return { success: false, error: updateError.message };
+    if (existingAssignmentsError) {
+      return { success: false, error: existingAssignmentsError.message };
     }
 
-    // Record privilege elevation with assignment details in metadata
+    if ((existingAssignments || []).some((entry: any) => entry.role_granted === 'Chief Examiner')) {
+      return { success: false, error: 'A pending or active Chief Examiner assignment already exists for this user.' };
+    }
+    const existingPendingOperational = (existingAssignments || []).find(
+      (entry: any) => entry.role_granted !== 'Chief Examiner'
+    );
+    if (existingPendingOperational) {
+      return {
+        success: false,
+        error: `This person already has an active or pending ${existingPendingOperational.role_granted} assignment.`,
+      };
+    }
+
+    // Record privilege elevation with pending consent metadata.
+    // Chief Examiner now follows the same consent flow as other operational roles.
     const insertPayload: Record<string, unknown> = {
       user_id: lecturerId,
       elevated_by: elevatedBy,
@@ -172,13 +198,18 @@ export async function elevateToChiefExaminer(
       is_active: true,
       metadata: assignmentDetails
         ? {
+            consent_status: 'pending',
+            assigned_at: new Date().toISOString(),
             category: assignmentDetails.category,
             faculty: assignmentDetails.faculty,
             department: assignmentDetails.department,
             semester: assignmentDetails.semester,
             year: assignmentDetails.year,
           }
-        : null,
+        : {
+            consent_status: 'pending',
+            assigned_at: new Date().toISOString(),
+          },
     };
     const insertAudit = await insertPrivilegeElevationWithFallback(insertPayload);
     if (!insertAudit.success) {
@@ -188,14 +219,24 @@ export async function elevateToChiefExaminer(
       );
     }
 
-    // Create notification for the user about their new role
+    // Reset previous acceptance for this role so reassignment starts as pending.
+    const { error: resetConsentError } = await supabase
+      .from('role_consent_acceptances')
+      .delete()
+      .eq('user_id', lecturerId)
+      .eq('role', 'Chief Examiner');
+    if (resetConsentError) {
+      console.warn('Could not reset previous Chief Examiner consent record:', resetConsentError.message);
+    }
+
+    // Create notification for the user about pending consent
     const metadataText = assignmentDetails
       ? ` for ${assignmentDetails.category} - ${assignmentDetails.faculty}, ${assignmentDetails.department}`
       : '';
     await createNotification({
       user_id: lecturerId,
-      title: 'Privilege Elevated',
-      message: `You have been assigned the Chief Examiner role${metadataText}. You can now manage exam workflows and assign roles to other lecturers.`,
+      title: 'Role Assignment Pending Consent',
+      message: `You have been selected for the Chief Examiner role${metadataText}. Please review and accept the consent form to activate this role.`,
       type: 'warning',
     });
 

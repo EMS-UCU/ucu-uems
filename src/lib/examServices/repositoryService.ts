@@ -20,6 +20,24 @@ export interface ApprovedPaper extends ExamPaper {
   unlock_expires_at?: string;
 }
 
+const parseDueDateTimeLocal = (dateValue?: string | null, timeValue?: string | null): Date | null => {
+  if (!dateValue || !timeValue) return null;
+  const normalizedDate = String(dateValue).trim().slice(0, 10);
+  const normalizedTime = String(timeValue).trim().slice(0, 5);
+  const [year, month, day] = normalizedDate.split('-').map((v) => Number(v));
+  const [hours, minutes] = normalizedTime.split(':').map((v) => Number(v));
+  if (
+    !Number.isFinite(year) ||
+    !Number.isFinite(month) ||
+    !Number.isFinite(day) ||
+    !Number.isFinite(hours) ||
+    !Number.isFinite(minutes)
+  ) {
+    return null;
+  }
+  return new Date(year, Math.max(0, month - 1), day, hours, minutes, 0, 0);
+};
+
 /**
  * Get all approved papers from repository
  */
@@ -170,31 +188,24 @@ export async function getApprovedPapersRepository(): Promise<ApprovedPaper[]> {
  */
 export async function getPapersNeedingPasswordGeneration(): Promise<ApprovedPaper[]> {
   try {
-    // Call the database function that checks due papers
-    const { data, error } = await supabase.rpc('check_and_generate_passwords');
-
-    if (error) {
-      console.error('Error checking papers for password generation:', error);
-      return [];
-    }
-
-    // Fetch full paper details for the IDs returned
-    if (!data || data.length === 0) {
-      return [];
-    }
-
-    const paperIds = data.map((p: any) => p.exam_paper_id);
     const { data: papers, error: fetchError } = await supabase
       .from('exam_papers')
       .select('*')
-      .in('id', paperIds);
+      .or('approval_status.eq.approved_for_printing,status.eq.approved_for_printing')
+      .eq('is_locked', true)
+      .is('unlock_password_hash', null);
 
     if (fetchError) {
       console.error('Error fetching paper details:', fetchError);
       return [];
     }
 
-    return (papers || []) as ApprovedPaper[];
+    const now = new Date();
+    return ((papers || []) as ApprovedPaper[]).filter((paper) => {
+      const dueAt = parseDueDateTimeLocal(paper.printing_due_date, paper.printing_due_time);
+      if (!dueAt) return false;
+      return dueAt.getTime() <= now.getTime();
+    });
   } catch (error) {
     console.error('Exception checking papers for password generation:', error);
     return [];
@@ -208,7 +219,8 @@ export async function getPapersNeedingPasswordGeneration(): Promise<ApprovedPape
  */
 export async function generatePasswordForPaper(
   examPaperId: string,
-  force: boolean = false
+  force: boolean = false,
+  generatedByUserId?: string
 ): Promise<{ success: boolean; error?: string; password?: string }> {
   try {
     // Get paper details
@@ -234,9 +246,10 @@ export async function generatePasswordForPaper(
 
     // Check if due date has passed (unless forcing)
     if (!force && paper.printing_due_date && paper.printing_due_time) {
-      const dueDate = new Date(paper.printing_due_date);
-      const [hours, minutes] = paper.printing_due_time.split(':').map(Number);
-      dueDate.setHours(hours, minutes, 0, 0);
+      const dueDate = parseDueDateTimeLocal(paper.printing_due_date, paper.printing_due_time);
+      if (!dueDate) {
+        return { success: false, error: 'Invalid printing due date/time format on this paper' };
+      }
       const now = new Date();
       if (dueDate > now) {
         return { success: false, error: `Paper is not due yet. Due: ${dueDate.toLocaleString()}` };
@@ -280,7 +293,24 @@ export async function generatePasswordForPaper(
       .select('id')
       .eq('is_super_admin', true);
 
+    const recipientIds = new Set<string>();
     if (!adminError && superAdmins && superAdmins.length > 0) {
+      superAdmins.forEach((admin) => {
+        if (admin?.id) recipientIds.add(admin.id);
+      });
+    }
+
+    // Ensure the actor generating the password always receives the notification in the bell.
+    if (generatedByUserId) {
+      recipientIds.add(generatedByUserId);
+    }
+    // Fallback to the authenticated user id when a caller passes a non-Supabase id.
+    const { data: authData } = await supabase.auth.getUser();
+    if (authData?.user?.id) {
+      recipientIds.add(authData.user.id);
+    }
+
+    if (recipientIds.size > 0) {
       // Format printing date/time
       const printingDate = paper.printing_due_date
         ? new Date(paper.printing_due_date).toLocaleDateString()
@@ -288,9 +318,9 @@ export async function generatePasswordForPaper(
       const printingTime = paper.printing_due_time || '00:00';
 
       // Notify all Super Admins
-      const notifications = superAdmins.map((admin) =>
+      const notifications = Array.from(recipientIds).map((adminId) =>
         createNotification({
-          user_id: admin.id,
+          user_id: adminId,
           title: 'Paper Unlock Password Generated',
           message: `Password generated for ${paper.course_code} - ${paper.course_name}. Printing due: ${printingDate} at ${printingTime}. Password: ${plaintext}`,
           type: 'info',
@@ -298,7 +328,13 @@ export async function generatePasswordForPaper(
         })
       );
 
-      await Promise.all(notifications);
+      const results = await Promise.all(notifications);
+      const failures = results.filter((result) => !result.success);
+      if (failures.length > 0) {
+        console.error('Some unlock password notifications failed to create:', failures);
+      }
+    } else {
+      console.warn('No super-admin recipients found for unlock password notification.');
     }
 
     console.log('✅ Password generated for paper:', examPaperId);

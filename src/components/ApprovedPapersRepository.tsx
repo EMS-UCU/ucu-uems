@@ -452,33 +452,20 @@ export default function ApprovedPapersRepository({
       return;
     }
 
-    const force = confirm(
-      `Found ${lockedPapersWithoutPasswords.length} locked paper(s) without passwords.\n\n` +
-      `Click OK to generate passwords for all of them (even if due date hasn't passed).\n` +
-      `Click Cancel to only generate for papers that are due.`
-    );
-
     setGeneratingPasswords(true);
     try {
-      let papersToProcess: ApprovedPaper[];
-      
-      if (force) {
-        // Generate for all locked papers without passwords
-        papersToProcess = lockedPapersWithoutPasswords;
-      } else {
-        // Only generate for papers that are due
-        papersToProcess = await getPapersNeedingPasswordGeneration();
-        if (papersToProcess.length === 0) {
-          alert('No papers are currently due for password generation. Papers need to have a printing due date/time that has passed.');
-          setGeneratingPasswords(false);
-          return;
-        }
+      // Only generate for papers that are due (printing date/time reached)
+      const papersToProcess = await getPapersNeedingPasswordGeneration();
+      if (papersToProcess.length === 0) {
+        alert('No papers are currently due for password generation. Passwords are generated only after the set printing date/time is reached.');
+        setGeneratingPasswords(false);
+        return;
       }
 
       // Generate passwords for each paper
       const results = [];
       for (const paper of papersToProcess) {
-        const result = await generatePasswordForPaper(paper.id, force);
+        const result = await generatePasswordForPaper(paper.id, false, currentUserId);
         results.push({
           paperId: paper.id,
           courseCode: paper.course_code,

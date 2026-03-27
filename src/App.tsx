@@ -1070,6 +1070,20 @@ const isSameChecklistComments = (a: ChecklistCommentsMap, b: ChecklistCommentsMa
   return true;
 };
 
+const mergeChecklistCommentsByTimestamp = (
+  current: ChecklistCommentsMap,
+  incoming: ChecklistCommentsMap
+): ChecklistCommentsMap => {
+  const merged = new Map(current);
+  incoming.forEach((incomingEntry, key) => {
+    const existing = merged.get(key);
+    if (!existing || incomingEntry.timestamp >= existing.timestamp) {
+      merged.set(key, incomingEntry);
+    }
+  });
+  return merged;
+};
+
 const buildChecklistExportPayload = ({
   comments,
   hasCustomChecklistPdf,
@@ -1410,6 +1424,22 @@ const createId = (() => {
     return `id-${Date.now()}-${counter}`;
   };
 })();
+
+const isUuid = (value?: string | null): value is string =>
+  typeof value === 'string' &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+
+const createDbUuid = (): string => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // Fallback RFC4122 v4-style UUID for environments without crypto.randomUUID.
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+    const rand = Math.floor(Math.random() * 16);
+    const val = char === 'x' ? rand : (rand & 0x3) | 0x8;
+    return val.toString(16);
+  });
+};
 
 const formatTimestamp = (iso: string) =>
   new Date(iso).toLocaleString(undefined, {
@@ -1764,6 +1794,7 @@ function App() {
   // State for database recordings (for Chief Examiner and Super Admin)
   const [databaseRecordings, setDatabaseRecordings] = useState<VettingSession[]>([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
+  const passwordGenerationRunningRef = useRef(false);
 
   const recordingEntries = useMemo<RecordingEntry[]>(() => {
     const allRecords: RecordingEntry[] = [];
@@ -1886,6 +1917,7 @@ function App() {
     () => users.find((user) => user.id === authUserId) ?? null,
     [authUserId, users]
   );
+  const notificationUserId = authUserId ?? currentUser?.id ?? null;
 
   // Fetch recordings from database for Chief Examiner or Super Admin
   useEffect(() => {
@@ -1928,7 +1960,11 @@ function App() {
       }
       try {
         const parsed = JSON.parse(event.newValue) as Record<string, ChecklistComment>;
-        setChecklistComments(new Map(Object.entries(parsed)));
+        const incoming = new Map(Object.entries(parsed));
+        setChecklistComments((prev) => {
+          const merged = mergeChecklistCommentsByTimestamp(prev, incoming);
+          return isSameChecklistComments(prev, merged) ? prev : merged;
+        });
       } catch (error) {
         console.error('Error syncing checklist comments from storage:', error);
       }
@@ -2435,7 +2471,10 @@ function App() {
           }
           if (row.key === 'checklist_comments_live' && value && typeof value === 'object') {
             const nextMap = new Map(Object.entries(value as Record<string, ChecklistComment>));
-            setChecklistComments((prev) => (isSameChecklistComments(prev, nextMap) ? prev : nextMap));
+            setChecklistComments((prev) => {
+              const merged = mergeChecklistCommentsByTimestamp(prev, nextMap);
+              return isSameChecklistComments(prev, merged) ? prev : merged;
+            });
           }
         }
       } catch (err) {
@@ -2624,7 +2663,10 @@ function App() {
           }
           if (row.key === 'checklist_comments_live' && row.value && typeof row.value === 'object') {
             const nextMap = new Map(Object.entries(row.value as Record<string, ChecklistComment>));
-            setChecklistComments((prev) => (isSameChecklistComments(prev, nextMap) ? prev : nextMap));
+            setChecklistComments((prev) => {
+              const merged = mergeChecklistCommentsByTimestamp(prev, nextMap);
+              return isSameChecklistComments(prev, merged) ? prev : merged;
+            });
           }
           if (row.key.startsWith('vetter_live_') && row.value && typeof row.value === 'object') {
             const value = row.value as Partial<SerializableVetterMonitoring>;
@@ -3126,16 +3168,18 @@ function App() {
           : 'submitted_to_repository';
 
       const campus = params.campus || currentUser?.campus || 'Main Campus';
+      const submittedByUuid = isUuid(params.submittedById) ? params.submittedById : null;
 
       const insertPayload = {
+        id: createDbUuid(),
         course_code: safeCourseCode,
         course_name: params.courseUnit,
         semester: params.semester,
         academic_year: safeYear,
         campus,
-        setter_id: params.submittedRole === 'Setter' ? params.submittedById : null,
-        team_lead_id: params.submittedRole === 'Team Lead' ? params.submittedById : null,
-        chief_examiner_id: params.submittedRole === 'Chief Examiner' ? params.submittedById : null,
+        setter_id: params.submittedRole === 'Setter' ? submittedByUuid : null,
+        team_lead_id: params.submittedRole === 'Team Lead' ? submittedByUuid : null,
+        chief_examiner_id: params.submittedRole === 'Chief Examiner' ? submittedByUuid : null,
         status,
         version_number: 1,
         file_url: storageData.path,
@@ -3178,6 +3222,52 @@ function App() {
     return () => { cancelled = true; };
   }, []);
 
+  const CONSENT_GATED_ROLES = ['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'] as const;
+
+  /**
+   * Keep workflow roles hidden until consent is accepted.
+   * This prevents pending assignees from getting elevated UI/permissions prematurely.
+   */
+  const applyConsentRoleGuard = useCallback(async (baseUsers: User[]): Promise<User[]> => {
+    if (baseUsers.length === 0) return baseUsers;
+
+    try {
+      const userIds = baseUsers.map((u) => u.id);
+      const { data: elevations, error } = await supabase
+        .from('privilege_elevations')
+        .select('user_id, role_granted, metadata')
+        .eq('is_active', true)
+        .in('user_id', userIds)
+        .in('role_granted', CONSENT_GATED_ROLES as unknown as string[]);
+
+      if (error) {
+        console.error('Error applying consent role guard:', error);
+        return baseUsers;
+      }
+
+      const pendingRoleKeys = new Set<string>();
+      (elevations || []).forEach((row: any) => {
+        const metadata = (row.metadata || {}) as Record<string, unknown>;
+        const consentStatusRaw = typeof metadata.consent_status === 'string'
+          ? metadata.consent_status.toLowerCase()
+          : '';
+        if (consentStatusRaw !== 'accepted') {
+          pendingRoleKeys.add(`${row.user_id}:${row.role_granted}`);
+        }
+      });
+
+      return baseUsers.map((user) => {
+        const roles = (user.roles || []).filter(
+          (role) => !pendingRoleKeys.has(`${user.id}:${role}`)
+        );
+        return { ...user, roles };
+      });
+    } catch (error) {
+      console.error('Unexpected error applying consent role guard:', error);
+      return baseUsers;
+    }
+  }, []);
+
   // Load users from Supabase on mount (same as before); also refetch when auth becomes available so roles persist after refresh
   useEffect(() => {
     const loadUsersFromSupabase = async () => {
@@ -3185,9 +3275,10 @@ function App() {
       try {
         const supabaseUsers = await getAllUsers();
         if (supabaseUsers.length > 0) {
-          setUsers(supabaseUsers);
+          const guardedUsers = await applyConsentRoleGuard(supabaseUsers);
+          setUsers(guardedUsers);
           try {
-            localStorage.setItem('ucu-moderation-users', JSON.stringify(supabaseUsers));
+            localStorage.setItem('ucu-moderation-users', JSON.stringify(guardedUsers));
           } catch (error) {
             console.error('Error saving users to localStorage:', error);
           }
@@ -3231,7 +3322,7 @@ function App() {
     };
 
     loadUsersFromSupabase();
-  }, []);
+  }, [applyConsentRoleGuard]);
 
   // Check for role consent - show for workflow roles assigned via privilege_elevations that user hasn't accepted yet (so first login after assignment shows the form)
   const checkRoleConsent = useCallback(async () => {
@@ -3283,30 +3374,18 @@ function App() {
     try {
       const supabaseUsers = await getAllUsers();
       if (supabaseUsers.length > 0) {
-        setUsers((prev) => {
-          // When DB has same or more roles, use DB; when refetch has fewer (e.g. stale), keep local roles so newly assigned don't disappear
-          const merged = supabaseUsers.map((dbUser) => {
-            const prevUser = prev.find((p) => p.id === dbUser.id);
-            const localRoles = prevUser?.roles ?? [];
-            const dbRoles = dbUser.roles ?? [];
-            const roles =
-              dbRoles.length >= localRoles.length
-                ? dbRoles
-                : Array.from(new Set([...localRoles, ...dbRoles]));
-            return { ...dbUser, roles };
-          });
-          try {
-            localStorage.setItem('ucu-moderation-users', JSON.stringify(merged));
-          } catch {
-            /* ignore */
-          }
-          return merged;
-        });
+        const guardedUsers = await applyConsentRoleGuard(supabaseUsers);
+        setUsers(guardedUsers);
+        try {
+          localStorage.setItem('ucu-moderation-users', JSON.stringify(guardedUsers));
+        } catch {
+          /* ignore */
+        }
       }
     } catch (error) {
       console.error('Error refreshing users:', error);
     }
-  }, []);
+  }, [applyConsentRoleGuard]);
 
   // Show consent modal immediately when this logged-in user's role assignments change.
   useEffect(() => {
@@ -3335,6 +3414,59 @@ function App() {
       supabase.removeChannel(channel);
     };
   }, [authUserId, checkRoleConsent, refreshUsers]);
+
+  // Background scheduler: generate unlock passwords automatically when printing due time is reached.
+  // This ensures Admin-side notifications appear even without manually opening the repository panel.
+  useEffect(() => {
+    if (!authUserId || !currentUser?.id) return;
+
+    const roles = currentUser.roles || [];
+    const canRunScheduler =
+      currentUser.isSuperAdmin || roles.includes('Admin') || roles.includes('Chief Examiner');
+    if (!canRunScheduler) return;
+
+    let cancelled = false;
+
+    const runPasswordGeneration = async () => {
+      if (cancelled || passwordGenerationRunningRef.current) return;
+      passwordGenerationRunningRef.current = true;
+      try {
+        const { getPapersNeedingPasswordGeneration, generatePasswordForPaper } = await import('./lib/examServices/repositoryService');
+        const duePapers = await getPapersNeedingPasswordGeneration();
+        if (!duePapers || duePapers.length === 0) return;
+
+        await Promise.all(
+          duePapers.map(async (paper) => {
+            const result = await generatePasswordForPaper(paper.id, false, currentUser.id);
+            if (!result.success) {
+              console.warn('Auto password generation skipped/failed:', {
+                paperId: paper.id,
+                courseCode: paper.course_code,
+                error: result.error,
+              });
+            } else {
+              console.log('✅ Auto-generated unlock password for due paper:', paper.id);
+            }
+          })
+        );
+      } catch (error) {
+        console.error('Auto password generation scheduler error:', error);
+      } finally {
+        passwordGenerationRunningRef.current = false;
+      }
+    };
+
+    // Run immediately, then poll.
+    void runPasswordGeneration();
+    const intervalId = window.setInterval(() => {
+      void runPasswordGeneration();
+    }, 30_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [authUserId, currentUser?.id, currentUser?.roles, currentUser?.isSuperAdmin]);
 
   // When auth becomes available (e.g. after session restore on refresh), refetch users from Supabase so assigned roles are up to date
   useEffect(() => {
@@ -3536,17 +3668,18 @@ function App() {
     }
 
     const loadNotifications = async () => {
-      if (!currentUser) {
+      if (!authUserId) {
         hasWarnedEmptyVetterForUserId.current = null;
         setNotifications([]);
         return;
       }
       try {
-        const dbNotifications = await getUserNotifications(currentUser.id);
+        const targetUserId = currentUser?.id ?? authUserId;
+        const dbNotifications = await getUserNotifications(targetUserId);
         const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
-        if (isVetter && dbNotifications.length === 0 && hasWarnedEmptyVetterForUserId.current !== currentUser.id) {
-          hasWarnedEmptyVetterForUserId.current = currentUser.id;
-          console.warn('🔔 Vetter notifications empty. User id:', currentUser.id, '- Check Supabase: 1) Run notifications_table_and_rls.sql 2) Run seed_all_notification_messages.sql (use user_profiles) 3) Chief must Start Session after SQL 4) user_profiles.roles must include "Vetter" for this user.');
+        if (isVetter && dbNotifications.length === 0 && hasWarnedEmptyVetterForUserId.current !== targetUserId) {
+          hasWarnedEmptyVetterForUserId.current = targetUserId;
+          console.warn('🔔 Vetter notifications empty. User id:', targetUserId, '- Check Supabase: 1) Run notifications_table_and_rls.sql 2) Run seed_all_notification_messages.sql (use user_profiles) 3) Chief must Start Session after SQL 4) user_profiles.roles must include "Vetter" for this user.');
         }
         let mapped: AppNotification[] = dbNotifications.map((n) => ({
           id: n.id,
@@ -3615,8 +3748,8 @@ function App() {
     void loadNotifications();
     
     // Set up real-time subscription for notifications
-    if (currentUser) {
-      const channelName = `notifications:${currentUser.id}`;
+    if (authUserId) {
+      const channelName = `notifications:${authUserId}`;
       const channel = supabase
         .channel(channelName)
         .on(
@@ -3625,7 +3758,7 @@ function App() {
             event: 'INSERT',
             schema: 'public',
             table: 'notifications',
-            filter: `user_id=eq.${currentUser.id}`,
+            filter: `user_id=eq.${authUserId}`,
           },
           (payload) => {
             console.log('📬 New notification received via real-time:', payload);
@@ -3685,7 +3818,7 @@ function App() {
             event: 'UPDATE',
             schema: 'public',
             table: 'notifications',
-            filter: `user_id=eq.${currentUser.id}`,
+            filter: `user_id=eq.${authUserId}`,
           },
           (payload) => {
             console.log('📝 Notification updated via real-time:', payload);
@@ -3726,18 +3859,50 @@ function App() {
         supabase.removeChannel(channel);
       };
     }
-  }, [currentUser?.id, currentUserRolesSignature, forceCloseVetterSessionFromNotification]);
+  }, [authUserId, currentUser?.id, currentUserRolesSignature, forceCloseVetterSessionFromNotification]);
+
+  // Universal notification fallback polling.
+  // Keeps notifications working even if realtime channel misses events.
+  useEffect(() => {
+    if (!notificationUserId) return;
+    const interval = window.setInterval(() => {
+      getUserNotifications(notificationUserId)
+        .then((dbNotifications) => {
+          const mapped: AppNotification[] = dedupeSessionEndNotifications(
+            dbNotifications.map((n) => ({
+              id: n.id,
+              message: n.message,
+              title: n.title,
+              timestamp: n.created_at,
+              read: n.is_read,
+              type: n.type,
+            }))
+          );
+          setNotifications((prev) => {
+            const dbIds = new Set(mapped.map((m) => m.id));
+            const localOnly = prev.filter((n) => !dbIds.has(n.id));
+            return [...localOnly, ...mapped]
+              .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+              .slice(0, 50);
+          });
+        })
+        .catch((error) => {
+          console.warn('Notification fallback polling failed:', error);
+        });
+    }, 15000);
+    return () => window.clearInterval(interval);
+  }, [notificationUserId]);
 
   // Vetters: fetch on login only - real-time subscription handles updates
   // Removed polling - notifications only come from real-time subscriptions or user actions
   useEffect(() => {
     const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
-    if (!currentUser?.id || !isVetter) return;
+    if (!notificationUserId || !isVetter) return;
     
     // Only fetch once on login - real-time subscription will handle updates
     const fetchOnce = async () => {
       try {
-        const dbNotifications = await getUserNotifications(currentUser.id);
+        const dbNotifications = await getUserNotifications(notificationUserId);
         const mapped: AppNotification[] = dedupeSessionEndNotifications(dbNotifications.map((n) => ({
           id: n.id,
           message: n.message,
@@ -3770,14 +3935,14 @@ function App() {
       }
     };
     fetchOnce();
-  }, [currentUser?.id, currentUser?.roles]);
+  }, [notificationUserId, currentUser?.roles]);
 
   // Vetters: refetch notifications when window gains focus so they see "Vetting Session Started" immediately after Chief starts
   useEffect(() => {
     const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
-    if (!currentUser?.id || !isVetter) return;
+    if (!notificationUserId || !isVetter) return;
     const onFocus = () => {
-      getUserNotifications(currentUser.id).then((dbNotifications) => {
+      getUserNotifications(notificationUserId).then((dbNotifications) => {
         const mapped: AppNotification[] = dedupeSessionEndNotifications(dbNotifications.map((n) => ({
           id: n.id,
           message: n.message,
@@ -3814,15 +3979,15 @@ function App() {
     };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [currentUser?.id, currentUser?.roles]);
+  }, [notificationUserId, currentUser?.roles]);
 
   // When vetter opens the Vetting & Annotations page, refetch notifications immediately so they see "Vetting Session Started" right away
   useEffect(() => {
     const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
-    if (!currentUser?.id || !isVetter || activePanelId !== 'vetting-suite') return;
+    if (!notificationUserId || !isVetter || activePanelId !== 'vetting-suite') return;
     const refetch = async () => {
       try {
-        const dbNotifications = await getUserNotifications(currentUser.id);
+        const dbNotifications = await getUserNotifications(notificationUserId);
         const mapped: AppNotification[] = dedupeSessionEndNotifications(dbNotifications.map((n) => ({
           id: n.id,
           message: n.message,
@@ -3862,7 +4027,7 @@ function App() {
       }
     };
     refetch();
-  }, [currentUser?.id, currentUser?.roles, activePanelId]);
+  }, [notificationUserId, currentUser?.roles, activePanelId]);
 
   // Removed polling for active sessions - real-time subscription handles all updates
   // Notifications will only appear from real-time updates or explicit user actions
@@ -4514,26 +4679,9 @@ function App() {
       const refreshedUsers = await getAllUsers();
       if (refreshedUsers && refreshedUsers.length > 0) {
         setUsers(refreshedUsers);
-      } else {
-        // Fallback: update local state if refresh failed or returned empty
-        setUsers((prev) =>
-          prev.map((user) =>
-            user.id === userId && !user.roles.includes('Chief Examiner')
-              ? { ...user, roles: [...user.roles, 'Chief Examiner'] as Role[] }
-              : user
-          )
-        );
       }
     } catch (error) {
       console.error('Error refreshing users after promotion:', error);
-      // Fallback local update
-      setUsers((prev) =>
-        prev.map((user) =>
-          user.id === userId && !user.roles.includes('Chief Examiner')
-            ? { ...user, roles: [...user.roles, 'Chief Examiner'] as Role[] }
-            : user
-        )
-      );
     }
 
     const actor = currentUser?.name ?? 'Unknown';
@@ -5170,11 +5318,11 @@ function App() {
   };
 
   const handleCheckForSession = useCallback(async () => {
-    if (!currentUser?.id) return;
+    if (!notificationUserId) return;
     const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
     if (!isVetter) return;
     try {
-      const dbNotifications = await getUserNotifications(currentUser.id);
+      const dbNotifications = await getUserNotifications(notificationUserId);
       const mapped: AppNotification[] = dbNotifications.map((n) => ({
         id: n.id,
         message: n.message,
@@ -5221,7 +5369,7 @@ function App() {
     } catch (e) {
       console.error('Check for session:', e);
     }
-  }, [currentUser?.id, currentUser?.roles]);
+  }, [notificationUserId, currentUser?.roles]);
 
   const handleStartVetting = async (minutes: number) => {
     if (isStartingSession || isEndingSession) {
@@ -5768,6 +5916,53 @@ function App() {
     await restrictVetter(vetterId, violationType);
   };
 
+  const notifyRoleDeadlineActivation = useCallback(
+    async (role: 'Setter' | 'Team Lead', title: string, message: string) => {
+      const localIds = users
+        .filter((u) => u.roles.includes(role) && u.id)
+        .map((u) => u.id as string);
+
+      let recipientIds = Array.from(new Set(localIds));
+      try {
+        const { data: profiles, error } = await supabase
+          .from('user_profiles')
+          .select('id, roles');
+        if (!error && Array.isArray(profiles)) {
+          const dbIds = profiles
+            .filter((profile: any) => Array.isArray(profile.roles) && profile.roles.includes(role))
+            .map((profile: any) => profile.id as string)
+            .filter(Boolean);
+          recipientIds = Array.from(new Set([...recipientIds, ...dbIds]));
+        }
+      } catch (error) {
+        console.warn(`Could not load ${role} recipients from DB:`, error);
+      }
+
+      if (recipientIds.length === 0) return;
+
+      const results = await Promise.allSettled(
+        recipientIds.map((userId) =>
+          createNotification({
+            user_id: userId,
+            title,
+            message,
+            type: 'deadline',
+          })
+        )
+      );
+
+      const failed = results.filter(
+        (r) => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success)
+      );
+      if (failed.length > 0) {
+        console.warn(
+          `Deadline notifications partially failed for ${role}: ${failed.length}/${recipientIds.length}`
+        );
+      }
+    },
+    [users]
+  );
+
   // Helper function to log warnings/violations for vetter monitoring
   // THIS RECORDS EVERY ACTION AND ALERT MESSAGE SHOWN TO THE VETTER - CHIEF EXAMINER SEES ALL IN REAL-TIME
   const logVetterWarning = (vetterId: string, type: VetterWarning['type'], message: string, severity: 'warning' | 'critical' = 'warning') => {
@@ -5993,6 +6188,28 @@ function App() {
 
       // Delete from database - this will trigger the real-time subscription
       // which will automatically remove it from repositoryPapers and submittedPapers
+      const { error: unlockLogsDeleteError } = await supabase
+        .from('paper_unlock_logs')
+        .delete()
+        .eq('exam_paper_id', paperId);
+
+      if (unlockLogsDeleteError) {
+        console.error('Error deleting related paper_unlock_logs rows:', unlockLogsDeleteError);
+        alert(`Failed to delete related unlock logs: ${unlockLogsDeleteError.message}`);
+        return;
+      }
+
+      const { error: notificationsDeleteError } = await supabase
+        .from('notifications')
+        .delete()
+        .eq('related_exam_paper_id', paperId);
+
+      if (notificationsDeleteError) {
+        console.error('Error deleting related notifications rows:', notificationsDeleteError);
+        alert(`Failed to delete related notifications: ${notificationsDeleteError.message}`);
+        return;
+      }
+
       const { error: deleteError } = await supabase
         .from('exam_papers')
         .delete()
@@ -6011,6 +6228,102 @@ function App() {
     } catch (error: any) {
       console.error('Unexpected error deleting paper:', error);
       alert(`Failed to delete paper: ${error?.message || 'Unknown error'}`);
+    }
+  };
+
+  const handleDeleteAllRepositoryPapers = async (paperIds: string[]) => {
+    const uniqueIds = Array.from(new Set(paperIds.filter(Boolean)));
+    if (uniqueIds.length === 0) {
+      alert('No repository papers found to delete.');
+      return;
+    }
+
+    if (
+      !confirm(
+        `Are you sure you want to permanently delete ${uniqueIds.length} repository paper(s)? This action cannot be undone.`
+      )
+    ) {
+      return;
+    }
+
+    try {
+      const { data: rows, error: fetchError } = await supabase
+        .from('exam_papers')
+        .select('id, file_url')
+        .in('id', uniqueIds);
+
+      if (fetchError) {
+        console.error('Error fetching repository papers for bulk delete:', fetchError);
+        alert(`Failed to prepare bulk delete: ${fetchError.message}`);
+        return;
+      }
+
+      const extractStoragePath = (raw?: string | null): string | null => {
+        if (!raw || typeof raw !== 'string') return null;
+        const normalized = raw.trim();
+        if (!normalized) return null;
+        if (/^https?:\/\//i.test(normalized)) {
+          const fromBucket = normalized.split('exam_papers/');
+          if (fromBucket.length > 1) {
+            return fromBucket[1].split('?')[0].replace(/^\/+/, '');
+          }
+          return null;
+        }
+        return normalized.replace(/^\/+/, '').replace(/^exam_papers\//, '');
+      };
+
+      const filePaths = Array.from(
+        new Set((rows || []).map((row) => extractStoragePath(row.file_url)).filter((p): p is string => Boolean(p)))
+      );
+
+      if (filePaths.length > 0) {
+        const { error: storageError } = await supabase.storage.from('exam_papers').remove(filePaths);
+        if (storageError) {
+          console.warn('Bulk storage delete had issues (continuing DB delete):', storageError);
+        }
+      }
+
+      const { error: unlockLogsDeleteError } = await supabase
+        .from('paper_unlock_logs')
+        .delete()
+        .in('exam_paper_id', uniqueIds);
+
+      if (unlockLogsDeleteError) {
+        console.error('Error deleting related paper_unlock_logs rows in bulk:', unlockLogsDeleteError);
+        alert(`Failed to delete related unlock logs: ${unlockLogsDeleteError.message}`);
+        return;
+      }
+
+      const { error: notificationsDeleteError } = await supabase
+        .from('notifications')
+        .delete()
+        .in('related_exam_paper_id', uniqueIds);
+
+      if (notificationsDeleteError) {
+        console.error('Error deleting related notifications rows in bulk:', notificationsDeleteError);
+        alert(`Failed to delete related notifications: ${notificationsDeleteError.message}`);
+        return;
+      }
+
+      const { error: deleteError } = await supabase
+        .from('exam_papers')
+        .delete()
+        .in('id', uniqueIds);
+
+      if (deleteError) {
+        console.error('Error deleting repository papers from DB:', deleteError);
+        alert(`Failed to delete repository papers: ${deleteError.message}`);
+        return;
+      }
+
+      // Ensure immediate UI update even before realtime round-trip.
+      setRepositoryPapers((prev) => prev.filter((paper) => !uniqueIds.includes(paper.id)));
+      setSubmittedPapers((prev) => ensureDemoPaper(prev.filter((paper) => !uniqueIds.includes(paper.id))));
+
+      alert(`Deleted ${uniqueIds.length} repository paper(s) successfully.`);
+    } catch (error: any) {
+      console.error('Unexpected error deleting repository papers:', error);
+      alert(`Failed to delete repository papers: ${error?.message || 'Unknown error'}`);
     }
   };
 
@@ -6762,8 +7075,8 @@ function App() {
     // Remove all vetters from joined set
     setJoinedVetters(new Set());
     
-    // Clear monitoring data
-    setVetterMonitoring(new Map());
+    // Preserve monitoring evidence after session close so Chief can review
+    // warnings/violations until a final decision (approve/reject) is made.
     
     // End the session and disable safe browser mode
     setVettingSession((prev) => ({
@@ -7159,6 +7472,25 @@ function App() {
     }
     
     console.log('✅ Paper approved successfully:', currentPaper.id);
+
+    // If printing due time is already reached, generate unlock password immediately
+    // so Super Admins get the password notification in their bell right away.
+    try {
+      const dueAt = new Date(`${printingDueDate}T${printingDueTime}:00`);
+      if (!Number.isNaN(dueAt.getTime()) && dueAt.getTime() <= Date.now()) {
+        const { generatePasswordForPaper } = await import('./lib/examServices/repositoryService');
+        const passwordResult = await generatePasswordForPaper(currentPaper.id, false, currentUser.id);
+        if (!passwordResult.success) {
+          console.warn('Password generation after approval skipped/failed:', passwordResult.error);
+        } else {
+          console.log('✅ Unlock password generated immediately after approval');
+        }
+      } else {
+        console.log('⏳ Password generation deferred until printing due time is reached');
+      }
+    } catch (passwordError) {
+      console.warn('Error attempting password generation after approval:', passwordError);
+    }
     
     // Create success notification for Chief Examiner
     await createNotification({
@@ -7268,6 +7600,7 @@ function App() {
     setChecklistComments(new Map());
     setChecklistDraftText(new Map());
     setChecklistTypingState(new Map());
+    setVetterMonitoring(new Map());
     try {
       localStorage.removeItem(CHECKLIST_COMMENTS_STORAGE_KEY);
       // Broadcast clear to other tabs/windows
@@ -7330,6 +7663,8 @@ function App() {
         }),
       }
     );
+    // Final decision reached: clear live vetting artifacts for next cycle.
+    setVetterMonitoring(new Map());
     // If rejection is from "Vetted & Returned" stage, send feedback to Team Lead with new deadline
     if (workflow.stage === 'Vetted & Returned to Chief Examiner') {
       // Set new deadline for Team Lead - use provided deadline or default to 7 days
@@ -7741,20 +8076,10 @@ function App() {
       );
       
       // Notify all Setters
-      const setters = users.filter((u) => u.roles.includes('Setter'));
       const message = `Submission deadline has been activated. You have ${durationText} to submit your exam paper drafts.`;
-      setters.forEach((setter) => {
-        if (setter.id) {
-          void createNotification({
-            user_id: setter.id,
-            title: 'Submission Deadline Activated',
-            message,
-            type: 'deadline',
-          });
-        }
-      });
+      void notifyRoleDeadlineActivation('Setter', 'Submission Deadline Activated', message);
     }
-  }, [currentTime, setterDeadlineScheduledTime, setterDeadlineActive, setterDeadlineDuration, users, currentUser?.name]);
+  }, [currentTime, setterDeadlineScheduledTime, setterDeadlineActive, setterDeadlineDuration, currentUser?.name, notifyRoleDeadlineActivation]);
 
   // Automatically activate Team Lead deadline when scheduled time is reached
   useEffect(() => {
@@ -7772,20 +8097,10 @@ function App() {
       );
       
       // Notify all Team Leads
-      const teamLeads = users.filter((u) => u.roles.includes('Team Lead'));
       const message = `Submission deadline has been activated. You have ${durationText} to submit your compiled papers.`;
-      teamLeads.forEach((teamLead) => {
-        if (teamLead.id) {
-          void createNotification({
-            user_id: teamLead.id,
-            title: 'Submission Deadline Activated',
-            message,
-            type: 'deadline',
-          });
-        }
-      });
+      void notifyRoleDeadlineActivation('Team Lead', 'Submission Deadline Activated', message);
     }
-  }, [currentTime, teamLeadDeadlineScheduledTime, teamLeadDeadlineActive, teamLeadDeadlineDuration, users, currentUser?.name]);
+  }, [currentTime, teamLeadDeadlineScheduledTime, teamLeadDeadlineActive, teamLeadDeadlineDuration, currentUser?.name, notifyRoleDeadlineActivation]);
 
   // Automatically start Team Lead deadline when Setter deadline expires
   useEffect(() => {
@@ -7822,18 +8137,8 @@ function App() {
       );
       
       // Notify all Team Leads that their deadline has started
-      const teamLeads = users.filter((u) => u.roles.includes('Team Lead'));
       const message = `Setter deadline has expired. Your submission deadline has been activated. You have ${durationText} to submit your compiled papers.`;
-      teamLeads.forEach((teamLead) => {
-        if (teamLead.id) {
-          void createNotification({
-            user_id: teamLead.id,
-            title: 'Team Lead Deadline Activated',
-            message,
-            type: 'deadline',
-          });
-        }
-      });
+      void notifyRoleDeadlineActivation('Team Lead', 'Team Lead Deadline Activated', message);
     }
   }, [
     currentTime,
@@ -7848,8 +8153,8 @@ function App() {
     teamLeadDeadlineDuration.hours,
     teamLeadDeadlineDuration.minutes,
     repositoriesActive,
-    users,
     currentUser?.name,
+    notifyRoleDeadlineActivation,
   ]);
 
   const latestVersionLabel =
@@ -8609,18 +8914,8 @@ function App() {
             
             // Notify all Setters when deadline is activated
             if (active) {
-              const setters = users.filter((u) => u.roles.includes('Setter'));
               const message = `Submission deadline has been activated. You have ${durationText} to submit your exam paper drafts.`;
-              setters.forEach((setter) => {
-                if (setter.id) {
-                  void createNotification({
-                    user_id: setter.id,
-                    title: 'Submission Deadline Activated',
-                    message,
-                    type: 'deadline',
-                  });
-                }
-              });
+              await notifyRoleDeadlineActivation('Setter', 'Submission Deadline Activated', message);
             }
           }}
           onSetTeamLeadDeadline={async (active: boolean, duration: { days: number; hours: number; minutes: number }) => {
@@ -8640,18 +8935,8 @@ function App() {
             
             // Notify all Team Leads when deadline is activated
             if (active) {
-              const teamLeads = users.filter((u) => u.roles.includes('Team Lead'));
               const message = `Submission deadline has been activated. You have ${durationText} to compile and submit exam papers to the Chief Examiner.`;
-              teamLeads.forEach((teamLead) => {
-                if (teamLead.id) {
-                  void createNotification({
-                    user_id: teamLead.id,
-                    title: 'Submission Deadline Activated',
-                    message,
-                    type: 'deadline',
-                  });
-                }
-              });
+              await notifyRoleDeadlineActivation('Team Lead', 'Submission Deadline Activated', message);
             }
           }}
           onAddPaperToRepository={handleAddPaperToRepository}
@@ -8681,6 +8966,7 @@ function App() {
           submittedPapers={submittedPapers} 
           users={users}
           onDeletePaper={handleDeleteRepositoryPaper}
+          onDeleteAllPapers={handleDeleteAllRepositoryPapers}
         />
       ),
     });
@@ -8853,16 +9139,17 @@ function App() {
           typingIndicators={checklistTypingIndicators}
           checklistDraftText={checklistDraftText}
           onChecklistCommentChange={(key, comment, color = '#3B82F6') => {
-            let entry: ChecklistComment | null = null;
-            setChecklistComments((prev) => {
-              const updated = new Map(prev);
-              if (comment) {
-                entry = {
+            const entry: ChecklistComment | null = comment
+              ? {
                   comment,
                   vetterName: currentUser?.name || 'Unknown',
                   timestamp: Date.now(),
                   color,
-                };
+                }
+              : null;
+            setChecklistComments((prev) => {
+              const updated = new Map(prev);
+              if (entry) {
                 updated.set(key, entry);
               } else {
                 updated.delete(key);
@@ -8985,8 +9272,8 @@ function App() {
             });
             // Clear all joined vetters
             setJoinedVetters(new Set());
-            // Clear monitoring data
-            setVetterMonitoring(new Map());
+            // Preserve monitoring evidence after session close so Chief can review
+            // warnings/violations until a final decision (approve/reject) is made.
             
             const actor = currentUser?.name ?? 'Unknown';
             pushWorkflowEvent(
@@ -9726,9 +10013,9 @@ function App() {
                   onClick={async () => {
                     const wasOpen = showNotificationPanel;
                     setShowNotificationPanel((open) => !open);
-                    if (!wasOpen && currentUser) {
+                    if (!wasOpen && notificationUserId) {
                       try {
-                        const dbNotifications = await getUserNotifications(currentUser.id);
+                        const dbNotifications = await getUserNotifications(notificationUserId);
                         const mapped: AppNotification[] = dbNotifications.map((n) => ({
                           id: n.id,
                           title: n.title,
@@ -9852,13 +10139,13 @@ function App() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                  {notifications.length > 0 && currentUser && (
+                  {notifications.length > 0 && notificationUserId && (
                     <button
                       type="button"
                       className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[0.7rem] font-medium text-slate-700 shadow-sm transition hover:bg-slate-100 hover:border-slate-300"
                       onClick={async () => {
-                        if (!currentUser?.id) return;
-                        const ok = await clearAllNotifications(currentUser.id);
+                        if (!notificationUserId) return;
+                        const ok = await clearAllNotifications(notificationUserId);
                         if (ok?.success !== false) {
                           setNotifications([]);
                         }
@@ -9867,17 +10154,17 @@ function App() {
                       Clear all
                     </button>
                   )}
-                  {notifications.some((n) => !n.read) && currentUser && (
+                  {notifications.some((n) => !n.read) && notificationUserId && (
                     <button
                       type="button"
                       className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[0.7rem] font-medium text-blue-800 shadow-sm transition hover:bg-blue-100"
                       onClick={async () => {
-                        if (!currentUser?.id) return;
-                        const ok = await markAllNotificationsAsRead(currentUser.id);
+                        if (!notificationUserId) return;
+                        const ok = await markAllNotificationsAsRead(notificationUserId);
                         setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
                         // Refetch from DB so state stays in sync and toasts don't re-appear on next poll
                         if (ok?.success !== false) {
-                          getUserNotifications(currentUser.id).then((list) => {
+                          getUserNotifications(notificationUserId).then((list) => {
                             const isVetter = currentUser?.roles?.some((r: string) => String(r).toLowerCase() === 'vetter');
                             let mapped: AppNotification[] = list.map((n) => ({
                               id: n.id,
@@ -15990,14 +16277,30 @@ function AISimilarityDetectionPanel({
   setSubmittedPapers,
   onSendToVetting,
 }: AISimilarityDetectionPanelProps) {
+  const VETTING_SIMILARITY_MAX_PERCENT = 40;
   const [selectedCourse, setSelectedCourse] = useState<string>('');
   const [isScanning, setIsScanning] = useState(false);
   const [similarityResults, setSimilarityResults] = useState<SimilarityResult[]>([]);
   const [showDetails, setShowDetails] = useState<string | null>(null);
   const [scanCompleted, setScanCompleted] = useState(false);
 
+  // Keep similarity inputs aligned with "Repository Papers" panel visibility rules.
+  const analysisReadyRepositoryPapers = useMemo(
+    () =>
+      repositoryPapers.filter((repoPaper) => {
+        if (isChecklist(repoPaper.fileName)) return false;
+        const submittedPaper = submittedPapers.find((sp) => sp.id === repoPaper.id);
+        if (!submittedPaper) return true;
+        return submittedPaper.status === 'submitted';
+      }),
+    [repositoryPapers, submittedPapers]
+  );
+
   // Create a Set of repository paper IDs for efficient lookup
-  const repositoryPaperIds = useMemo(() => new Set(repositoryPapers.map(rp => rp.id)), [repositoryPapers]);
+  const repositoryPaperIds = useMemo(
+    () => new Set(analysisReadyRepositoryPapers.map((rp) => rp.id)),
+    [analysisReadyRepositoryPapers]
+  );
 
   // Helper functions for paper cards
   const _getStatusColor = (status: string) => {
@@ -16055,7 +16358,7 @@ function AISimilarityDetectionPanel({
   };
 
   // Convert repository papers to Paper format for comparison
-  const allRepositoryPapers: Paper[] = repositoryPapers.map(paper => ({
+  const allRepositoryPapers: Paper[] = analysisReadyRepositoryPapers.map(paper => ({
     id: paper.id,
     courseUnit: paper.courseUnit,
     courseCode: paper.courseCode,
@@ -16067,14 +16370,28 @@ function AISimilarityDetectionPanel({
     content: paper.content,
   }));
 
-  // Get course units from submitted papers (including Team Lead submissions)
-  const courseUnits = Array.from(
-    new Set(
-      submittedPapers
-        .filter(p => p.courseCode && p.courseUnit)
-        .map(p => `${p.courseCode} - ${p.courseUnit}`)
-    )
+  // Build dropdown options strictly from papers that are currently in repository.
+  const courseUnits = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          analysisReadyRepositoryPapers
+            .filter((p) => !isChecklist(p.fileName) && p.courseCode && p.courseUnit)
+            .map((p) => `${p.courseCode} - ${p.courseUnit}`)
+        )
+      ),
+    [analysisReadyRepositoryPapers]
   );
+
+  // If repository changed and previously selected course no longer exists, clear selection.
+  useEffect(() => {
+    if (!selectedCourse) return;
+    if (!courseUnits.includes(selectedCourse)) {
+      setSelectedCourse('');
+      setSimilarityResults([]);
+      setScanCompleted(false);
+    }
+  }, [courseUnits, selectedCourse]);
 
   // Enhanced Similarity Detection Algorithm
   const detectSimilarity = (
@@ -16380,17 +16697,17 @@ function AISimilarityDetectionPanel({
                               </span>
                             </p>
                           )}
-                          {/* Rejection Message - appears when similarity >= 86% */}
-                          {maxSimilarity !== null && maxSimilarity >= 86 && (
+                          {/* Rejection Message - appears when similarity > 40% */}
+                          {maxSimilarity !== null && maxSimilarity > VETTING_SIMILARITY_MAX_PERCENT && (
                             <div className="mt-3 px-3 py-2 rounded-lg bg-gradient-to-r from-red-100 to-rose-100 border-2 border-red-400 shadow-md">
                               <p className="text-xs font-bold text-red-800 flex items-center gap-1.5">
                                 <span className="text-base">🚫</span>
-                                <span>Paper Rejected: Similarity {maxSimilarity.toFixed(1)}% exceeds threshold (86%). Cannot proceed to vetting.</span>
+                                <span>Paper Rejected: Similarity {maxSimilarity.toFixed(1)}% exceeds threshold ({VETTING_SIMILARITY_MAX_PERCENT}%). Cannot proceed to vetting.</span>
                               </p>
                             </div>
                           )}
-                          {/* Send to Vetting Button - appears when similarity < 86% OR scan completed with no results */}
-                          {((maxSimilarity !== null && maxSimilarity < 86) || (scanCompleted && maxSimilarity === null && similarityResults.length === 0)) && paper.status !== 'in-vetting' && (
+                          {/* Send to Vetting Button - appears when similarity <= 40% OR scan completed with no results */}
+                          {((maxSimilarity !== null && maxSimilarity <= VETTING_SIMILARITY_MAX_PERCENT) || (scanCompleted && maxSimilarity === null && similarityResults.length === 0)) && paper.status !== 'in-vetting' && (
                             <button
                               type="button"
                               onClick={(e) => {
@@ -16446,26 +16763,42 @@ function AISimilarityDetectionPanel({
                   <p className="text-sm text-slate-700 mb-6">
                     No significant similarities found. All papers appear to be original and ready for vetting.
                   </p>
-                  {/* Show Send to Vetting buttons for all scanned papers */}
+                  {/* Show a single Send to Vetting button for one exam paper (no checklists). */}
                   <div className="space-y-3">
-                    {submittedPapers
-                      .filter(p => {
-                        if (!p.courseCode) return false;
-                        const [courseCode] = selectedCourse.split(' - ');
-                        return p.courseCode === courseCode && p.status !== 'in-vetting';
-                      })
-                      .map((paper) => (
+                    {(() => {
+                      const [courseCode] = selectedCourse.split(' - ');
+                      const eligibleExamPaper = submittedPapers
+                        .filter((paper) => {
+                          if (!paper.courseCode || paper.courseCode !== courseCode) return false;
+                          if (paper.status === 'in-vetting') return false;
+                          if (isChecklist(paper.fileName || '')) return false;
+                          return true;
+                        })
+                        .sort(
+                          (a, b) =>
+                            new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
+                        )[0];
+
+                      if (!eligibleExamPaper) {
+                        return (
+                          <p className="text-xs font-medium text-slate-600">
+                            No eligible exam paper is available to send to vetting.
+                          </p>
+                        );
+                      }
+
+                      return (
                         <button
-                          key={paper.id}
                           type="button"
-                          onClick={() => void handleSendToVetting(paper.id)}
+                          onClick={() => void handleSendToVetting(eligibleExamPaper.id)}
                           className="w-full rounded-xl bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 px-6 py-3 text-sm font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300 flex items-center justify-center gap-2 relative overflow-hidden group"
                         >
                           <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></span>
                           <span className="text-lg relative z-10">✓</span>
-                          <span className="relative z-10">Send {paper.fileName} to Vetting</span>
+                          <span className="relative z-10">Send to Vetting</span>
                         </button>
-                      ))}
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
@@ -16597,17 +16930,17 @@ function AISimilarityDetectionPanel({
 
                       {/* Action Buttons */}
                       <div className="space-y-2 relative z-10">
-                        {/* Rejection Message - appears when similarity >= 86% */}
-                        {result.similarityScore >= 86 && (
+                        {/* Rejection Message - appears when similarity > 40% */}
+                        {result.similarityScore > VETTING_SIMILARITY_MAX_PERCENT && (
                           <div className="w-full px-3 py-2.5 rounded-xl bg-gradient-to-r from-red-100 to-rose-100 border-2 border-red-400 shadow-md">
                             <p className="text-[0.65rem] font-bold text-red-800 flex items-center justify-center gap-1.5">
                               <span className="text-base">🚫</span>
-                              <span>Paper Rejected: Similarity {result.similarityScore}% exceeds threshold (86%). Cannot proceed to vetting.</span>
+                              <span>Paper Rejected: Similarity {result.similarityScore}% exceeds threshold ({VETTING_SIMILARITY_MAX_PERCENT}%). Cannot proceed to vetting.</span>
                             </p>
                           </div>
                         )}
-                        {/* Send to Vetting Button - appears when similarity < 86% */}
-                        {result.similarityScore < 86 && currentPaper && currentPaper.status !== 'in-vetting' && (
+                        {/* Send to Vetting Button - appears when similarity <= 40% */}
+                        {result.similarityScore <= VETTING_SIMILARITY_MAX_PERCENT && currentPaper && currentPaper.status !== 'in-vetting' && (
                           <button
                             type="button"
                             className="w-full rounded-xl bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 px-3 py-2.5 text-[0.7rem] font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.03] transition-all duration-300 flex items-center justify-center gap-1.5 relative overflow-hidden group"
@@ -16876,9 +17209,16 @@ interface RepositoryPapersPanelProps {
   submittedPapers: SubmittedPaper[];
   users: User[];
   onDeletePaper: (paperId: string) => Promise<void>;
+  onDeleteAllPapers: (paperIds: string[]) => Promise<void>;
 }
 
-function RepositoryPapersPanel({ repositoryPapers, submittedPapers, users, onDeletePaper }: RepositoryPapersPanelProps) {
+function RepositoryPapersPanel({
+  repositoryPapers,
+  submittedPapers,
+  users,
+  onDeletePaper,
+  onDeleteAllPapers,
+}: RepositoryPapersPanelProps) {
   // Filter out checklists and papers that have been sent to vetting or beyond
   // Only show exam papers that are still in the repository (not yet sent to vetting)
   const papersReadyForAnalysis = repositoryPapers.filter((repoPaper) => {
@@ -16966,6 +17306,19 @@ function RepositoryPapersPanel({ repositoryPapers, submittedPapers, users, onDel
       kicker="Central Exam Repository"
       description="View all papers compiled and submitted by Team Lead. These papers are ready for Chief Examiner AI similarity analysis before vetting."
     >
+      {papersReadyForAnalysis.length > 0 && (
+        <div className="mb-4 flex justify-end">
+          <button
+            type="button"
+            className="rounded-lg bg-red-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-red-700"
+            onClick={async () => {
+              await onDeleteAllPapers(papersReadyForAnalysis.map((paper) => paper.id));
+            }}
+          >
+            Delete All Repository Papers
+          </button>
+        </div>
+      )}
       {papersReadyForAnalysis.length === 0 ? (
         <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
           No papers are currently in the repository for this semester. All papers have been sent to vetting or are in progress.
@@ -22333,8 +22686,8 @@ function VettingAndAnnotations({
           </div>
         )}
 
-        {/* Chief Examiner Monitoring Panel - Shows vetter camera feeds and warnings */}
-        {isChiefExaminer && vettingSession.active && (
+        {/* Chief Examiner Monitoring Panel - keep visible while decision is pending */}
+        {isChiefExaminer && (vettingSession.active || canChiefShowDecisionControls) && (
           <div className="mt-5 space-y-4">
             <div className="rounded-xl border-2 border-red-300/50 bg-gradient-to-br from-red-50 via-pink-50 to-orange-50 p-4 shadow-lg">
               <div className="flex items-center justify-between mb-4">
@@ -22403,8 +22756,7 @@ function VettingAndAnnotations({
                 </div>
               ) : (
                 <div className="grid gap-4 md:grid-cols-2">
-                  {/* Live monitoring data - show during active session */}
-                  {vettingSession.active && vetterMonitoring && vetterMonitoring.size > 0 && Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
+                  {vetterMonitoring && vetterMonitoring.size > 0 && Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
                     const warnings = monitoring.warnings || [];
                     const recentWarnings = warnings.slice(-10).reverse(); // Last 10 warnings, newest first
                     const criticalWarnings = warnings.filter(w => w.severity === 'critical');

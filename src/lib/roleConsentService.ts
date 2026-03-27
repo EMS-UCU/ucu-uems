@@ -4,10 +4,10 @@ import type { WorkflowRole } from './roleConsentDocuments';
 export type { WorkflowRole };
 
 /** Workflow roles that are assigned via privilege_elevations and require consent. */
-const WORKFLOW_ELEVATION_ROLES: WorkflowRole[] = ['Team Lead', 'Vetter', 'Setter'];
+const WORKFLOW_ELEVATION_ROLES: WorkflowRole[] = ['Chief Examiner', 'Team Lead', 'Vetter', 'Setter'];
 
 /** Returns workflow roles that are still pending consent via privilege_elevations (active). */
-export async function getAssignedWorkflowRoles(userId: string): Promise<string[]> {
+export async function getAssignedWorkflowRoles(userId: string): Promise<WorkflowRole[]> {
   const { data, error } = await supabase
     .from('privilege_elevations')
     .select('role_granted, metadata')
@@ -27,8 +27,8 @@ export async function getAssignedWorkflowRoles(userId: string): Promise<string[]
         typeof metadata.consent_status === 'string' ? metadata.consent_status : '';
       return consentStatus !== 'accepted';
     })
-    .map((r: { role_granted: string }) => r.role_granted);
-  return [...new Set(roles)];
+    .map((r: { role_granted: string }) => r.role_granted as WorkflowRole);
+  return [...new Set(roles)] as WorkflowRole[];
 }
 
 export async function getAcceptedRoles(userId: string): Promise<Set<WorkflowRole>> {

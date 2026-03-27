@@ -180,7 +180,7 @@ export default function PrivilegeElevationPanel({
       }
 
       if (result.success) {
-        setMessage({ type: 'success', text: 'Successfully promoted lecturer to Chief Examiner' });
+        setMessage({ type: 'success', text: 'Chief Examiner assignment created with consent status: Pending' });
         
         // Optimistic update: add the new assignment immediately so card appears in real-time
         const promotedLecturer = lecturers.find(l => l.id === selectedUserId);
@@ -249,7 +249,8 @@ export default function PrivilegeElevationPanel({
           *,
           user_profiles!privilege_elevations_user_id_fkey (
             name,
-            email
+            email,
+            roles
           )
         `)
         .eq('role_granted', 'Chief Examiner')
@@ -297,7 +298,7 @@ export default function PrivilegeElevationPanel({
           const userIds = altData.map(a => a.user_id);
           const { data: users } = await supabase
             .from('user_profiles')
-            .select('id, name, email')
+            .select('id, name, email, roles')
             .in('id', userIds);
 
           assignmentsFromElevations.push(...altData.map(assignment => ({
@@ -434,6 +435,26 @@ export default function PrivilegeElevationPanel({
               savedAssignments.map((assignment) => {
                 const lecturer = assignment.user_profiles;
                 const metadata = assignment.metadata || {};
+                const consentStatusRaw = typeof metadata.consent_status === 'string'
+                  ? metadata.consent_status.toLowerCase()
+                  : 'pending';
+                const consentStatus =
+                  consentStatusRaw === 'accepted' || consentStatusRaw === 'declined'
+                    ? consentStatusRaw
+                    : 'pending';
+                const assignmentStatus = assignment.is_active
+                  ? consentStatus === 'accepted'
+                    ? 'Active - Accepted'
+                    : consentStatus === 'declined'
+                    ? 'Active - Declined'
+                    : 'Active - Pending'
+                  : 'Revoked';
+                const consentBadgeTone =
+                  consentStatus === 'accepted'
+                    ? 'bg-emerald-100 text-emerald-700 border-emerald-300'
+                    : consentStatus === 'declined'
+                    ? 'bg-rose-100 text-rose-700 border-rose-300'
+                    : 'bg-amber-100 text-amber-700 border-amber-300';
                 return (
                   <div
                     key={assignment.id}
@@ -474,12 +495,21 @@ export default function PrivilegeElevationPanel({
 
                     {/* Role Badge with colorful gradient */}
                     <div className="mb-2.5 relative z-10">
-                      <span className="inline-flex items-center gap-1 rounded-full bg-gradient-to-r from-blue-500 to-cyan-500 text-white px-2.5 py-0.5 text-xs font-bold shadow-sm">
-                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                          <path fillRule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                        </svg>
-                        Chief Examiner
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-gradient-to-r from-blue-500 to-cyan-500 text-white px-2.5 py-0.5 text-xs font-bold shadow-sm">
+                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                          </svg>
+                          Chief Examiner
+                        </span>
+                        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[0.65rem] font-semibold ${consentBadgeTone}`}>
+                          {consentStatus === 'accepted'
+                            ? 'Consent: Accepted'
+                            : consentStatus === 'declined'
+                            ? 'Consent: Declined'
+                            : 'Consent: Pending'}
+                        </span>
+                      </div>
                     </div>
 
                     {/* Assignment Details Section - Compact with colorful icons */}
@@ -492,6 +522,15 @@ export default function PrivilegeElevationPanel({
                         <p className="text-xs font-bold uppercase tracking-wide text-slate-700">Assignment Details</p>
                       </div>
                       <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <svg className="w-3 h-3 text-violet-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                            </svg>
+                            <span className="text-xs text-slate-500">Status:</span>
+                          </div>
+                          <span className="text-xs font-bold text-slate-800">{assignmentStatus}</span>
+                        </div>
                         {metadata.category && (
                           <div className="flex items-center justify-between gap-2">
                             <div className="flex items-center gap-1.5">
@@ -759,7 +798,7 @@ export default function PrivilegeElevationPanel({
             disabled={loading || !selectedUserId || (isSuperAdmin && (!faculty || !department || !category || !semester || !year))}
             className="w-full rounded-lg bg-emerald-600 px-4 py-2 font-semibold text-white hover:bg-emerald-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loading ? 'Processing...' : 'Promote to Chief Examiner'}
+            {loading ? 'Processing...' : 'Assign Chief Examiner (Pending Consent)'}
           </button>
         </div>
       </div>
