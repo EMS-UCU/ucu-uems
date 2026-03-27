@@ -20451,8 +20451,11 @@ function VettingAndAnnotations({
   const vetterHasJoined = currentUserId ? joinedVetters.has(currentUserId) : false;
   const isVetterRestricted = currentUserId ? restrictedVetters.has(currentUserId) : false;
   const showVetterFocusedLayout = isVetter && !isChiefExaminer;
-  const currentVettedPaper =
-    submittedPapers.find((p) => p.status === 'in-vetting' || p.status === 'vetted') || null;
+  const isPaperInVettingWindow = useCallback(
+    (paper: SubmittedPaper) => paper.status === 'in-vetting' || paper.status === 'vetted',
+    []
+  );
+  const currentVettedPaper = submittedPapers.find((p) => isPaperInVettingWindow(p)) || null;
   const currentPaperId = currentVettedPaper?.id ?? null;
   const enabledVetters = useMemo(() => Array.from(joinedVetters), [joinedVetters]);
   const joinedVetterDetails = useMemo(
@@ -20662,8 +20665,9 @@ function VettingAndAnnotations({
   // Use submittedPapers from props, excluding manually-removed papers unless
   // they have re-entered vetting (in-vetting/vetted), in which case show them again.
   const papersToDisplay = submittedPapers.filter((paper) => {
+    if (!isPaperInVettingWindow(paper)) return false;
     if (!removedFromVettingIds.has(paper.id)) return true;
-    return paper.status === 'in-vetting' || paper.status === 'vetted';
+    return isPaperInVettingWindow(paper);
   });
   
   // Default to 30 minutes from now for start
@@ -21058,13 +21062,18 @@ function VettingAndAnnotations({
       return;
     }
     setSelectedPaper((prev) => {
+      const preferredPaper =
+        papersToDisplay.find((p) => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0];
       if (!prev) {
-        return papersToDisplay.find((p) => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0];
+        return preferredPaper;
       }
       const latestMatch = papersToDisplay.find((p) => p.id === prev.id);
-      return latestMatch || papersToDisplay[0];
+      if (!latestMatch || !isPaperInVettingWindow(latestMatch)) {
+        return preferredPaper;
+      }
+      return latestMatch;
     });
-  }, [paperStateSignature, papersToDisplay]);
+  }, [paperStateSignature, papersToDisplay, isPaperInVettingWindow]);
 
   // Check if scheduled start time has been reached
   // The countdown becomes null when the scheduled time has been reached
@@ -21148,12 +21157,17 @@ function VettingAndAnnotations({
   
   // Vetters can start their session only when global session is active, they haven't joined yet, and they're not restricted
   const canVetterStartSession = isVetter && !isVetterRestricted && vettingSession.active && !vetterHasJoined;
+  const hasPostVettingEvidence =
+    (checklistComments?.size ?? 0) > 0 ||
+    (vetterMonitoring?.size ?? 0) > 0;
   const canChiefShowDecisionControls =
     Boolean(isChiefExaminer) &&
     Boolean(selectedPaper) &&
     workflowStage !== 'Approved' &&
     !vettingSession.active &&
-    selectedPaper?.status === 'vetted';
+    (selectedPaper?.status === 'vetted' ||
+      workflowStage === 'Vetted & Returned to Chief Examiner' ||
+      workflowStage === 'Awaiting Approval');
 
   const examWindow = (
     <div className="rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50/90 via-indigo-50/90 to-cyan-50/90 p-4 shadow-md">
@@ -22687,7 +22701,7 @@ function VettingAndAnnotations({
         )}
 
         {/* Chief Examiner Monitoring Panel - keep visible while decision is pending */}
-        {isChiefExaminer && (vettingSession.active || canChiefShowDecisionControls) && (
+        {isChiefExaminer && (vettingSession.active || canChiefShowDecisionControls || hasPostVettingEvidence) && (
           <div className="mt-5 space-y-4">
             <div className="rounded-xl border-2 border-red-300/50 bg-gradient-to-br from-red-50 via-pink-50 to-orange-50 p-4 shadow-lg">
               <div className="flex items-center justify-between mb-4">
