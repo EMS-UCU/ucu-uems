@@ -6335,6 +6335,63 @@ function App() {
     }
     
     if (confirm(`Are you sure you want to remove "${paper.fileName}" from vetting? This will change its status back to "submitted".`)) {
+      // Snapshot live vetter monitoring into vetting recordings, then clear live state
+      const liveMap = vetterMonitoringRef.current;
+      if (liveMap.size > 0) {
+        const startedAt = vettingSession.startedAt ?? Date.now() - 60_000;
+        const completedAt = Date.now();
+        const durationMinutes = Math.max(1, Math.round((completedAt - startedAt) / 60_000));
+        const sessionRecord: VettingSessionRecord = {
+          id: createId(),
+          paperId: paper.id,
+          paperName: paper.fileName,
+          courseCode: paper.courseCode || 'Unknown',
+          courseUnit: paper.courseUnit || 'Unknown',
+          startedAt,
+          completedAt,
+          durationMinutes,
+          vetters: Array.from(liveMap.entries()).map(([vetterId, monitoring]) => {
+            const allWarnings = monitoring.warnings ? [...monitoring.warnings] : [];
+            const criticalWarningsCount = allWarnings.filter((w) => w.severity === 'critical').length;
+            const violations =
+              typeof monitoring.violations === 'number' ? monitoring.violations : criticalWarningsCount;
+            return {
+              vetterId,
+              vetterName: monitoring.vetterName,
+              joinedAt: monitoring.joinedAt,
+              warnings: allWarnings,
+              violations,
+            };
+          }),
+          annotations: [...annotations],
+          checklistComments: new Map(checklistComments),
+          status: 'terminated',
+        };
+        setVettingSessionRecords((prev) => {
+          const next = [sessionRecord, ...prev];
+          try {
+            const existing = JSON.parse(localStorage.getItem('ucu-vetting-records') || '[]');
+            const recordToSave = {
+              ...sessionRecord,
+              checklistComments: Object.fromEntries(sessionRecord.checklistComments),
+            };
+            existing.unshift(recordToSave);
+            localStorage.setItem('ucu-vetting-records', JSON.stringify(existing.slice(0, 50)));
+          } catch (error) {
+            console.error('Error saving vetting record on paper removal:', error);
+          }
+          return next;
+        });
+        setVetterMonitoring(new Map());
+        vetterCameraStreams.current.forEach((stream) => {
+          stream.getTracks().forEach((track) => track.stop());
+        });
+        vetterCameraStreams.current.clear();
+        liveMap.forEach((_m, vetterId) => {
+          void supabase.from('moderation_state').delete().eq('key', `vetter_live_${vetterId}`);
+        });
+      }
+
       // Skip DB sync only for the explicit demo paper.
       if (paperId !== DEMO_PAPER_ID) {
         try {
@@ -9045,6 +9102,7 @@ function App() {
           setterDeadlineStartTime={setterDeadlineStartTime}
           setterDeadlineDuration={setterDeadlineDuration}
           currentTime={currentTime}
+          onConfirmRevisionsIntegrated={handleRevisionComplete}
         />
       ),
     });
@@ -14926,6 +14984,7 @@ interface TeamLeadPanelProps {
   setterDeadlineStartTime?: number | null;
   setterDeadlineDuration?: { days: number; hours: number; minutes: number };
   currentTime?: number;
+  onConfirmRevisionsIntegrated?: () => void;
 }
 
 function TeamLeadPanel({
@@ -14937,7 +14996,7 @@ function TeamLeadPanel({
   onTeamLeadCompile: _onTeamLeadCompile,
   submittedPapers,
   setterSubmissions,
-  workflowStage: _workflowStage,
+  workflowStage,
   onSubmitPDF,
   vettingSessionRecords = [],
   forwardedChecklistPayload = null,
@@ -14948,6 +15007,7 @@ function TeamLeadPanel({
   setterDeadlineStartTime,
   setterDeadlineDuration,
   currentTime: propCurrentTime,
+  onConfirmRevisionsIntegrated,
 }: TeamLeadPanelProps) {
   const [currentTime, setCurrentTime] = useState(propCurrentTime ?? Date.now());
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -15290,6 +15350,17 @@ function TeamLeadPanel({
       paperName: matchingRecord.paperName ?? '',
     };
   }, [forwardedChecklistPayload, vettingSessionRecords, courseCode, courseUnit, submittedPapers]);
+
+  const revisionWorkspacePaper = useMemo(() => {
+    const sorted = [...submittedPapers].sort(
+      (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
+    );
+    return sorted.find((p) => p.fileUrl) ?? null;
+  }, [submittedPapers]);
+
+  const revisionPaperViewUrl = revisionWorkspacePaper?.fileUrl
+    ? resolvePaperUrl(revisionWorkspacePaper.fileUrl)
+    : null;
 
   const handleDownloadModerationChecklist = () => {
     if (!checklistForwarded) {
@@ -15635,6 +15706,70 @@ function TeamLeadPanel({
           </div>
         </div>
       </SectionCard>
+
+      {/* Sanitized paper + vetting comments + workflow action (revision phase) */}
+      {workflowStage === 'Sanitized for Revision' && (
+        <SectionCard
+          title="Revision workspace"
+          kicker="Sanitized paper online"
+          description="Review the paper beside vetting comments, then confirm when revisions are integrated."
+        >
+          {revisionPaperViewUrl && revisionWorkspacePaper ? (
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(280px,360px)] lg:items-start">
+              <div className="min-w-0 rounded-xl border-2 border-slate-200 bg-white p-3 shadow-inner">
+                <p className="text-[0.65rem] font-semibold text-slate-600 mb-2 truncate">
+                  {revisionWorkspacePaper.fileName}
+                </p>
+                <div className="aspect-[210/297] overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+                  <iframe
+                    title={`Paper preview ${revisionWorkspacePaper.fileName}`}
+                    src={`${revisionPaperViewUrl}#toolbar=0&navpanes=0`}
+                    className="h-full w-full"
+                    loading="lazy"
+                  />
+                </div>
+              </div>
+              <div className="space-y-3 rounded-xl border-2 border-blue-200/80 bg-gradient-to-br from-blue-50/80 to-white p-4 shadow-md lg:sticky lg:top-4">
+                <div>
+                  <h4 className="text-sm font-bold text-slate-800">Vetting comments</h4>
+                  <p className="text-[0.65rem] text-slate-600 mt-0.5">
+                    Use these notes while editing. Full checklist is also available above.
+                  </p>
+                </div>
+                {checklistViewData && checklistViewData.commentsMap.size > 0 ? (
+                  <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
+                    {getChecklistCommentEntries(checklistViewData.commentsMap).map(({ key, entry }, index) => (
+                      <div key={key} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+                        <p className="text-[0.65rem] font-semibold text-slate-700">{entry.vetterName || `Comment ${index + 1}`}</p>
+                        <p className="text-xs whitespace-pre-wrap mt-1" style={{ color: entry.color || '#0f172a' }}>
+                          {entry.comment}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                    No forwarded checklist comments are loaded yet. Open &quot;View Checklist&quot; above once the Chief Examiner has forwarded feedback, or refresh the page.
+                  </p>
+                )}
+                {onConfirmRevisionsIntegrated && (
+                  <button
+                    type="button"
+                    onClick={onConfirmRevisionsIntegrated}
+                    className="w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white shadow-md hover:bg-blue-700 transition"
+                  >
+                    Confirm revisions integrated
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-slate-600">
+              The sanitized exam file is not linked yet. After the Chief Examiner forwards the paper, ensure it appears in your submissions list with a preview.
+            </p>
+          )}
+        </SectionCard>
+      )}
 
       {/* Moderation Checklist View Modal */}
       {showChecklistViewModal && checklistViewData && (
@@ -21157,9 +21292,6 @@ function VettingAndAnnotations({
   
   // Vetters can start their session only when global session is active, they haven't joined yet, and they're not restricted
   const canVetterStartSession = isVetter && !isVetterRestricted && vettingSession.active && !vetterHasJoined;
-  const hasPostVettingEvidence =
-    (checklistComments?.size ?? 0) > 0 ||
-    (vetterMonitoring?.size ?? 0) > 0;
   const canChiefShowDecisionControls =
     Boolean(isChiefExaminer) &&
     Boolean(selectedPaper) &&
@@ -21229,8 +21361,14 @@ function VettingAndAnnotations({
               </>
             )}
             {selectedPaper.fileUrl && inlinePaperUrl ? (
-              <div className="space-y-3">
-                <div className="rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md">
+              <div
+                className={
+                  canChiefShowDecisionControls && isChiefExaminer
+                    ? 'grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,360px)] xl:items-start'
+                    : 'space-y-3'
+                }
+              >
+                <div className="rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md min-w-0">
                   <div className="mb-3 flex items-center justify-between border-b border-blue-100 pb-2">
                     <div className="flex items-center gap-2">
                       <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow-sm">
@@ -21260,52 +21398,59 @@ function VettingAndAnnotations({
                     Zoom, scroll, and annotate from here while Safe Browser keeps other tabs locked.
                   </p>
                 </div>
+                {canChiefShowDecisionControls && isChiefExaminer && (
+                  <div className="space-y-3 rounded-xl border-2 border-emerald-200/70 bg-gradient-to-br from-emerald-50/90 to-white p-4 shadow-md xl:sticky xl:top-4">
+                    <div>
+                      <p className="text-[0.65rem] font-bold uppercase tracking-wide text-emerald-800">
+                        After vetting — comments &amp; actions
+                      </p>
+                      <p className="text-[0.65rem] text-slate-600 mt-0.5">
+                        Review vetters&apos; notes beside the paper, then advance or reject.
+                      </p>
+                    </div>
+                    {checklistComments && checklistComments.size > 0 ? (
+                      <div className="max-h-48 overflow-y-auto rounded-lg border border-blue-200 bg-white/90 p-3 shadow-inner space-y-2">
+                        <p className="text-[0.65rem] font-semibold text-slate-700">Checklist comments from vetters</p>
+                        {getChecklistCommentEntries(checklistComments).map(({ key, entry }) => (
+                          <div key={key} className="rounded-md border border-slate-100 bg-slate-50/80 p-2">
+                            <p className="text-[0.6rem] font-semibold text-slate-600">{entry.vetterName}</p>
+                            <p className="text-[0.65rem] text-slate-800 leading-snug whitespace-pre-wrap" style={{ color: entry.color || '#0f172a' }}>
+                              {entry.comment}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-[0.65rem] text-slate-500 italic">No checklist comments were captured for this paper.</p>
+                    )}
+                    <div className="flex flex-col gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowApprovalModal(true);
+                        }}
+                        className="w-full rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+                      >
+                        ✓ Push to Next Stage
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setChiefRejectionComment('');
+                          setShowRejectionModal(true);
+                        }}
+                        className="w-full rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
+                      >
+                        ✗ Rejected
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="rounded-lg border-2 border-amber-200 bg-amber-50/80 p-2.5 text-center">
                 <p className="text-[0.65rem] text-amber-700">File not available</p>
               </div>
-            )}
-            {canChiefShowDecisionControls && (
-              <>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowApprovalModal(true);
-                    }}
-                    className="flex-1 rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
-                  >
-                    ✓ Push to Next Stage
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setChiefRejectionComment('');
-                      setShowRejectionModal(true);
-                    }}
-                    className="flex-1 rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-2 text-xs font-bold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300"
-                  >
-                    ✗ Rejected
-                  </button>
-                </div>
-                {checklistComments && checklistComments.size > 0 && (
-                  <div className="mt-3 rounded-lg border border-blue-200 bg-white/80 p-3 shadow-sm">
-                    <p className="text-[0.65rem] font-semibold text-slate-700 mb-1">
-                      Checklist comments from vetters
-                    </p>
-                    <div className="max-h-32 overflow-y-auto space-y-1">
-                      {Array.from(checklistComments.values())
-                        .filter((entry) => entry?.comment)
-                        .map((entry, index) => (
-                          <p key={index} className="text-[0.65rem] text-slate-700 leading-snug">
-                            • {entry.comment}
-                          </p>
-                        ))}
-                    </div>
-                  </div>
-                )}
-              </>
             )}
                 
                 {/* Approval Modal with Date/Time Picker */}
@@ -22700,8 +22845,44 @@ function VettingAndAnnotations({
           </div>
         )}
 
-        {/* Chief Examiner Monitoring Panel - keep visible while decision is pending */}
-        {isChiefExaminer && (vettingSession.active || canChiefShowDecisionControls || hasPostVettingEvidence) && (
+        {/* Restricted vetters — stays available until Chief re-activates (not tied to live monitoring) */}
+        {isChiefExaminer && restrictedVetters && restrictedVetters.size > 0 && (
+          <div className="mt-5 rounded-xl border-2 border-red-300 bg-red-50/50 p-4 shadow-md">
+            <h4 className="text-xs font-bold text-red-800 mb-3 flex items-center gap-2">
+              🚫 Restricted Vetters ({restrictedVetters.size})
+            </h4>
+            <div className="space-y-2">
+              {Array.from(restrictedVetters).map((vetterId) => {
+                const vetter = users.find((u: User) => u.id === vetterId);
+                if (!vetter) return null;
+                return (
+                  <div key={vetterId} className="flex items-center justify-between rounded-lg border border-red-200 bg-white p-2">
+                    <div>
+                      <p className="text-xs font-semibold text-slate-800">{vetter.name}</p>
+                      <p className="text-[0.65rem] text-red-600">Access restricted due to violation</p>
+                    </div>
+                    {onReactivateVetter && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (confirm(`Reactivate ${vetter.name}? They will be able to join vetting sessions again.`)) {
+                            onReactivateVetter(vetterId);
+                          }
+                        }}
+                        className="rounded-lg bg-green-500 px-3 py-1.5 text-xs font-bold text-white shadow hover:bg-green-600 transition"
+                      >
+                        Reactivate
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Live vetter monitoring — only while an active vetting session is running; archived to Recordings when session ends or paper is removed */}
+        {isChiefExaminer && vettingSession.active && (
           <div className="mt-5 space-y-4">
             <div className="rounded-xl border-2 border-red-300/50 bg-gradient-to-br from-red-50 via-pink-50 to-orange-50 p-4 shadow-lg">
               <div className="flex items-center justify-between mb-4">
@@ -22714,49 +22895,11 @@ function VettingAndAnnotations({
                       Vetter Monitoring Dashboard
                     </h3>
                     <p className="text-xs text-slate-600">
-                      Real-time camera feeds and violation tracking
+                      Real-time camera feeds and violation tracking (live session only)
                     </p>
                   </div>
                 </div>
-                {/* Clear Records Button - Only show when session is not active and records exist */}
-                {/* Note: This button would need clearVettingRecords passed as prop - removed for now to fix error */}
               </div>
-
-              {/* Restricted Vetters Section */}
-              {restrictedVetters && restrictedVetters.size > 0 && (
-                <div className="mb-4 rounded-lg border-2 border-red-300 bg-red-50/50 p-4">
-                  <h4 className="text-xs font-bold text-red-800 mb-3 flex items-center gap-2">
-                    🚫 Restricted Vetters ({restrictedVetters.size})
-                  </h4>
-                  <div className="space-y-2">
-                    {Array.from(restrictedVetters).map((vetterId) => {
-                      const vetter = users.find((u: User) => u.id === vetterId);
-                      if (!vetter) return null;
-                      return (
-                        <div key={vetterId} className="flex items-center justify-between rounded-lg border border-red-200 bg-white p-2">
-                          <div>
-                            <p className="text-xs font-semibold text-slate-800">{vetter.name}</p>
-                            <p className="text-[0.65rem] text-red-600">Access restricted due to violation</p>
-                          </div>
-                          {onReactivateVetter && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (confirm(`Reactivate ${vetter.name}? They will be able to join vetting sessions again.`)) {
-                                  onReactivateVetter(vetterId);
-                                }
-                              }}
-                              className="rounded-lg bg-green-500 px-3 py-1.5 text-xs font-bold text-white shadow hover:bg-green-600 transition"
-                            >
-                              Reactivate
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
 
               {/* Show message if no vetters have joined yet */}
               {!vetterMonitoring || vetterMonitoring.size === 0 ? (
@@ -22859,6 +23002,12 @@ function VettingAndAnnotations({
                                 </p>
                               </div>
                             ))}
+                          </div>
+                        ) : monitoring.violations > 0 ? (
+                          <div className="mb-3 text-center py-2 bg-amber-50 border border-amber-300 rounded">
+                            <p className="text-[0.65rem] text-amber-900 font-semibold">
+                              Violations recorded — see activity log below. Address before session end if needed.
+                            </p>
                           </div>
                         ) : (
                           <div className="mb-3 text-center py-2 bg-green-50 border border-green-200 rounded">
