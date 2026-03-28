@@ -5457,6 +5457,26 @@ function App() {
       switchingLocked: true,
     });
 
+      // Fresh session: clear stale monitoring from a previous run so no vetters appear until someone joins now.
+      setVetterMonitoring(new Map());
+      vetterMonitoringRef.current = new Map();
+      setJoinedVetters(new Set());
+      vetterCameraStreams.current.forEach((stream) => {
+        stream.getTracks().forEach((track) => track.stop());
+      });
+      vetterCameraStreams.current.clear();
+      try {
+        const { error: liveDeleteError } = await supabase
+          .from('moderation_state')
+          .delete()
+          .like('key', 'vetter_live_%');
+        if (liveDeleteError) {
+          console.warn('Could not clear stale vetter_live rows in moderation_state:', liveDeleteError.message);
+        }
+      } catch (e) {
+        console.warn('Could not clear stale vetter_live rows:', e);
+      }
+
       // Defer non-critical state so the first paint after "Start session" stays stable (less layout thrash / flicker).
       startTransition(() => {
         // IMPORTANT: Clear any previously scheduled moderation window.
@@ -5615,18 +5635,23 @@ function App() {
       // Store camera stream for Chief Examiner monitoring and later cleanup
       vetterCameraStreams.current.set(currentUser.id!, cameraStream);
 
-      // Initialize monitoring data for this vetter (preserve existing violation count if any)
+      // Initialize monitoring for this vetter — never carry warnings/violations from a prior session.
+      const sessionStart = vettingSession.startedAt ?? 0;
       setVetterMonitoring((prev) => {
         const newMap = new Map(prev);
         const existing = newMap.get(currentUser.id!);
+        const reuseExisting =
+          existing &&
+          typeof existing.joinedAt === 'number' &&
+          existing.joinedAt >= sessionStart - 2000;
         const preservedViolations =
-          existing && typeof existing.violations === 'number' ? existing.violations : 0;
+          reuseExisting && typeof existing.violations === 'number' ? existing.violations : 0;
         const entry: VetterMonitoring = {
           vetterId: currentUser.id!,
           vetterName: currentUser.name ?? 'Unknown',
           joinedAt: Date.now(),
           cameraStream,
-          warnings: existing?.warnings ?? [],
+          warnings: reuseExisting ? existing.warnings ?? [] : [],
           violations: preservedViolations,
         };
         newMap.set(currentUser.id!, entry);
@@ -21332,6 +21357,18 @@ function VettingAndAnnotations({
     return canChiefShowDecisionControls;
   }, [isChiefExaminer, workflow?.stage, vettingSession.active, canChiefShowDecisionControls]);
 
+  /** Only show live rows from the current session (ignore stale Supabase/local merges from before this session started). */
+  const liveMonitoringEntriesForCurrentSession = useMemo(() => {
+    const map = vetterMonitoring ?? new Map();
+    if (vettingSession.startedAt == null) {
+      return Array.from(map.entries());
+    }
+    const floor = vettingSession.startedAt - 2000;
+    return Array.from(map.entries()).filter(
+      ([, m]) => typeof m.joinedAt === 'number' && m.joinedAt >= floor
+    );
+  }, [vettingSession.startedAt, vetterMonitoring]);
+
   const examWindow = (
     <div className="rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50/90 via-indigo-50/90 to-cyan-50/90 p-4 shadow-md">
       <div className="mb-4 flex items-center justify-between border-b border-blue-200/50 pb-3">
@@ -22543,7 +22580,7 @@ function VettingAndAnnotations({
                 )}
               </div>
 
-              {vettingSession.active && (!vetterMonitoring || vetterMonitoring.size === 0) ? (
+              {vettingSession.active && liveMonitoringEntriesForCurrentSession.length === 0 ? (
                 <div className="rounded-lg border-2 border-blue-200 bg-blue-50/30 p-4 text-center">
                   <p className="text-sm font-semibold text-slate-700">
                     Waiting for vetters to join...
@@ -22554,7 +22591,7 @@ function VettingAndAnnotations({
                 </div>
               ) : vettingSession.active ? (
                 <div className="grid gap-4 md:grid-cols-2">
-                  {vetterMonitoring && vetterMonitoring.size > 0 && Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
+                  {liveMonitoringEntriesForCurrentSession.map(([vetterId, monitoring]) => {
                     const warnings = monitoring.warnings || [];
                     const recentWarnings = [...warnings].reverse();
                     const criticalWarnings = warnings.filter(w => w.severity === 'critical');
