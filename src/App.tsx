@@ -6604,7 +6604,7 @@ function App() {
   };
 
   const handleCompleteVetting = async () => {
-    if (!currentUserHasRole('Vetter')) {
+    if (!currentUserHasRole('Vetter') && !currentUserHasRole('Chief Examiner')) {
       return;
     }
     if (!vettingSession.active || workflow.stage !== 'Vetting in Progress') {
@@ -9364,6 +9364,7 @@ function App() {
           onForwardChecklist={handleForwardChecklistDecision}
           onApprove={handleApprove}
           onReject={handleReject}
+          vettingSessionRecords={vettingSessionRecords}
         />
       ),
     });
@@ -20479,6 +20480,7 @@ interface VettingAndAnnotationsProps {
   onReject?: (notes: string, newDeadline?: { days: number; hours: number; minutes: number }) => Promise<void>;
   onForwardChecklist?: (decision: 'approved' | 'rejected', notes: string) => void;
   onDownloadChecklistPacket?: () => void;
+  vettingSessionRecords?: VettingSessionRecord[];
 }
 
 type ChecklistSectionKey = 'courseOutline' | 'bloomsTaxonomy' | 'compliance';
@@ -20564,6 +20566,7 @@ function VettingAndAnnotations({
           onReject,
   onForwardChecklist,
   onDownloadChecklistPacket,
+  vettingSessionRecords = [],
 }: VettingAndAnnotationsProps) {
   const [annotationDraft, setAnnotationDraft] = useState('');
   const [forwardDecision, setForwardDecision] = useState<'approved' | 'rejected' | ''>('');
@@ -21301,6 +21304,20 @@ function VettingAndAnnotations({
       workflowStage === 'Vetted & Returned to Chief Examiner' ||
       workflowStage === 'Awaiting Approval');
 
+  const sessionRecordCommentsForSelectedPaper = useMemo(() => {
+    if (!selectedPaper?.id) return new Map<string, ChecklistComment>();
+    const rec = vettingSessionRecords.find((r) => r.paperId === selectedPaper.id);
+    if (!rec?.checklistComments) return new Map();
+    return rec.checklistComments instanceof Map
+      ? rec.checklistComments
+      : new Map(Object.entries(rec.checklistComments as Record<string, ChecklistComment>));
+  }, [vettingSessionRecords, selectedPaper?.id]);
+
+  const mergedChecklistCommentsForDisplay = useMemo(
+    () => mergeChecklistCommentsByTimestamp(sessionRecordCommentsForSelectedPaper, checklistComments || new Map()),
+    [sessionRecordCommentsForSelectedPaper, checklistComments]
+  );
+
   const examWindow = (
     <div className="rounded-xl border-2 border-blue-200/50 bg-gradient-to-br from-blue-50/90 via-indigo-50/90 to-cyan-50/90 p-4 shadow-md">
       <div className="mb-4 flex items-center justify-between border-b border-blue-200/50 pb-3">
@@ -21361,14 +21378,8 @@ function VettingAndAnnotations({
               </>
             )}
             {selectedPaper.fileUrl && inlinePaperUrl ? (
-              <div
-                className={
-                  canChiefShowDecisionControls && isChiefExaminer
-                    ? 'grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,360px)] xl:items-start'
-                    : 'space-y-3'
-                }
-              >
-                <div className="rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md min-w-0">
+              <div className="space-y-4">
+                <div className="rounded-xl border-2 border-blue-200/70 bg-white/95 p-4 shadow-md w-full min-w-0">
                   <div className="mb-3 flex items-center justify-between border-b border-blue-100 pb-2">
                     <div className="flex items-center gap-2">
                       <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow-sm">
@@ -21385,12 +21396,12 @@ function VettingAndAnnotations({
                       Live Preview
                     </span>
                   </div>
-                  <div className="mt-3 aspect-[210/297] overflow-hidden rounded-lg border-2 border-slate-200 bg-slate-50 shadow-inner">
+                  <div className="mt-3 w-full min-h-[min(85vh,56rem)] overflow-hidden rounded-lg border-2 border-slate-200 bg-slate-50 shadow-inner">
                     <iframe
                       key={inlinePaperUrl}
                       src={`${inlinePaperUrl}#toolbar=0&navpanes=0`}
                       title={`Secure viewer for ${selectedPaper.fileName}`}
-                      className="h-full w-full"
+                      className="h-[min(85vh,56rem)] w-full min-h-[min(85vh,56rem)]"
                       loading="lazy"
                     />
                   </div>
@@ -21399,19 +21410,19 @@ function VettingAndAnnotations({
                   </p>
                 </div>
                 {canChiefShowDecisionControls && isChiefExaminer && (
-                  <div className="space-y-3 rounded-xl border-2 border-emerald-200/70 bg-gradient-to-br from-emerald-50/90 to-white p-4 shadow-md xl:sticky xl:top-4">
+                  <div className="space-y-3 rounded-xl border-2 border-emerald-200/70 bg-gradient-to-br from-emerald-50/90 to-white p-4 shadow-md w-full">
                     <div>
                       <p className="text-[0.65rem] font-bold uppercase tracking-wide text-emerald-800">
                         After vetting — comments &amp; actions
                       </p>
                       <p className="text-[0.65rem] text-slate-600 mt-0.5">
-                        Review vetters&apos; notes beside the paper, then advance or reject.
+                        Review vetters&apos; notes below the paper, then advance or reject.
                       </p>
                     </div>
-                    {checklistComments && checklistComments.size > 0 ? (
+                    {mergedChecklistCommentsForDisplay.size > 0 ? (
                       <div className="max-h-48 overflow-y-auto rounded-lg border border-blue-200 bg-white/90 p-3 shadow-inner space-y-2">
                         <p className="text-[0.65rem] font-semibold text-slate-700">Checklist comments from vetters</p>
-                        {getChecklistCommentEntries(checklistComments).map(({ key, entry }) => (
+                        {getChecklistCommentEntries(mergedChecklistCommentsForDisplay).map(({ key, entry }) => (
                           <div key={key} className="rounded-md border border-slate-100 bg-slate-50/80 p-2">
                             <p className="text-[0.6rem] font-semibold text-slate-600">{entry.vetterName}</p>
                             <p className="text-[0.65rem] text-slate-800 leading-snug whitespace-pre-wrap" style={{ color: entry.color || '#0f172a' }}>
@@ -22486,6 +22497,186 @@ function VettingAndAnnotations({
             visibleForUser={Boolean(vettingSession.active && currentUserId)}
           />
         )}
+        {/* Violation & live monitoring — appears immediately when the session starts (chief stays aware before scrolling) */}
+        {isChiefExaminer && vettingSession.active && (
+          <div className="space-y-4">
+            <div className="rounded-xl border-2 border-red-300/50 bg-gradient-to-br from-red-50 via-pink-50 to-orange-50 p-4 shadow-lg">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-red-500 to-pink-600 shadow-md">
+                    <span className="text-white text-lg">👁️</span>
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-800">
+                      Vetter Monitoring Dashboard
+                    </h3>
+                    <p className="text-xs text-slate-600">
+                      Real-time camera feeds and violation tracking (live session only)
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {!vetterMonitoring || vetterMonitoring.size === 0 ? (
+                <div className="rounded-lg border-2 border-blue-200 bg-blue-50/30 p-4 text-center">
+                  <p className="text-sm font-semibold text-slate-700">
+                    Waiting for vetters to join...
+                  </p>
+                  <p className="text-xs text-slate-600 mt-1">
+                    Vetter camera feeds and warnings will appear here once they start their sessions.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2">
+                  {vetterMonitoring && vetterMonitoring.size > 0 && Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
+                    const warnings = monitoring.warnings || [];
+                    const recentWarnings = warnings.slice(-10).reverse();
+                    const criticalWarnings = warnings.filter(w => w.severity === 'critical');
+                    
+                    return (
+                      <div
+                        key={vetterId}
+                        className={`rounded-lg border-2 p-3 ${
+                          monitoring.violations > 0
+                            ? 'border-red-300 bg-red-50/50'
+                            : 'border-blue-200 bg-blue-50/30'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between mb-3">
+                          <div>
+                            <h4 className="text-xs font-bold text-slate-800">
+                              {monitoring.vetterName}
+                            </h4>
+                            <p className="text-[0.65rem] text-slate-600">
+                              Joined: {new Date(monitoring.joinedAt).toLocaleTimeString()}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <div className={`text-xs font-bold ${
+                              monitoring.violations > 0 ? 'text-red-600' : 'text-green-600'
+                            }`}>
+                              {monitoring.violations} {monitoring.violations === 1 ? 'Violation' : 'Violations'}
+                            </div>
+                            <div className="text-[0.65rem] text-slate-600">
+                              {warnings.length} {warnings.length === 1 ? 'Warning' : 'Warnings'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mb-3 rounded-lg overflow-hidden bg-slate-900 aspect-video relative border-2 border-green-500">
+                          {monitoring.cameraStream && monitoring.cameraStream.active ? (
+                            <>
+                              <div className="absolute top-2 left-2 z-10 bg-red-600 text-white text-[0.6rem] px-2 py-1 rounded font-bold flex items-center gap-1">
+                                <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse"></span>
+                                LIVE CAMERA
+                              </div>
+                              <video
+                                ref={(video) => {
+                                  if (video && monitoring.cameraStream) {
+                                    video.srcObject = monitoring.cameraStream;
+                                    video.play().catch(err => console.error('Camera playback error:', err));
+                                  }
+                                }}
+                                autoPlay
+                                playsInline
+                                muted
+                                className="w-full h-full object-cover"
+                              />
+                            </>
+                          ) : (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-900/90">
+                              <span className="text-white text-lg font-bold mb-2">⚠️ CAMERA OFF</span>
+                              <span className="text-white text-xs">Vetter camera is not active</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {criticalWarnings.length > 0 ? (
+                          <div className="mb-3 space-y-1.5">
+                            <p className="text-[0.7rem] font-bold text-red-700 mb-2 flex items-center gap-1">
+                              🚨 CRITICAL ALERTS - What Vetter Saw ({criticalWarnings.length})
+                            </p>
+                            {criticalWarnings.slice(-10).reverse().map((warning) => (
+                              <div
+                                key={warning.id}
+                                className="bg-red-100 border-2 border-red-400 text-red-900 p-2 rounded animate-pulse"
+                              >
+                                <div className="flex items-start justify-between gap-2 mb-1">
+                                  <span className="font-bold text-[0.7rem]">⚠️ CRITICAL ALERT</span>
+                                  <span className="text-[0.6rem] opacity-75">
+                                    {new Date(warning.timestamp).toLocaleTimeString()}
+                                  </span>
+                                </div>
+                                <p className="text-[0.7rem] font-semibold leading-tight">
+                                  {warning.message}
+                                </p>
+                                <p className="text-[0.6rem] text-red-700 mt-1">
+                                  Type: {warning.type.replace(/_/g, ' ').toUpperCase()}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : monitoring.violations > 0 ? (
+                          <div className="mb-3 text-center py-2 bg-amber-50 border border-amber-300 rounded">
+                            <p className="text-[0.65rem] text-amber-900 font-semibold">
+                              Violations recorded — see activity log below. Address before session end if needed.
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="mb-3 text-center py-2 bg-green-50 border border-green-200 rounded">
+                            <p className="text-[0.65rem] text-green-700 font-semibold">
+                              ✓ No critical alerts - Vetter following rules
+                            </p>
+                          </div>
+                        )}
+
+                        {recentWarnings.length > 0 ? (
+                          <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                            <p className="text-[0.7rem] font-bold text-slate-800 mb-2 flex items-center gap-1">
+                              📋 Complete Activity Log ({warnings.length} total warnings):
+                            </p>
+                            {recentWarnings.map((warning) => (
+                              <div
+                                key={warning.id}
+                                className={`text-[0.65rem] p-2 rounded border ${
+                                  warning.severity === 'critical'
+                                    ? 'bg-red-100 border-red-300 text-red-900'
+                                    : 'bg-amber-100 border-amber-300 text-amber-900'
+                                }`}
+                              >
+                                <div className="flex items-start justify-between gap-2 mb-1">
+                                  <span className="font-bold text-[0.7rem]">
+                                    {warning.severity === 'critical' ? '🔴 CRITICAL' : '⚠️ WARNING'}: {warning.type.replace(/_/g, ' ').toUpperCase()}
+                                  </span>
+                                  <span className="text-[0.6rem] opacity-75 whitespace-nowrap">
+                                    {new Date(warning.timestamp).toLocaleTimeString()}
+                                  </span>
+                                </div>
+                                <p className="mt-0.5 leading-tight font-medium">{warning.message}</p>
+                              </div>
+                            ))}
+                            {warnings.length > 10 && (
+                              <p className="text-[0.6rem] text-slate-500 italic text-center pt-1">
+                                Showing last 10 warnings. Total: {warnings.length}
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-center py-2 bg-green-50 border border-green-200 rounded">
+                            <p className="text-[0.65rem] text-green-700 font-semibold">
+                              ✓ No warnings - Vetter following all rules
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  
+                </div>
+              )}
+            </div>
+          </div>
+        )}
         {showVetterFocusedLayout && vetterSessionPanel}
         {paperChecklistColumns}
 
@@ -22553,7 +22744,7 @@ function VettingAndAnnotations({
                 const canEditShared = isVetter && vetterHasJoined;
                 const maxChars = 1200;
                 const usedColorsByOthers = new Set(
-                  getChecklistCommentEntries(checklistComments || new Map())
+                  getChecklistCommentEntries(mergedChecklistCommentsForDisplay)
                     .filter(({ key, entry }) => key !== sharedCommentKey && Boolean(entry.color))
                     .map(({ entry }) => entry.color)
                 );
@@ -22561,7 +22752,7 @@ function VettingAndAnnotations({
                 const effectiveColor = usedColorsByOthers.has(selectedColor) && !ownCommentEntry?.comment
                   ? availableColor
                   : selectedColor;
-                const sharedCommentEntries = getChecklistCommentEntries(checklistComments || new Map());
+                const sharedCommentEntries = getChecklistCommentEntries(mergedChecklistCommentsForDisplay);
 
                 return (
                   <div className="space-y-4">
@@ -22877,191 +23068,6 @@ function VettingAndAnnotations({
                   </div>
                 );
               })}
-            </div>
-          </div>
-        )}
-
-        {/* Live vetter monitoring — only while an active vetting session is running; archived to Recordings when session ends or paper is removed */}
-        {isChiefExaminer && vettingSession.active && (
-          <div className="mt-5 space-y-4">
-            <div className="rounded-xl border-2 border-red-300/50 bg-gradient-to-br from-red-50 via-pink-50 to-orange-50 p-4 shadow-lg">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-red-500 to-pink-600 shadow-md">
-                    <span className="text-white text-lg">👁️</span>
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-800">
-                      Vetter Monitoring Dashboard
-                    </h3>
-                    <p className="text-xs text-slate-600">
-                      Real-time camera feeds and violation tracking (live session only)
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Show message if no vetters have joined yet */}
-              {!vetterMonitoring || vetterMonitoring.size === 0 ? (
-                <div className="rounded-lg border-2 border-blue-200 bg-blue-50/30 p-4 text-center">
-                  <p className="text-sm font-semibold text-slate-700">
-                    Waiting for vetters to join...
-                  </p>
-                  <p className="text-xs text-slate-600 mt-1">
-                    Vetter camera feeds and warnings will appear here once they start their sessions.
-                  </p>
-                </div>
-              ) : (
-                <div className="grid gap-4 md:grid-cols-2">
-                  {vetterMonitoring && vetterMonitoring.size > 0 && Array.from((vetterMonitoring || new Map()).entries()).map(([vetterId, monitoring]) => {
-                    const warnings = monitoring.warnings || [];
-                    const recentWarnings = warnings.slice(-10).reverse(); // Last 10 warnings, newest first
-                    const criticalWarnings = warnings.filter(w => w.severity === 'critical');
-                    
-                    return (
-                      <div
-                        key={vetterId}
-                        className={`rounded-lg border-2 p-3 ${
-                          monitoring.violations > 0
-                            ? 'border-red-300 bg-red-50/50'
-                            : 'border-blue-200 bg-blue-50/30'
-                        }`}
-                      >
-                        <div className="flex items-start justify-between mb-3">
-                          <div>
-                            <h4 className="text-xs font-bold text-slate-800">
-                              {monitoring.vetterName}
-                            </h4>
-                            <p className="text-[0.65rem] text-slate-600">
-                              Joined: {new Date(monitoring.joinedAt).toLocaleTimeString()}
-                            </p>
-                          </div>
-                          <div className="text-right">
-                            <div className={`text-xs font-bold ${
-                              monitoring.violations > 0 ? 'text-red-600' : 'text-green-600'
-                            }`}>
-                              {monitoring.violations} {monitoring.violations === 1 ? 'Violation' : 'Violations'}
-                            </div>
-                            <div className="text-[0.65rem] text-slate-600">
-                              {warnings.length} {warnings.length === 1 ? 'Warning' : 'Warnings'}
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Camera Feed - LIVE VIDEO - ALWAYS SHOW TO CHIEF EXAMINER */}
-                        <div className="mb-3 rounded-lg overflow-hidden bg-slate-900 aspect-video relative border-2 border-green-500">
-                          {monitoring.cameraStream && monitoring.cameraStream.active ? (
-                            <>
-                              <div className="absolute top-2 left-2 z-10 bg-red-600 text-white text-[0.6rem] px-2 py-1 rounded font-bold flex items-center gap-1">
-                                <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse"></span>
-                                LIVE CAMERA
-                              </div>
-                              <video
-                                ref={(video) => {
-                                  if (video && monitoring.cameraStream) {
-                                    video.srcObject = monitoring.cameraStream;
-                                    video.play().catch(err => console.error('Camera playback error:', err));
-                                  }
-                                }}
-                                autoPlay
-                                playsInline
-                                muted
-                                className="w-full h-full object-cover"
-                              />
-                            </>
-                          ) : (
-                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-900/90">
-                              <span className="text-white text-lg font-bold mb-2">⚠️ CAMERA OFF</span>
-                              <span className="text-white text-xs">Vetter camera is not active</span>
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Critical Alerts - On-Screen Warnings That Appeared on Vetter's Screen - ALWAYS SHOW IF ANY */}
-                        {criticalWarnings.length > 0 ? (
-                          <div className="mb-3 space-y-1.5">
-                            <p className="text-[0.7rem] font-bold text-red-700 mb-2 flex items-center gap-1">
-                              🚨 CRITICAL ALERTS - What Vetter Saw ({criticalWarnings.length})
-                            </p>
-                            {criticalWarnings.slice(-10).reverse().map((warning) => (
-                              <div
-                                key={warning.id}
-                                className="bg-red-100 border-2 border-red-400 text-red-900 p-2 rounded animate-pulse"
-                              >
-                                <div className="flex items-start justify-between gap-2 mb-1">
-                                  <span className="font-bold text-[0.7rem]">⚠️ CRITICAL ALERT</span>
-                                  <span className="text-[0.6rem] opacity-75">
-                                    {new Date(warning.timestamp).toLocaleTimeString()}
-                                  </span>
-                                </div>
-                                <p className="text-[0.7rem] font-semibold leading-tight">
-                                  {warning.message}
-                                </p>
-                                <p className="text-[0.6rem] text-red-700 mt-1">
-                                  Type: {warning.type.replace(/_/g, ' ').toUpperCase()}
-                                </p>
-                              </div>
-                            ))}
-                          </div>
-                        ) : monitoring.violations > 0 ? (
-                          <div className="mb-3 text-center py-2 bg-amber-50 border border-amber-300 rounded">
-                            <p className="text-[0.65rem] text-amber-900 font-semibold">
-                              Violations recorded — see activity log below. Address before session end if needed.
-                            </p>
-                          </div>
-                        ) : (
-                          <div className="mb-3 text-center py-2 bg-green-50 border border-green-200 rounded">
-                            <p className="text-[0.65rem] text-green-700 font-semibold">
-                              ✓ No critical alerts - Vetter following rules
-                            </p>
-                          </div>
-                        )}
-
-                        {/* All Warnings Log - ALWAYS SHOW ALL WARNINGS TO CHIEF EXAMINER */}
-                        {recentWarnings.length > 0 ? (
-                          <div className="space-y-1.5 max-h-48 overflow-y-auto">
-                            <p className="text-[0.7rem] font-bold text-slate-800 mb-2 flex items-center gap-1">
-                              📋 Complete Activity Log ({warnings.length} total warnings):
-                            </p>
-                            {recentWarnings.map((warning) => (
-                              <div
-                                key={warning.id}
-                                className={`text-[0.65rem] p-2 rounded border ${
-                                  warning.severity === 'critical'
-                                    ? 'bg-red-100 border-red-300 text-red-900'
-                                    : 'bg-amber-100 border-amber-300 text-amber-900'
-                                }`}
-                              >
-                                <div className="flex items-start justify-between gap-2 mb-1">
-                                  <span className="font-bold text-[0.7rem]">
-                                    {warning.severity === 'critical' ? '🔴 CRITICAL' : '⚠️ WARNING'}: {warning.type.replace(/_/g, ' ').toUpperCase()}
-                                  </span>
-                                  <span className="text-[0.6rem] opacity-75 whitespace-nowrap">
-                                    {new Date(warning.timestamp).toLocaleTimeString()}
-                                  </span>
-                                </div>
-                                <p className="mt-0.5 leading-tight font-medium">{warning.message}</p>
-                              </div>
-                            ))}
-                            {warnings.length > 10 && (
-                              <p className="text-[0.6rem] text-slate-500 italic text-center pt-1">
-                                Showing last 10 warnings. Total: {warnings.length}
-                              </p>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="text-center py-2 bg-green-50 border border-green-200 rounded">
-                            <p className="text-[0.65rem] text-green-700 font-semibold">
-                              ✓ No warnings - Vetter following all rules
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                  
-                </div>
-              )}
             </div>
           </div>
         )}
