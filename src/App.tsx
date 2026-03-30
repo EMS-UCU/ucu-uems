@@ -1890,7 +1890,7 @@ function App() {
   }, [vetterMonitoring]);
   const persistLiveVetterMonitoring = useCallback(async (entry: SerializableVetterMonitoring) => {
     try {
-      await supabase
+      const { error } = await supabase
         .from('moderation_state')
         .upsert(
           {
@@ -1900,6 +1900,9 @@ function App() {
           },
           { onConflict: 'key' }
         );
+      if (error) {
+        console.warn('Failed to persist live vetter monitoring state:', error.message);
+      }
     } catch (error) {
       console.warn('Failed to persist live vetter monitoring state:', error);
     }
@@ -1911,7 +1914,8 @@ function App() {
       joinedAt: entry.joinedAt,
       warnings: entry.warnings,
       violations: entry.violations,
-      cameraActive: entry.cameraActive && isCameraStreamLive(entry.cameraStream),
+      // Keep the explicit session flag; strict live-track checks can flap and hide valid snapshots remotely.
+      cameraActive: entry.cameraActive,
       cameraSnapshotDataUrl: entry.cameraSnapshotDataUrl,
       cameraSnapshotCapturedAt: entry.cameraSnapshotCapturedAt,
       updatedAt: new Date().toISOString(),
@@ -23266,7 +23270,7 @@ function VettingAndAnnotations({
                         </div>
 
                         <div className="mb-3 rounded-lg overflow-hidden bg-slate-900 aspect-video relative border-2 border-green-500">
-                          {(monitoring.cameraActive && isCameraStreamLive(monitoring.cameraStream)) || (!monitoring.cameraStream && monitoring.cameraActive) ? (
+                          {(monitoring.cameraActive && isCameraStreamLive(monitoring.cameraStream)) || (!monitoring.cameraStream && monitoring.cameraActive) || Boolean(monitoring.cameraSnapshotDataUrl) ? (
                             <>
                               <div className="absolute top-2 left-2 z-10 bg-red-600 text-white text-[0.6rem] px-2 py-1 rounded font-bold flex items-center gap-1">
                                 <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse"></span>
