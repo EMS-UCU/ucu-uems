@@ -52,5 +52,6 @@ END $$;
 INSERT INTO public.moderation_state (key, value, updated_at)
 VALUES
   ('vetting_session', '{}', NOW()),
-  ('moderation_schedule', '{}', NOW())
+  ('moderation_schedule', '{}', NOW()),
+  ('submission_deadlines', '{}', NOW())
 ON CONFLICT (key) DO NOTHING;

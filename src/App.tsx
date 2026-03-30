@@ -796,6 +796,133 @@ const isSameModerationScheduleState = (a: ModerationSchedule, b: ModerationSched
   a.scheduledStartTime === b.scheduledStartTime &&
   a.scheduledEndTime === b.scheduledEndTime;
 
+/** Cross-device sync for Chief / Setter / Team Lead deadline windows (mirrors moderation_schedule). */
+type SubmissionDeadlinesDuration = { days: number; hours: number; minutes: number };
+
+type SubmissionDeadlinesSyncPayload = {
+  deadlinesActive: boolean;
+  deadlineStartTime: number | null;
+  deadlineDuration: SubmissionDeadlinesDuration;
+  setterDeadlineActive: boolean;
+  setterDeadlineStartTime: number | null;
+  setterDeadlineDuration: SubmissionDeadlinesDuration;
+  setterDeadlineScheduledTime: number | null;
+  setterDeadlineOriginalScheduledTime: number | null;
+  teamLeadDeadlineActive: boolean;
+  teamLeadDeadlineStartTime: number | null;
+  teamLeadDeadlineDuration: SubmissionDeadlinesDuration;
+  teamLeadDeadlineScheduledTime: number | null;
+  repositoriesActive: boolean;
+};
+
+const parseSubmissionDeadlineDuration = (v: unknown): SubmissionDeadlinesDuration | undefined => {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  const days = Number(o.days);
+  const hours = Number(o.hours);
+  const minutes = Number(o.minutes);
+  if (![days, hours, minutes].every((n) => Number.isFinite(n))) return undefined;
+  return { days, hours, minutes };
+};
+
+const submissionDeadlineMsOrNull = (v: unknown): number | null => {
+  const n = parseModerationMs(v);
+  return n === undefined ? null : n;
+};
+
+const buildSubmissionDeadlinesSyncPayload = (input: SubmissionDeadlinesSyncPayload): SubmissionDeadlinesSyncPayload => ({
+  deadlinesActive: input.deadlinesActive,
+  deadlineStartTime: input.deadlineStartTime,
+  deadlineDuration: input.deadlineDuration,
+  setterDeadlineActive: input.setterDeadlineActive,
+  setterDeadlineStartTime: input.setterDeadlineStartTime,
+  setterDeadlineDuration: input.setterDeadlineDuration,
+  setterDeadlineScheduledTime: input.setterDeadlineScheduledTime,
+  setterDeadlineOriginalScheduledTime: input.setterDeadlineOriginalScheduledTime,
+  teamLeadDeadlineActive: input.teamLeadDeadlineActive,
+  teamLeadDeadlineStartTime: input.teamLeadDeadlineStartTime,
+  teamLeadDeadlineDuration: input.teamLeadDeadlineDuration,
+  teamLeadDeadlineScheduledTime: input.teamLeadDeadlineScheduledTime,
+  repositoriesActive: input.repositoriesActive,
+});
+
+const parseSubmissionDeadlinesSyncPayload = (value: unknown): SubmissionDeadlinesSyncPayload | null => {
+  if (!value || typeof value !== 'object') return null;
+  const o = value as Record<string, unknown>;
+  const deadlineDuration =
+    parseSubmissionDeadlineDuration(o.deadlineDuration) ?? { days: 7, hours: 0, minutes: 0 };
+  const setterDeadlineDuration =
+    parseSubmissionDeadlineDuration(o.setterDeadlineDuration) ?? { days: 0, hours: 0, minutes: 7 };
+  const teamLeadDeadlineDuration =
+    parseSubmissionDeadlineDuration(o.teamLeadDeadlineDuration) ?? { days: 0, hours: 0, minutes: 2 };
+  return buildSubmissionDeadlinesSyncPayload({
+    deadlinesActive: Boolean(o.deadlinesActive),
+    deadlineStartTime: submissionDeadlineMsOrNull(o.deadlineStartTime),
+    deadlineDuration,
+    setterDeadlineActive: Boolean(o.setterDeadlineActive),
+    setterDeadlineStartTime: submissionDeadlineMsOrNull(o.setterDeadlineStartTime),
+    setterDeadlineDuration,
+    setterDeadlineScheduledTime: submissionDeadlineMsOrNull(o.setterDeadlineScheduledTime),
+    setterDeadlineOriginalScheduledTime: submissionDeadlineMsOrNull(o.setterDeadlineOriginalScheduledTime),
+    teamLeadDeadlineActive: Boolean(o.teamLeadDeadlineActive),
+    teamLeadDeadlineStartTime: submissionDeadlineMsOrNull(o.teamLeadDeadlineStartTime),
+    teamLeadDeadlineDuration,
+    teamLeadDeadlineScheduledTime: submissionDeadlineMsOrNull(o.teamLeadDeadlineScheduledTime),
+    repositoriesActive: Boolean(o.repositoriesActive),
+  });
+};
+
+const isSameSubmissionDeadlinesPayload = (a: SubmissionDeadlinesSyncPayload, b: SubmissionDeadlinesSyncPayload): boolean =>
+  JSON.stringify(a) === JSON.stringify(b);
+
+const applySubmissionDeadlinesPayload = (
+  parsed: SubmissionDeadlinesSyncPayload,
+  setters: {
+    setDeadlinesActive: (v: boolean) => void;
+    setDeadlineStartTime: (v: number | null) => void;
+    setDeadlineDuration: (v: SubmissionDeadlinesDuration) => void;
+    setSetterDeadlineActive: (v: boolean) => void;
+    setSetterDeadlineStartTime: (v: number | null) => void;
+    setSetterDeadlineDuration: (v: SubmissionDeadlinesDuration) => void;
+    setSetterDeadlineScheduledTime: (v: number | null) => void;
+    setSetterDeadlineOriginalScheduledTime: (v: number | null) => void;
+    setTeamLeadDeadlineActive: (v: boolean) => void;
+    setTeamLeadDeadlineStartTime: (v: number | null) => void;
+    setTeamLeadDeadlineDuration: (v: SubmissionDeadlinesDuration) => void;
+    setTeamLeadDeadlineScheduledTime: (v: number | null) => void;
+    setRepositoriesActive: (v: boolean) => void;
+  }
+) => {
+  const {
+    setDeadlinesActive,
+    setDeadlineStartTime,
+    setDeadlineDuration,
+    setSetterDeadlineActive,
+    setSetterDeadlineStartTime,
+    setSetterDeadlineDuration,
+    setSetterDeadlineScheduledTime,
+    setSetterDeadlineOriginalScheduledTime,
+    setTeamLeadDeadlineActive,
+    setTeamLeadDeadlineStartTime,
+    setTeamLeadDeadlineDuration,
+    setTeamLeadDeadlineScheduledTime,
+    setRepositoriesActive,
+  } = setters;
+  setDeadlinesActive(parsed.deadlinesActive);
+  setDeadlineStartTime(parsed.deadlineStartTime);
+  setDeadlineDuration(parsed.deadlineDuration);
+  setSetterDeadlineActive(parsed.setterDeadlineActive);
+  setSetterDeadlineStartTime(parsed.setterDeadlineStartTime);
+  setSetterDeadlineDuration(parsed.setterDeadlineDuration);
+  setSetterDeadlineScheduledTime(parsed.setterDeadlineScheduledTime);
+  setSetterDeadlineOriginalScheduledTime(parsed.setterDeadlineOriginalScheduledTime);
+  setTeamLeadDeadlineActive(parsed.teamLeadDeadlineActive);
+  setTeamLeadDeadlineStartTime(parsed.teamLeadDeadlineStartTime);
+  setTeamLeadDeadlineDuration(parsed.teamLeadDeadlineDuration);
+  setTeamLeadDeadlineScheduledTime(parsed.teamLeadDeadlineScheduledTime);
+  setRepositoriesActive(parsed.repositoriesActive);
+};
+
 const DEMO_PAPER_ID = 'demo-networking';
 
 const stripDemoPaper = (papers: SubmittedPaper[]): SubmittedPaper[] =>
@@ -1648,6 +1775,11 @@ function App() {
   /** Debounce persisting vetting_session so rapid local updates don't spam Supabase/realtime (reduces UI flicker). */
   const vettingSessionPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastVettingSessionPersistJsonRef = useRef<string>('');
+  /** Wait for first moderation_state fetch before persisting deadlines (avoids clobbering Supabase with stale localStorage). */
+  const [submissionDeadlinesSyncReady, setSubmissionDeadlinesSyncReady] = useState(false);
+  const submissionDeadlinesPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSubmissionDeadlinesPersistJsonRef = useRef<string>('');
+  const hasSeenSubmissionDeadlinesFromSupabaseRef = useRef(false);
   // Track which vetters have joined the session (enabled camera and started their individual session)
   const [joinedVetters, setJoinedVetters] = useState<Set<string>>(new Set());
   // Track restricted vetters (violated rules - cannot rejoin until reactivated by Chief Examiner)
@@ -2240,12 +2372,43 @@ function App() {
     [currentUser?.id, currentUser?.name]
   );
 
-  // Load persisted deadline state so countdowns continue across refresh / logout
+  // Load persisted deadline state (offline / before Supabase hydrates). Legacy shape only had setter/teamLead fields.
   useEffect(() => {
     try {
       const raw = localStorage.getItem('ucu-moderation-deadlines');
       if (!raw) return;
-      const parsed = JSON.parse(raw) as {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const looksLikeFullSync =
+        parsed &&
+        typeof parsed === 'object' &&
+        ('repositoriesActive' in parsed ||
+          'deadlinesActive' in parsed ||
+          'deadlineDuration' in parsed ||
+          'setterDeadlineOriginalScheduledTime' in parsed);
+
+      if (looksLikeFullSync) {
+        const full = parseSubmissionDeadlinesSyncPayload(parsed);
+        if (full) {
+          applySubmissionDeadlinesPayload(full, {
+            setDeadlinesActive,
+            setDeadlineStartTime,
+            setDeadlineDuration,
+            setSetterDeadlineActive,
+            setSetterDeadlineStartTime,
+            setSetterDeadlineDuration,
+            setSetterDeadlineScheduledTime,
+            setSetterDeadlineOriginalScheduledTime,
+            setTeamLeadDeadlineActive,
+            setTeamLeadDeadlineStartTime,
+            setTeamLeadDeadlineDuration,
+            setTeamLeadDeadlineScheduledTime,
+            setRepositoriesActive,
+          });
+        }
+        return;
+      }
+
+      const legacy = parsed as {
         setterDeadlineActive?: boolean;
         setterDeadlineStartTime?: number | null;
         setterDeadlineDuration?: { days: number; hours: number; minutes: number };
@@ -2255,63 +2418,102 @@ function App() {
         teamLeadDeadlineDuration?: { days: number; hours: number; minutes: number };
         teamLeadDeadlineScheduledTime?: number | null;
       };
-
-      if (typeof parsed.setterDeadlineActive === 'boolean') {
-        setSetterDeadlineActive(parsed.setterDeadlineActive);
+      if (typeof legacy.setterDeadlineActive === 'boolean') {
+        setSetterDeadlineActive(legacy.setterDeadlineActive);
       }
-      if (typeof parsed.setterDeadlineStartTime === 'number') {
-        setSetterDeadlineStartTime(parsed.setterDeadlineStartTime);
+      if (typeof legacy.setterDeadlineStartTime === 'number') {
+        setSetterDeadlineStartTime(legacy.setterDeadlineStartTime);
       }
-      if (parsed.setterDeadlineDuration) {
-        setSetterDeadlineDuration(parsed.setterDeadlineDuration);
+      if (legacy.setterDeadlineDuration) {
+        setSetterDeadlineDuration(legacy.setterDeadlineDuration);
       }
-      if (typeof parsed.setterDeadlineScheduledTime === 'number') {
-        setSetterDeadlineScheduledTime(parsed.setterDeadlineScheduledTime);
+      if (typeof legacy.setterDeadlineScheduledTime === 'number') {
+        setSetterDeadlineScheduledTime(legacy.setterDeadlineScheduledTime);
       }
-
-      if (typeof parsed.teamLeadDeadlineActive === 'boolean') {
-        setTeamLeadDeadlineActive(parsed.teamLeadDeadlineActive);
+      if (typeof legacy.teamLeadDeadlineActive === 'boolean') {
+        setTeamLeadDeadlineActive(legacy.teamLeadDeadlineActive);
       }
-      if (typeof parsed.teamLeadDeadlineStartTime === 'number') {
-        setTeamLeadDeadlineStartTime(parsed.teamLeadDeadlineStartTime);
+      if (typeof legacy.teamLeadDeadlineStartTime === 'number') {
+        setTeamLeadDeadlineStartTime(legacy.teamLeadDeadlineStartTime);
       }
-      if (parsed.teamLeadDeadlineDuration) {
-        setTeamLeadDeadlineDuration(parsed.teamLeadDeadlineDuration);
+      if (legacy.teamLeadDeadlineDuration) {
+        setTeamLeadDeadlineDuration(legacy.teamLeadDeadlineDuration);
       }
-      if (typeof parsed.teamLeadDeadlineScheduledTime === 'number') {
-        setTeamLeadDeadlineScheduledTime(parsed.teamLeadDeadlineScheduledTime);
+      if (typeof legacy.teamLeadDeadlineScheduledTime === 'number') {
+        setTeamLeadDeadlineScheduledTime(legacy.teamLeadDeadlineScheduledTime);
       }
     } catch (error) {
       console.error('Error loading deadline state from localStorage:', error);
     }
   }, []);
 
-  // Persist deadline state whenever it changes
+  // Persist submission deadlines to localStorage + Supabase (realtime pushes updates to other laptops).
   useEffect(() => {
+    if (!submissionDeadlinesSyncReady) return;
+    const canPersist =
+      hasSeenSubmissionDeadlinesFromSupabaseRef.current || currentUserHasRole('Chief Examiner');
+    if (!canPersist) return;
+    const payload = buildSubmissionDeadlinesSyncPayload({
+      deadlinesActive,
+      deadlineStartTime: _deadlineStartTime,
+      deadlineDuration,
+      setterDeadlineActive,
+      setterDeadlineStartTime,
+      setterDeadlineDuration,
+      setterDeadlineScheduledTime,
+      setterDeadlineOriginalScheduledTime,
+      teamLeadDeadlineActive,
+      teamLeadDeadlineStartTime,
+      teamLeadDeadlineDuration,
+      teamLeadDeadlineScheduledTime,
+      repositoriesActive,
+    });
     try {
-      const payload = {
-        setterDeadlineActive,
-        setterDeadlineStartTime,
-        setterDeadlineDuration,
-        setterDeadlineScheduledTime,
-        teamLeadDeadlineActive,
-        teamLeadDeadlineStartTime,
-        teamLeadDeadlineDuration,
-        teamLeadDeadlineScheduledTime,
-      };
       localStorage.setItem('ucu-moderation-deadlines', JSON.stringify(payload));
     } catch (error) {
       console.error('Error saving deadline state to localStorage:', error);
     }
+    const json = JSON.stringify(payload);
+    if (json === lastSubmissionDeadlinesPersistJsonRef.current) {
+      return;
+    }
+    if (submissionDeadlinesPersistTimerRef.current) {
+      clearTimeout(submissionDeadlinesPersistTimerRef.current);
+    }
+    submissionDeadlinesPersistTimerRef.current = setTimeout(() => {
+      submissionDeadlinesPersistTimerRef.current = null;
+      lastSubmissionDeadlinesPersistJsonRef.current = json;
+      void supabase
+        .from('moderation_state')
+        .upsert(
+          { key: 'submission_deadlines', value: payload, updated_at: new Date().toISOString() },
+          { onConflict: 'key' }
+        )
+        .then(({ error }) => {
+          if (error) console.warn('Failed to persist submission_deadlines to Supabase:', error.message);
+        });
+    }, 400);
+    return () => {
+      if (submissionDeadlinesPersistTimerRef.current) {
+        clearTimeout(submissionDeadlinesPersistTimerRef.current);
+        submissionDeadlinesPersistTimerRef.current = null;
+      }
+    };
   }, [
+    submissionDeadlinesSyncReady,
+    deadlinesActive,
+    _deadlineStartTime,
+    deadlineDuration,
     setterDeadlineActive,
     setterDeadlineStartTime,
     setterDeadlineDuration,
     setterDeadlineScheduledTime,
+    setterDeadlineOriginalScheduledTime,
     teamLeadDeadlineActive,
     teamLeadDeadlineStartTime,
     teamLeadDeadlineDuration,
     teamLeadDeadlineScheduledTime,
+    repositoriesActive,
   ]);
 
   // Persist submittedPapers whenever they change
@@ -2377,6 +2579,8 @@ function App() {
   // Load vetting_session and moderation_schedule from Supabase when user context is ready
   useEffect(() => {
     const loadModerationState = async () => {
+      setSubmissionDeadlinesSyncReady(false);
+      hasSeenSubmissionDeadlinesFromSupabaseRef.current = false;
       try {
         const { data: liveVetterRows, error: liveVetterError } = await supabase
           .from('moderation_state')
@@ -2408,6 +2612,7 @@ function App() {
           .in('key', [
             'vetting_session',
             'moderation_schedule',
+            'submission_deadlines',
             'restricted_vetters',
             'removed_from_vetting_ids',
             'checklist_comments_live',
@@ -2476,9 +2681,38 @@ function App() {
               return isSameChecklistComments(prev, merged) ? prev : merged;
             });
           }
+          if (row.key === 'submission_deadlines' && value && typeof value === 'object') {
+            // Skip seeded placeholder {}; otherwise an empty object would zero out deadlines after localStorage hydrate.
+            if (Object.keys(value as object).length === 0) {
+              continue;
+            }
+            const parsed = parseSubmissionDeadlinesSyncPayload(value);
+            if (parsed) {
+              const stable = buildSubmissionDeadlinesSyncPayload(parsed);
+              lastSubmissionDeadlinesPersistJsonRef.current = JSON.stringify(stable);
+              applySubmissionDeadlinesPayload(stable, {
+                setDeadlinesActive,
+                setDeadlineStartTime,
+                setDeadlineDuration,
+                setSetterDeadlineActive,
+                setSetterDeadlineStartTime,
+                setSetterDeadlineDuration,
+                setSetterDeadlineScheduledTime,
+                setSetterDeadlineOriginalScheduledTime,
+                setTeamLeadDeadlineActive,
+                setTeamLeadDeadlineStartTime,
+                setTeamLeadDeadlineDuration,
+                setTeamLeadDeadlineScheduledTime,
+                setRepositoriesActive,
+              });
+              hasSeenSubmissionDeadlinesFromSupabaseRef.current = true;
+            }
+          }
         }
       } catch (err) {
         console.error('Error loading moderation state:', err);
+      } finally {
+        setSubmissionDeadlinesSyncReady(true);
       }
     };
     loadModerationState();
@@ -2631,6 +2865,33 @@ function App() {
             setModerationSchedule((prev) =>
               isSameModerationScheduleState(prev, nextSchedule) ? prev : nextSchedule
             );
+          }
+          if (row.key === 'submission_deadlines' && row.value && typeof row.value === 'object') {
+            // Skip seeded placeholder {}; otherwise an empty object could zero out deadlines.
+            if (Object.keys(row.value as object).length === 0) return;
+            const parsed = parseSubmissionDeadlinesSyncPayload(row.value);
+            if (!parsed) return;
+            const stable = buildSubmissionDeadlinesSyncPayload(parsed);
+            const json = JSON.stringify(stable);
+            if (json === lastSubmissionDeadlinesPersistJsonRef.current) {
+              return;
+            }
+            lastSubmissionDeadlinesPersistJsonRef.current = json;
+            applySubmissionDeadlinesPayload(stable, {
+              setDeadlinesActive,
+              setDeadlineStartTime,
+              setDeadlineDuration,
+              setSetterDeadlineActive,
+              setSetterDeadlineStartTime,
+              setSetterDeadlineDuration,
+              setSetterDeadlineScheduledTime,
+              setSetterDeadlineOriginalScheduledTime,
+              setTeamLeadDeadlineActive,
+              setTeamLeadDeadlineStartTime,
+              setTeamLeadDeadlineDuration,
+              setTeamLeadDeadlineScheduledTime,
+              setRepositoriesActive,
+            });
           }
           if (row.key === 'restricted_vetters' && row.value && typeof row.value === 'object') {
             const ids = (row.value as { ids?: unknown }).ids;
