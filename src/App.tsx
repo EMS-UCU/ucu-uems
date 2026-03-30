@@ -21891,7 +21891,6 @@ function VettingAndAnnotations({
 
   const hasCustomChecklist = checklist !== digitalChecklist;
   const hasCustomChecklistPdf = Boolean(customChecklistPdf?.url);
-  const hasUploadedChecklist = Boolean(customChecklistPdf) || hasCustomChecklist;
   
   // Vetters can only see paper after they've joined.
   // Checklist for vetters appears only when Chief has uploaded one.
@@ -21900,12 +21899,11 @@ function VettingAndAnnotations({
   const canViewPaper =
     workflow?.stage !== 'Approved' &&
     (isChiefExaminer || (isVetter && vetterHasJoined));
-  const canViewChecklist =
-    canViewPaper &&
-    (isChiefExaminer || hasUploadedChecklist);
+  // The digital checklist is always available, even when no custom/uploaded checklist exists on this browser.
+  const canViewChecklist = canViewPaper;
   const canViewPaperAndChecklist =
     workflow?.stage !== 'Approved' &&
-    (isChiefExaminer || (isVetter && vetterHasJoined && hasUploadedChecklist));
+    (isChiefExaminer || (isVetter && vetterHasJoined));
   
   // Vetters can start their session only when global session is active, they haven't joined yet, and they're not restricted
   const canVetterStartSession = isVetter && !isVetterRestricted && vettingSession.active && !vetterHasJoined;
@@ -22226,7 +22224,7 @@ function VettingAndAnnotations({
   const defaultChecklistWindows = selectedPaper ? (
     <div className="space-y-4">
       {/* Editable Checklist - Click to type directly on items */}
-      {(isVetter && vetterHasJoined && hasUploadedChecklist) && !hasCustomChecklistPdf && (
+      {(isVetter && vetterHasJoined) && !hasCustomChecklistPdf && (
         <div className="rounded-xl border-2 border-blue-200 bg-white p-4 shadow-lg">
           <div className="mb-4">
             <h3 className="text-sm font-bold text-slate-800 mb-2">Moderation Checklist - Click any item to write on it</h3>
