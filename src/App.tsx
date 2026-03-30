@@ -1890,7 +1890,7 @@ function App() {
   }, [vetterMonitoring]);
   const persistLiveVetterMonitoring = useCallback(async (entry: SerializableVetterMonitoring) => {
     try {
-      await supabase
+      const { error } = await supabase
         .from('moderation_state')
         .upsert(
           {
@@ -1900,6 +1900,9 @@ function App() {
           },
           { onConflict: 'key' }
         );
+      if (error) {
+        console.warn('Failed to persist live vetter monitoring state:', error.message);
+      }
     } catch (error) {
       console.warn('Failed to persist live vetter monitoring state:', error);
     }
@@ -1911,7 +1914,8 @@ function App() {
       joinedAt: entry.joinedAt,
       warnings: entry.warnings,
       violations: entry.violations,
-      cameraActive: entry.cameraActive && isCameraStreamLive(entry.cameraStream),
+      // Keep the explicit session flag; strict live-track checks can flap and hide valid snapshots remotely.
+      cameraActive: entry.cameraActive,
       cameraSnapshotDataUrl: entry.cameraSnapshotDataUrl,
       cameraSnapshotCapturedAt: entry.cameraSnapshotCapturedAt,
       updatedAt: new Date().toISOString(),
@@ -18057,19 +18061,6 @@ function RepositoryPapersPanel({
       kicker="Central Exam Repository"
       description="View all papers compiled and submitted by Team Lead. These papers are ready for Chief Examiner AI similarity analysis before vetting."
     >
-      {papersReadyForAnalysis.length > 0 && (
-        <div className="mb-4 flex justify-end">
-          <button
-            type="button"
-            className="rounded-lg bg-red-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-red-700"
-            onClick={async () => {
-              await onDeleteAllPapers(papersReadyForAnalysis.map((paper) => paper.id));
-            }}
-          >
-            Delete All Repository Papers
-          </button>
-        </div>
-      )}
       {papersReadyForAnalysis.length === 0 ? (
         <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
           No papers are currently in the repository for this semester. All papers have been sent to vetting or are in progress.
@@ -21900,7 +21891,6 @@ function VettingAndAnnotations({
 
   const hasCustomChecklist = checklist !== digitalChecklist;
   const hasCustomChecklistPdf = Boolean(customChecklistPdf?.url);
-  const hasUploadedChecklist = Boolean(customChecklistPdf) || hasCustomChecklist;
   
   // Vetters can only see paper after they've joined.
   // Checklist for vetters appears only when Chief has uploaded one.
@@ -21909,12 +21899,11 @@ function VettingAndAnnotations({
   const canViewPaper =
     workflow?.stage !== 'Approved' &&
     (isChiefExaminer || (isVetter && vetterHasJoined));
-  const canViewChecklist =
-    canViewPaper &&
-    (isChiefExaminer || hasUploadedChecklist);
+  // The digital checklist is always available, even when no custom/uploaded checklist exists on this browser.
+  const canViewChecklist = canViewPaper;
   const canViewPaperAndChecklist =
     workflow?.stage !== 'Approved' &&
-    (isChiefExaminer || (isVetter && vetterHasJoined && hasUploadedChecklist));
+    (isChiefExaminer || (isVetter && vetterHasJoined));
   
   // Vetters can start their session only when global session is active, they haven't joined yet, and they're not restricted
   const canVetterStartSession = isVetter && !isVetterRestricted && vettingSession.active && !vetterHasJoined;
@@ -22235,7 +22224,7 @@ function VettingAndAnnotations({
   const defaultChecklistWindows = selectedPaper ? (
     <div className="space-y-4">
       {/* Editable Checklist - Click to type directly on items */}
-      {(isVetter && vetterHasJoined && hasUploadedChecklist) && !hasCustomChecklistPdf && (
+      {(isVetter && vetterHasJoined) && !hasCustomChecklistPdf && (
         <div className="rounded-xl border-2 border-blue-200 bg-white p-4 shadow-lg">
           <div className="mb-4">
             <h3 className="text-sm font-bold text-slate-800 mb-2">Moderation Checklist - Click any item to write on it</h3>
@@ -23266,7 +23255,7 @@ function VettingAndAnnotations({
                         </div>
 
                         <div className="mb-3 rounded-lg overflow-hidden bg-slate-900 aspect-video relative border-2 border-green-500">
-                          {(monitoring.cameraActive && isCameraStreamLive(monitoring.cameraStream)) || (!monitoring.cameraStream && monitoring.cameraActive) ? (
+                          {(monitoring.cameraActive && isCameraStreamLive(monitoring.cameraStream)) || (!monitoring.cameraStream && monitoring.cameraActive) || Boolean(monitoring.cameraSnapshotDataUrl) ? (
                             <>
                               <div className="absolute top-2 left-2 z-10 bg-red-600 text-white text-[0.6rem] px-2 py-1 rounded font-bold flex items-center gap-1">
                                 <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse"></span>
