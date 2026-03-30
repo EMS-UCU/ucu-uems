@@ -301,6 +301,8 @@ interface VetterMonitoring {
   vetterName: string;
   joinedAt: number;
   cameraStream: MediaStream | null;
+  cameraSnapshotDataUrl?: string;
+  cameraSnapshotCapturedAt?: number;
   cameraActive: boolean;
   warnings: VetterWarning[];
   violations: number;
@@ -313,6 +315,8 @@ type SerializableVetterMonitoring = {
   warnings: VetterWarning[];
   violations: number;
   cameraActive: boolean;
+  cameraSnapshotDataUrl?: string;
+  cameraSnapshotCapturedAt?: number;
   updatedAt: string;
 };
 
@@ -1834,6 +1838,17 @@ function App() {
     return typeof value === 'number' && Number.isFinite(value) ? value : null;
   };
   const [restrictedVetters, setRestrictedVetters] = useState<Set<string>>(loadRestrictedVetters);
+  const persistRestrictedVettersNow = useCallback((ids: string[]) => {
+    void supabase
+      .from('moderation_state')
+      .upsert(
+        { key: 'restricted_vetters', value: { ids }, updated_at: new Date().toISOString() },
+        { onConflict: 'key' }
+      )
+      .then(({ error }) => {
+        if (error) console.warn('Failed to persist restricted_vetters to Supabase:', error.message);
+      });
+  }, []);
 
   // Papers manually removed from vetting (must not re-appear unless Chief re-sends).
   const loadRemovedFromVettingIds = (): Set<string> => {
@@ -1889,8 +1904,77 @@ function App() {
       console.warn('Failed to persist live vetter monitoring state:', error);
     }
   }, []);
+  const buildSerializableVetterMonitoring = useCallback(
+    (entry: VetterMonitoring): SerializableVetterMonitoring => ({
+      vetterId: entry.vetterId,
+      vetterName: entry.vetterName,
+      joinedAt: entry.joinedAt,
+      warnings: entry.warnings,
+      violations: entry.violations,
+      cameraActive: entry.cameraActive && isCameraStreamLive(entry.cameraStream),
+      cameraSnapshotDataUrl: entry.cameraSnapshotDataUrl,
+      cameraSnapshotCapturedAt: entry.cameraSnapshotCapturedAt,
+      updatedAt: new Date().toISOString(),
+    }),
+    []
+  );
   // Store camera stream references for Chief Examiner monitoring
   const vetterCameraStreams = useRef<Map<string, MediaStream>>(new Map());
+  const vetterSnapshotIntervals = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  const captureSnapshotDataUrl = useCallback((stream: MediaStream | null | undefined): string | null => {
+    if (!stream || !isCameraStreamLive(stream)) return null;
+    try {
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+      video.width = 320;
+      video.height = 240;
+      const canvas = document.createElement('canvas');
+      canvas.width = 320;
+      canvas.height = 240;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      video.play().catch(() => {});
+      ctx.drawImage(video, 0, 0, 320, 240);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.62);
+      video.pause();
+      video.srcObject = null;
+      return dataUrl;
+    } catch {
+      return null;
+    }
+  }, []);
+  const stopSnapshotBroadcast = useCallback((vetterId: string) => {
+    const timer = vetterSnapshotIntervals.current.get(vetterId);
+    if (timer) {
+      clearInterval(timer);
+      vetterSnapshotIntervals.current.delete(vetterId);
+    }
+  }, []);
+  const startSnapshotBroadcast = useCallback((vetterId: string, stream: MediaStream) => {
+    stopSnapshotBroadcast(vetterId);
+    const publish = () => {
+      const snapshot = captureSnapshotDataUrl(stream);
+      if (!snapshot) return;
+      const capturedAt = Date.now();
+      setVetterMonitoring((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(vetterId);
+        if (!existing) return prev;
+        const updated: VetterMonitoring = {
+          ...existing,
+          cameraSnapshotDataUrl: snapshot,
+          cameraSnapshotCapturedAt: capturedAt,
+        };
+        next.set(vetterId, updated);
+        void persistLiveVetterMonitoring(buildSerializableVetterMonitoring(updated));
+        return next;
+      });
+    };
+    publish();
+    vetterSnapshotIntervals.current.set(vetterId, setInterval(publish, 2500));
+  }, [buildSerializableVetterMonitoring, captureSnapshotDataUrl, persistLiveVetterMonitoring, stopSnapshotBroadcast]);
   // Store MediaRecorder instances for video recording during vetting sessions
   const vetterMediaRecorders = useRef<Map<string, MediaRecorder>>(new Map());
   // Store recording chunks for each vetter
@@ -2625,6 +2709,11 @@ function App() {
                 vetterName: value.vetterName ?? existing?.vetterName ?? 'Vetter',
                 joinedAt: typeof value.joinedAt === 'number' ? value.joinedAt : existing?.joinedAt ?? Date.now(),
                 cameraStream: existing?.cameraStream ?? null,
+                  cameraSnapshotDataUrl: typeof value.cameraSnapshotDataUrl === 'string' ? value.cameraSnapshotDataUrl : existing?.cameraSnapshotDataUrl,
+                  cameraSnapshotCapturedAt:
+                    typeof value.cameraSnapshotCapturedAt === 'number'
+                      ? value.cameraSnapshotCapturedAt
+                      : existing?.cameraSnapshotCapturedAt,
                 cameraActive:
                   typeof value.cameraActive === 'boolean'
                     ? value.cameraActive
@@ -2995,6 +3084,11 @@ function App() {
                   vetterName: value.vetterName ?? existing?.vetterName ?? 'Vetter',
                   joinedAt: typeof value.joinedAt === 'number' ? value.joinedAt : existing?.joinedAt ?? Date.now(),
                   cameraStream: existing?.cameraStream ?? null,
+                  cameraSnapshotDataUrl: typeof value.cameraSnapshotDataUrl === 'string' ? value.cameraSnapshotDataUrl : existing?.cameraSnapshotDataUrl,
+                  cameraSnapshotCapturedAt:
+                    typeof value.cameraSnapshotCapturedAt === 'number'
+                      ? value.cameraSnapshotCapturedAt
+                      : existing?.cameraSnapshotCapturedAt,
                   cameraActive:
                     typeof value.cameraActive === 'boolean'
                       ? value.cameraActive
@@ -4640,15 +4734,7 @@ function App() {
             cameraActive: false,
           };
           next.set(currentUser.id!, updatedEntry);
-          void persistLiveVetterMonitoring({
-            vetterId: updatedEntry.vetterId,
-            vetterName: updatedEntry.vetterName,
-            joinedAt: updatedEntry.joinedAt,
-            warnings: updatedEntry.warnings,
-            violations: updatedEntry.violations,
-            cameraActive: false,
-            updatedAt: new Date().toISOString(),
-          });
+          void persistLiveVetterMonitoring(buildSerializableVetterMonitoring(updatedEntry));
           return next;
         });
         alert('Camera disconnected. Please ensure your camera remains active during the session.');
@@ -5689,7 +5775,9 @@ function App() {
           setRestrictedVetters((prev) => {
             const next = new Set(prev);
             next.delete(currentUser.id);
-            localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+            const ids = Array.from(next);
+            localStorage.setItem('ucu-restricted-vetters', JSON.stringify(ids));
+            persistRestrictedVettersNow(ids);
             return next;
           });
           setOneStrikeVetters((prev) => {
@@ -5765,7 +5853,9 @@ function App() {
       setRestrictedVetters(prev => {
         const next = new Set(prev);
         next.add(currentUser.id!);
-        localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+        const ids = Array.from(next);
+        localStorage.setItem('ucu-restricted-vetters', JSON.stringify(ids));
+        persistRestrictedVettersNow(ids);
         setRestrictedVetterTimestamp(currentUser.id!);
         return next;
       });
@@ -5822,6 +5912,8 @@ function App() {
         stream.getTracks().forEach((track) => track.stop());
       });
       vetterCameraStreams.current.clear();
+      vetterSnapshotIntervals.current.forEach((timer) => clearInterval(timer));
+      vetterSnapshotIntervals.current.clear();
       try {
         const { error: liveDeleteError } = await supabase
           .from('moderation_state')
@@ -6008,22 +6100,17 @@ function App() {
           vetterName: currentUser.name ?? 'Unknown',
           joinedAt: Date.now(),
           cameraStream,
+          cameraSnapshotDataUrl: captureSnapshotDataUrl(cameraStream) ?? undefined,
+          cameraSnapshotCapturedAt: Date.now(),
           cameraActive: true,
           warnings: reuseExisting ? existing.warnings ?? [] : [],
           violations: preservedViolations,
         };
         newMap.set(currentUser.id!, entry);
-        void persistLiveVetterMonitoring({
-          vetterId: entry.vetterId,
-          vetterName: entry.vetterName,
-          joinedAt: entry.joinedAt,
-          warnings: entry.warnings,
-          violations: entry.violations,
-          cameraActive: true,
-          updatedAt: new Date().toISOString(),
-        });
+        void persistLiveVetterMonitoring(buildSerializableVetterMonitoring(entry));
         return newMap;
       });
+      startSnapshotBroadcast(currentUser.id, cameraStream);
 
       // Start video recording for audit purposes (best-effort)
       try {
@@ -6132,6 +6219,7 @@ function App() {
       stream.getTracks().forEach(track => track.stop());
       vetterCameraStreams.current.delete(vetterId);
     }
+    stopSnapshotBroadcast(vetterId);
     
     // Remove local stream from monitoring and keep summary visible to Chief dashboard
     setVetterMonitoring(prev => {
@@ -6144,15 +6232,7 @@ function App() {
           cameraActive: false,
         };
         newMap.set(vetterId, updatedEntry);
-        void persistLiveVetterMonitoring({
-          vetterId: updatedEntry.vetterId,
-          vetterName: updatedEntry.vetterName,
-          joinedAt: updatedEntry.joinedAt,
-          warnings: updatedEntry.warnings,
-          violations: updatedEntry.violations,
-          cameraActive: false,
-          updatedAt: new Date().toISOString(),
-        });
+        void persistLiveVetterMonitoring(buildSerializableVetterMonitoring(updatedEntry));
       }
       return newMap;
     });
@@ -6162,7 +6242,9 @@ function App() {
       const newSet = new Set(prev);
       newSet.add(vetterId);
       // Persist to localStorage
-      localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(newSet)));
+      const ids = Array.from(newSet);
+      localStorage.setItem('ucu-restricted-vetters', JSON.stringify(ids));
+      persistRestrictedVettersNow(ids);
       setRestrictedVetterTimestamp(vetterId);
       return newSet;
     });
@@ -6231,15 +6313,7 @@ function App() {
           violations: newCount,
         };
         newMap.set(vetterId, updatedEntry);
-        void persistLiveVetterMonitoring({
-          vetterId: updatedEntry.vetterId,
-          vetterName: updatedEntry.vetterName,
-          joinedAt: updatedEntry.joinedAt,
-          warnings: updatedEntry.warnings,
-          violations: updatedEntry.violations,
-          cameraActive: updatedEntry.cameraActive && isCameraStreamLive(updatedEntry.cameraStream),
-          updatedAt: new Date().toISOString(),
-        });
+        void persistLiveVetterMonitoring(buildSerializableVetterMonitoring(updatedEntry));
       } else {
         const updatedEntry: VetterMonitoring = {
           vetterId,
@@ -6251,15 +6325,7 @@ function App() {
           violations: newCount,
         };
         newMap.set(vetterId, updatedEntry);
-        void persistLiveVetterMonitoring({
-          vetterId: updatedEntry.vetterId,
-          vetterName: updatedEntry.vetterName,
-          joinedAt: updatedEntry.joinedAt,
-          warnings: updatedEntry.warnings,
-          violations: updatedEntry.violations,
-          cameraActive: false,
-          updatedAt: new Date().toISOString(),
-        });
+        void persistLiveVetterMonitoring(buildSerializableVetterMonitoring(updatedEntry));
       }
       return newMap;
     });
@@ -6277,6 +6343,7 @@ function App() {
         stream.getTracks().forEach(track => track.stop());
         vetterCameraStreams.current.delete(vetterId);
       }
+      stopSnapshotBroadcast(vetterId);
 
       // Persist one-strike so that when this vetter tries to start/join again they are restricted (no infinite rejoin)
       setOneStrikeVetters(prev => {
@@ -6441,15 +6508,7 @@ function App() {
           violations: existing.violations + (severity === 'critical' ? 1 : 0),
         };
         newMap.set(vetterId, updatedEntry);
-        void persistLiveVetterMonitoring({
-          vetterId: updatedEntry.vetterId,
-          vetterName: updatedEntry.vetterName,
-          joinedAt: updatedEntry.joinedAt,
-          warnings: updatedEntry.warnings,
-          violations: updatedEntry.violations,
-          cameraActive: updatedEntry.cameraActive && isCameraStreamLive(updatedEntry.cameraStream),
-          updatedAt: new Date().toISOString(),
-        });
+        void persistLiveVetterMonitoring(buildSerializableVetterMonitoring(updatedEntry));
       } else {
         // Initialize monitoring data if it doesn't exist (shouldn't happen but safety check)
         const updatedEntry: VetterMonitoring = {
@@ -6462,15 +6521,7 @@ function App() {
           violations: severity === 'critical' ? 1 : 0,
         };
         newMap.set(vetterId, updatedEntry);
-        void persistLiveVetterMonitoring({
-          vetterId: updatedEntry.vetterId,
-          vetterName: updatedEntry.vetterName,
-          joinedAt: updatedEntry.joinedAt,
-          warnings: updatedEntry.warnings,
-          violations: updatedEntry.violations,
-          cameraActive: false,
-          updatedAt: new Date().toISOString(),
-        });
+        void persistLiveVetterMonitoring(buildSerializableVetterMonitoring(updatedEntry));
       }
       return newMap;
     });
@@ -6841,6 +6892,8 @@ function App() {
           stream.getTracks().forEach((track) => track.stop());
         });
         vetterCameraStreams.current.clear();
+        vetterSnapshotIntervals.current.forEach((timer) => clearInterval(timer));
+        vetterSnapshotIntervals.current.clear();
         liveMap.forEach((_m, vetterId) => {
           void supabase.from('moderation_state').delete().eq('key', `vetter_live_${vetterId}`);
         });
@@ -7249,6 +7302,7 @@ function App() {
         vetterCameraStreams.current.delete(currentUser.id);
         console.log(`📹 Stopped camera stream for vetter ${currentUser.id}`);
       }
+      stopSnapshotBroadcast(currentUser.id);
     }
     
     // Disable safe browser mode and stop all camera streams
@@ -7274,6 +7328,7 @@ function App() {
     vetterCameraStreams.current.forEach((stream, vetterId) => {
       stream.getTracks().forEach(track => track.stop());
       vetterCameraStreams.current.delete(vetterId);
+      stopSnapshotBroadcast(vetterId);
     });
     
     if (currentUser?.id) {
@@ -7578,6 +7633,7 @@ function App() {
     vetterCameraStreams.current.forEach((stream, vetterId) => {
       stream.getTracks().forEach(track => track.stop());
       console.log(`📹 Stopped camera stream for vetter ${vetterId}`);
+      stopSnapshotBroadcast(vetterId);
     });
     vetterCameraStreams.current.clear();
     
@@ -9421,7 +9477,9 @@ function App() {
             setRestrictedVetters(prev => {
               const newSet = new Set(prev);
               newSet.delete(vetterId);
-              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(newSet)));
+              const ids = Array.from(newSet);
+              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(ids));
+              persistRestrictedVettersNow(ids);
               return newSet;
             });
             setOneStrikeVetters(prev => {
@@ -9661,7 +9719,9 @@ function App() {
             setRestrictedVetters(prev => {
               const newSet = new Set(prev);
               newSet.delete(vetterId);
-              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(newSet)));
+              const ids = Array.from(newSet);
+              localStorage.setItem('ucu-restricted-vetters', JSON.stringify(ids));
+              persistRestrictedVettersNow(ids);
               return newSet;
             });
             setOneStrikeVetters(prev => {
@@ -9805,6 +9865,7 @@ function App() {
             vetterCameraStreams.current.forEach((stream, vetterId) => {
               stream.getTracks().forEach(track => track.stop());
               console.log(`📹 Stopped camera stream for vetter ${vetterId} (session ended by Chief Examiner)`);
+              stopSnapshotBroadcast(vetterId);
             });
             vetterCameraStreams.current.clear();
             
@@ -21779,13 +21840,14 @@ function VettingAndAnnotations({
 
   const hasCustomChecklist = checklist !== digitalChecklist;
   const hasCustomChecklistPdf = Boolean(customChecklistPdf?.url);
+  const hasUploadedChecklist = Boolean(customChecklistPdf) || hasCustomChecklist;
   
   // Vetters can only see paper/checklist after they've joined.
   // Chief Examiner can see everything while the workflow is not yet fully approved.
   // Once the paper is approved, hide the vetting & annotations layout for everyone.
   const canViewPaperAndChecklist =
     workflow?.stage !== 'Approved' &&
-    (isChiefExaminer || (isVetter && vetterHasJoined));
+    (isChiefExaminer || (isVetter && vetterHasJoined && hasUploadedChecklist));
   
   // Vetters can start their session only when global session is active, they haven't joined yet, and they're not restricted
   const canVetterStartSession = isVetter && !isVetterRestricted && vettingSession.active && !vetterHasJoined;
@@ -22106,7 +22168,7 @@ function VettingAndAnnotations({
   const defaultChecklistWindows = selectedPaper ? (
     <div className="space-y-4">
       {/* Editable Checklist - Click to type directly on items */}
-      {(isVetter && vetterHasJoined) && !hasCustomChecklistPdf && (
+      {(isVetter && vetterHasJoined && hasUploadedChecklist) && !hasCustomChecklistPdf && (
         <div className="rounded-xl border-2 border-blue-200 bg-white p-4 shadow-lg">
           <div className="mb-4">
             <h3 className="text-sm font-bold text-slate-800 mb-2">Moderation Checklist - Click any item to write on it</h3>
@@ -23090,15 +23152,15 @@ function VettingAndAnnotations({
                     Waiting for vetters to join...
                   </p>
                   <p className="text-xs text-slate-600 mt-1">
-                    As soon as a vetter starts their session, suspicious actions are logged here in real time.
+                    As soon as a vetter starts their session, suspicious actions and face snapshots are logged here in real time.
                   </p>
                 </div>
               ) : vettingSession.active ? (
                 <div className="grid gap-4 md:grid-cols-2">
                   {liveMonitoringEntriesForCurrentSession.map(([vetterId, monitoring]) => {
-                    const warnings = monitoring.warnings || [];
+                    const warnings: VetterWarning[] = monitoring.warnings || [];
                     const recentWarnings = [...warnings].reverse();
-                    const criticalWarnings = warnings.filter(w => w.severity === 'critical');
+                    const criticalWarnings = warnings.filter((w: VetterWarning) => w.severity === 'critical');
                     
                     return (
                       <div
@@ -23137,18 +23199,35 @@ function VettingAndAnnotations({
                                 <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse"></span>
                                 LIVE CAMERA
                               </div>
-                              <video
-                                ref={(video) => {
-                                  if (video && monitoring.cameraStream) {
-                                    video.srcObject = monitoring.cameraStream;
-                                    video.play().catch(err => console.error('Camera playback error:', err));
-                                  }
-                                }}
-                                autoPlay
-                                playsInline
-                                muted
-                                className="w-full h-full object-cover"
-                              />
+                              {monitoring.cameraStream ? (
+                                <video
+                                  ref={(video) => {
+                                    if (video && monitoring.cameraStream) {
+                                      video.srcObject = monitoring.cameraStream;
+                                      video.play().catch(err => console.error('Camera playback error:', err));
+                                    }
+                                  }}
+                                  autoPlay
+                                  playsInline
+                                  muted
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : monitoring.cameraSnapshotDataUrl ? (
+                                <>
+                                  <img
+                                    src={monitoring.cameraSnapshotDataUrl}
+                                    alt={`${monitoring.vetterName} face snapshot`}
+                                    className="h-full w-full object-cover"
+                                  />
+                                  <div className="absolute bottom-2 left-2 z-10 rounded bg-black/65 px-2 py-1 text-[0.6rem] text-white">
+                                    Snapshot {monitoring.cameraSnapshotCapturedAt ? new Date(monitoring.cameraSnapshotCapturedAt).toLocaleTimeString() : 'now'}
+                                  </div>
+                                </>
+                              ) : (
+                                <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 text-[0.65rem] text-white">
+                                  Waiting for first face snapshot...
+                                </div>
+                              )}
                             </>
                           ) : (
                             <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-900/90">
