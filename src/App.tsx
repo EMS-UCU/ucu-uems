@@ -2221,6 +2221,25 @@ function App() {
     } catch (error) {
       console.error('Error clearing checklist state for new vetting cycle:', error);
     }
+    void supabase
+      .from('moderation_state')
+      .upsert(
+        {
+          key: 'forwarded_checklist',
+          value: {
+            forwarded: false,
+            checklistComments: {},
+            forwardedAt: new Date().toISOString(),
+          },
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'key' }
+      )
+      .then(({ error }) => {
+        if (error) {
+          console.warn('Failed to clear forwarded checklist for new vetting cycle:', error.message);
+        }
+      });
     if (checklistCommentsChannelRef.current) {
       checklistCommentsChannelRef.current.postMessage({
         type: 'comments_cleared',
@@ -2672,6 +2691,9 @@ function App() {
             if (fc && fc.forwarded && fc.checklistComments && typeof fc.checklistComments === 'object') {
               setForwardedChecklistPayload(value as ForwardedChecklistPayload);
               setChecklistForwardedToTeamLead(true);
+            } else {
+              setForwardedChecklistPayload(null);
+              setChecklistForwardedToTeamLead(false);
             }
           }
           if (row.key === 'checklist_comments_live' && value && typeof value === 'object') {
@@ -2720,6 +2742,24 @@ function App() {
 
   // Persist vettingSession to Supabase for multi-browser sync (debounced + deduped JSON to avoid realtime storms)
   useEffect(() => {
+    if (!currentUser?.id) {
+      return;
+    }
+    const roles = currentUser.roles ?? [];
+    const isChiefExaminer = roles.includes('Chief Examiner');
+    const isVetter = roles.includes('Vetter');
+    // Pure vetters must not upsert an idle snapshot (localStorage after a session ended). That row used to
+    // overwrite the Chief's active session in moderation_state, so every vetter saw "Session Ended" forever.
+    if (
+      isVetter &&
+      !isChiefExaminer &&
+      !vettingSession.active &&
+      vettingSession.startedAt == null &&
+      vettingSession.expiresAt == null
+    ) {
+      return;
+    }
+
     const payload = {
       active: vettingSession.active,
       startedAt: vettingSession.startedAt,
@@ -2757,7 +2797,7 @@ function App() {
         vettingSessionPersistTimerRef.current = null;
       }
     };
-  }, [vettingSession]);
+  }, [vettingSession, currentUser?.id, currentUser?.roles]);
 
   // Persist restrictedVetters to Supabase for real-time Chief visibility (cross-browser)
   useEffect(() => {
@@ -2920,6 +2960,9 @@ function App() {
             if (fc?.forwarded && fc.checklistComments && typeof fc.checklistComments === 'object') {
               setForwardedChecklistPayload(row.value as ForwardedChecklistPayload);
               setChecklistForwardedToTeamLead(true);
+            } else {
+              setForwardedChecklistPayload(null);
+              setChecklistForwardedToTeamLead(false);
             }
           }
           if (row.key === 'checklist_comments_live' && row.value && typeof row.value === 'object') {
@@ -5627,10 +5670,27 @@ function App() {
           setTimeout(() => setActiveToast((c) => (c?.id === startNotif.id ? null : c)), 5000);
         }
       }
+
+      // Safety net: if notifications are delayed/missed, pull the live vetting_session
+      // row from the DB so the vetter can still join.
+      const { data: vsRow, error: vsErr } = await supabase
+        .from('moderation_state')
+        .select('value')
+        .eq('key', 'vetting_session')
+        .maybeSingle();
+
+      if (!vsErr && vsRow?.value && typeof vsRow.value === 'object') {
+        const nextSession = normalizeVettingSessionState(vsRow.value as Partial<VettingSessionState>);
+        if (nextSession.active) {
+          setVettingSession((prev) =>
+            isSameVettingSessionState(prev, nextSession) ? prev : nextSession
+          );
+        }
+      }
     } catch (e) {
       console.error('Check for session:', e);
     }
-  }, [notificationUserId, currentUser?.roles]);
+  }, [notificationUserId, currentUser?.roles, currentUser?.id]);
 
   const handleStartVetting = async (minutes: number) => {
     if (isStartingSession || isEndingSession) {
@@ -6249,6 +6309,58 @@ function App() {
     [users]
   );
 
+  const notifyRoleDeadlineScheduled = useCallback(
+    async (
+      role: 'Setter' | 'Team Lead',
+      title: string,
+      scheduledTime: number,
+      message: string
+    ) => {
+      const localIds = users
+        .filter((u) => u.roles.includes(role) && u.id)
+        .map((u) => u.id as string);
+
+      let recipientIds = Array.from(new Set(localIds));
+      try {
+        const { data: profiles, error } = await supabase
+          .from('user_profiles')
+          .select('id, roles');
+        if (!error && Array.isArray(profiles)) {
+          const dbIds = profiles
+            .filter((profile: any) => Array.isArray(profile.roles) && profile.roles.includes(role))
+            .map((profile: any) => profile.id as string)
+            .filter(Boolean);
+          recipientIds = Array.from(new Set([...recipientIds, ...dbIds]));
+        }
+      } catch (error) {
+        console.warn(`Could not load ${role} recipients from DB:`, error);
+      }
+
+      if (recipientIds.length === 0) return;
+
+      const results = await Promise.allSettled(
+        recipientIds.map((userId) =>
+          createNotification({
+            user_id: userId,
+            title,
+            message,
+            type: 'deadline',
+          })
+        )
+      );
+
+      const failed = results.filter(
+        (r) => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success)
+      );
+      if (failed.length > 0) {
+        console.warn(
+          `Scheduled notifications partially failed for ${role}: ${failed.length}/${recipientIds.length} (scheduledTime=${scheduledTime})`
+        );
+      }
+    },
+    [users]
+  );
+
   // Helper function to log warnings/violations for vetter monitoring
   // THIS RECORDS EVERY ACTION AND ALERT MESSAGE SHOWN TO THE VETTER - CHIEF EXAMINER SEES ALL IN REAL-TIME
   const logVetterWarning = (vetterId: string, type: VetterWarning['type'], message: string, severity: 'warning' | 'critical' = 'warning') => {
@@ -6360,6 +6472,22 @@ function App() {
       `Moderation scheduled: starts ${startDate}. Session will be started manually.`,
       actor
     );
+
+    // Notify all vetters about the scheduled vetting session.
+    void (async () => {
+      const vetterList = await getVetterUserIds();
+      if (vetterList.length === 0) return;
+
+      const message = `Vetting session is scheduled to start at ${startDate}. When the session becomes active, click "Start Session (Enable Camera)" to join.`;
+      for (const vetter of vetterList) {
+        await createNotification({
+          user_id: vetter.id,
+          title: 'Vetting Session Scheduled',
+          message,
+          type: 'deadline',
+        });
+      }
+    })();
   };
 
   const handleClearModerationSchedule = () => {
@@ -7247,7 +7375,9 @@ function App() {
         return false;
       }
 
-      const vettedPaper = submittedPapers.find((p) => p.status === 'vetted' || p.status === 'approved');
+      const vettedPaper = [...submittedPapers]
+        .filter((p) => p.status === 'vetted' || p.status === 'approved')
+        .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime())[0];
       const exportPayload: ForwardedChecklistPayload = {
         forwarded: true,
         forwardedAt: new Date().toISOString(),
@@ -9203,6 +9333,21 @@ function App() {
             setSetterDeadlineScheduledTime(scheduledTime);
             if (scheduledTime) {
               setSetterDeadlineOriginalScheduledTime(scheduledTime);
+
+              const durationText = `${setterDeadlineDuration.days} day${
+                setterDeadlineDuration.days !== 1 ? 's' : ''
+              }, ${setterDeadlineDuration.hours} hour${
+                setterDeadlineDuration.hours !== 1 ? 's' : ''
+              }, ${setterDeadlineDuration.minutes} minute${
+                setterDeadlineDuration.minutes !== 1 ? 's' : ''
+              }`;
+              const scheduledAtText = new Date(scheduledTime).toLocaleString();
+              void notifyRoleDeadlineScheduled(
+                'Setter',
+                'Submission Deadline Scheduled',
+                scheduledTime,
+                `Submission deadline is scheduled for ${scheduledAtText}. You will have ${durationText} to submit your exam paper drafts once it activates.`
+              );
             } else {
               setSetterDeadlineOriginalScheduledTime(null);
             }
@@ -9211,7 +9356,25 @@ function App() {
           teamLeadDeadlineDuration={teamLeadDeadlineDuration}
           teamLeadDeadlineStartTime={teamLeadDeadlineStartTime}
           teamLeadDeadlineScheduledTime={teamLeadDeadlineScheduledTime}
-          onSetTeamLeadDeadlineScheduled={(scheduledTime: number | null) => setTeamLeadDeadlineScheduledTime(scheduledTime)}
+          onSetTeamLeadDeadlineScheduled={(scheduledTime: number | null) => {
+            setTeamLeadDeadlineScheduledTime(scheduledTime);
+            if (!scheduledTime) return;
+
+            const durationText = `${teamLeadDeadlineDuration.days} day${
+              teamLeadDeadlineDuration.days !== 1 ? 's' : ''
+            }, ${teamLeadDeadlineDuration.hours} hour${
+              teamLeadDeadlineDuration.hours !== 1 ? 's' : ''
+            }, ${teamLeadDeadlineDuration.minutes} minute${
+              teamLeadDeadlineDuration.minutes !== 1 ? 's' : ''
+            }`;
+            const scheduledAtText = new Date(scheduledTime).toLocaleString();
+            void notifyRoleDeadlineScheduled(
+              'Team Lead',
+              'Submission Deadline Scheduled',
+              scheduledTime,
+              `Submission deadline is scheduled for ${scheduledAtText}. You will have ${durationText} to compile and submit your papers once it activates.`
+            );
+          }}
           currentTime={currentTime}
           restrictedVetters={restrictedVetters}
           onReactivateVetter={(vetterId) => {
@@ -14103,7 +14266,7 @@ function ChiefExaminerConsole({
               <div className="space-y-3">
                 {Array.from(restrictedVetters).map((vetterId) => {
                   const vetter = users.find((u: User) => u.id === vetterId);
-                  if (!vetter) return null;
+                  const vetterName = vetter?.name || `Vetter (${vetterId.slice(0, 8)})`;
                   return (
                     <div key={vetterId} className="flex items-center justify-between rounded-lg border-2 border-red-200 bg-white p-4 shadow-sm">
                       <div className="flex items-center gap-3">
@@ -14113,7 +14276,7 @@ function ChiefExaminerConsole({
                           </svg>
                         </div>
                         <div>
-                          <p className="text-sm font-bold text-slate-900">{vetter.name}</p>
+                          <p className="text-sm font-bold text-slate-900">{vetterName}</p>
                           <p className="text-xs text-red-600">Access restricted due to violation</p>
                         </div>
                       </div>
@@ -14121,7 +14284,7 @@ function ChiefExaminerConsole({
                         <button
                           type="button"
                           onClick={() => {
-                            if (confirm(`Reactivate ${vetter.name}? They will be able to join vetting sessions again.`)) {
+                            if (confirm(`Reactivate ${vetterName}? They will be able to join vetting sessions again.`)) {
                               onReactivateVetter(vetterId);
                             }
                           }}
@@ -15621,14 +15784,19 @@ function TeamLeadPanel({
     const paperCourseUnit = submittedPapers.find(p => p.courseUnit)?.courseUnit?.toLowerCase().trim();
     const searchCourseCode = currentCourseCode || paperCourseCode || '';
     const searchCourseUnit = currentCourseUnit || paperCourseUnit || '';
-    let matchingRecord = vettingSessionRecords.find((record) => {
+    const sortedRecords = [...vettingSessionRecords].sort((a, b) => {
+      const aTime = a.completedAt ?? a.startedAt ?? 0;
+      const bTime = b.completedAt ?? b.startedAt ?? 0;
+      return bTime - aTime;
+    });
+    let matchingRecord = sortedRecords.find((record) => {
       const recordCourseCode = (record.courseCode || '').toLowerCase().trim();
       const recordCourseUnit = (record.courseUnit || '').toLowerCase().trim();
       if (searchCourseCode && recordCourseCode && recordCourseCode === searchCourseCode) return true;
       if (searchCourseUnit && recordCourseUnit && recordCourseUnit === searchCourseUnit) return true;
       return false;
     });
-    if (!matchingRecord && vettingSessionRecords.length > 0) matchingRecord = vettingSessionRecords[0];
+    if (!matchingRecord && sortedRecords.length > 0) matchingRecord = sortedRecords[0];
     if (!matchingRecord?.checklistComments?.size) return null;
     return {
       commentsMap: matchingRecord.checklistComments,
@@ -22683,8 +22851,21 @@ function VettingAndAnnotations({
           Join the secure session to reveal the exam paper and moderation checklist.
         </div>
       ) : (
-        <div className="rounded-2xl border-2 border-amber-200 bg-amber-50 px-4 py-6 text-center text-sm text-amber-700">
-          The vetting session has ended and all vetters have been signed out. Waiting for the Chief Examiner to start a new session.
+        <div className="rounded-2xl border-2 border-amber-200 bg-amber-50 px-4 py-6 text-center text-sm text-amber-700 space-y-2">
+          {moderationSchedule?.scheduled ? (
+            <>
+              <h3 className="text-sm font-bold text-amber-800">Vetting Scheduled</h3>
+              <p className="text-xs text-amber-700">
+                {moderationStartCountdown
+                  ? `Waiting for scheduled time... ${moderationStartCountdown} remaining`
+                  : 'Scheduled time reached. Waiting for Chief Examiner to start the session.'}
+              </p>
+            </>
+          ) : (
+            <p className="text-xs text-amber-700">
+              The vetting session has ended and all vetters have been signed out. Waiting for the Chief Examiner to start a new session.
+            </p>
+          )}
         </div>
       );
     }
@@ -22736,11 +22917,33 @@ function VettingAndAnnotations({
           </div>
         ) : (
           // Global session is not active anymore – vetter is removed from vetting session
-          <div className="rounded-lg border-2 border-amber-300 bg-amber-50 p-4 text-center">
-            <h3 className="text-sm font-bold text-amber-800 mb-1">Session Ended</h3>
-            <p className="text-xs text-amber-700">
-              The vetting session has ended. You have been removed from this vetting session, but your account remains signed in. Please wait for the Chief Examiner to start a new session if further vetting is required.
-            </p>
+          <div className="rounded-lg border-2 border-amber-300 bg-amber-50 p-4 text-center space-y-3">
+            {moderationSchedule?.scheduled ? (
+              <>
+                <h3 className="text-sm font-bold text-amber-800 mb-1">Vetting Scheduled</h3>
+                <p className="text-xs text-amber-700">
+                  {moderationStartCountdown
+                    ? `Waiting for scheduled time... ${moderationStartCountdown} remaining`
+                    : 'Scheduled time reached. Waiting for Chief Examiner to start the session.'}
+                </p>
+              </>
+            ) : (
+              <>
+                <h3 className="text-sm font-bold text-amber-800 mb-1">Session Ended</h3>
+                <p className="text-xs text-amber-700">
+                  The vetting session has ended. You have been removed from this vetting session, but your account remains signed in. Please wait for the Chief Examiner to start a new session if further vetting is required.
+                </p>
+              </>
+            )}
+            {onCheckForSession && (
+              <button
+                type="button"
+                onClick={() => void onCheckForSession()}
+                className="w-full rounded-xl border-2 border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow transition hover:bg-slate-50"
+              >
+                Check for active session
+              </button>
+            )}
           </div>
         )
       ) : vettingSession.active ? (
@@ -23482,18 +23685,18 @@ function VettingAndAnnotations({
             <div className="space-y-2">
               {Array.from(restrictedVetters).map((vetterId) => {
                 const vetter = users.find((u: User) => u.id === vetterId);
-                if (!vetter) return null;
+                const vetterName = vetter?.name || `Vetter (${vetterId.slice(0, 8)})`;
                 return (
                   <div key={vetterId} className="flex items-center justify-between rounded-lg border border-red-200 bg-white p-2">
                     <div>
-                      <p className="text-xs font-semibold text-slate-800">{vetter.name}</p>
+                      <p className="text-xs font-semibold text-slate-800">{vetterName}</p>
                       <p className="text-[0.65rem] text-red-600">Access restricted due to violation</p>
                     </div>
                     {onReactivateVetter && (
                       <button
                         type="button"
                         onClick={() => {
-                          if (confirm(`Reactivate ${vetter.name}? They will be able to join vetting sessions again.`)) {
+                          if (confirm(`Reactivate ${vetterName}? They will be able to join vetting sessions again.`)) {
                             onReactivateVetter(vetterId);
                           }
                         }}
