@@ -20,6 +20,16 @@ export interface ApprovedPaper extends ExamPaper {
   unlock_expires_at?: string;
 }
 
+const isUuid = (value?: string | null): value is string =>
+  typeof value === 'string' &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+
+const resolveActorUuid = async (candidateUserId?: string): Promise<string | null> => {
+  if (isUuid(candidateUserId)) return candidateUserId;
+  const { data: authData } = await supabase.auth.getUser();
+  return authData?.user?.id && isUuid(authData.user.id) ? authData.user.id : null;
+};
+
 const parseDueDateTimeLocal = (dateValue?: string | null, timeValue?: string | null): Date | null => {
   if (!dateValue || !timeValue) return null;
   const normalizedDate = String(dateValue).trim().slice(0, 10);
@@ -152,9 +162,10 @@ export async function getApprovedPapersRepository(): Promise<ApprovedPaper[]> {
         paper.approval_status === 'approved_for_printing' ||
         paper.status === 'approved_for_printing';
 
-      // If the paper is approved but `is_locked` is missing/false, force it to true
-      // in the frontend representation so that Super Admins see it as locked.
-      if (isApproved && (paper.is_locked === null || paper.is_locked === false || typeof paper.is_locked === 'undefined')) {
+      // If the paper is approved but `is_locked` is missing (null/undefined),
+      // treat it as locked for backward compatibility with older incomplete rows.
+      // IMPORTANT: do not override explicit false, because unlocked papers must remain visible.
+      if (isApproved && (paper.is_locked === null || typeof paper.is_locked === 'undefined')) {
         return {
           ...paper,
           is_locked: true,
@@ -192,7 +203,6 @@ export async function getPapersNeedingPasswordGeneration(): Promise<ApprovedPape
       .from('exam_papers')
       .select('*')
       .or('approval_status.eq.approved_for_printing,status.eq.approved_for_printing')
-      .eq('is_locked', true)
       .is('unlock_password_hash', null);
 
     if (fetchError) {
@@ -239,9 +249,12 @@ export async function generatePasswordForPaper(
       return { success: false, error: 'Password already generated for this paper' };
     }
 
-    // Check if paper is approved and locked
-    if (paper.approval_status !== 'approved_for_printing' || !paper.is_locked) {
-      return { success: false, error: 'Paper must be approved and locked before generating password' };
+    // Check if paper is approved (support both new approval_status and legacy status)
+    const isApprovedForPrinting =
+      paper.approval_status === 'approved_for_printing' ||
+      paper.status === 'approved_for_printing';
+    if (!isApprovedForPrinting) {
+      return { success: false, error: 'Paper must be approved before generating password' };
     }
 
     // Check if due date has passed (unless forcing)
@@ -259,10 +272,12 @@ export async function generatePasswordForPaper(
     // Generate password and hash
     const { plaintext, hash } = await generatePasswordWithHash(16);
 
-    // Update paper with password hash
+    // Update paper with password hash and ensure it is locked.
+    // This prevents "approved but unlocked" rows from being skipped forever.
     const { error: updateError } = await supabase
       .from('exam_papers')
       .update({
+        is_locked: true,
         unlock_password_hash: hash,
         password_generated_at: new Date().toISOString(),
       })
@@ -273,13 +288,13 @@ export async function generatePasswordForPaper(
       return { success: false, error: updateError.message };
     }
 
-    // Log password generation
+    // Log password generation/re-generation for audit trail.
     const { error: logError } = await supabase
       .from('paper_unlock_logs')
       .insert({
         exam_paper_id: examPaperId,
         password_hash: hash,
-        generated_by: 'system',
+        generated_by: generatedByUserId || 'system',
       });
 
     if (logError) {
@@ -346,6 +361,51 @@ export async function generatePasswordForPaper(
 }
 
 /**
+ * One-time reveal flow for Super Admin dashboard:
+ * re-generates a fresh password, stores only hash, and returns plaintext once.
+ */
+export async function revealUnlockPasswordForPaper(
+  examPaperId: string,
+  revealedByUserId: string
+): Promise<{ success: boolean; error?: string; password?: string }> {
+  try {
+    const { data: paper, error: fetchError } = await supabase
+      .from('exam_papers')
+      .select('*')
+      .eq('id', examPaperId)
+      .single();
+
+    if (fetchError || !paper) {
+      return { success: false, error: 'Paper not found' };
+    }
+
+    const isApprovedForPrinting =
+      paper.approval_status === 'approved_for_printing' ||
+      paper.status === 'approved_for_printing';
+    if (!isApprovedForPrinting) {
+      return { success: false, error: 'Paper must be approved before revealing password' };
+    }
+
+    // Keep reveal aligned with due-time controls.
+    if (paper.printing_due_date && paper.printing_due_time) {
+      const dueDate = parseDueDateTimeLocal(paper.printing_due_date, paper.printing_due_time);
+      if (!dueDate) {
+        return { success: false, error: 'Invalid printing due date/time format on this paper' };
+      }
+      if (dueDate.getTime() > Date.now()) {
+        return { success: false, error: `Paper is not due yet. Due: ${dueDate.toLocaleString()}` };
+      }
+    }
+
+    // Force re-generation so plaintext can be shown once in UI.
+    return await generatePasswordForPaper(examPaperId, true, revealedByUserId);
+  } catch (error: any) {
+    console.error('Exception revealing password:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
  * Unlock a paper with password (temporary unlock)
  * @param examPaperId - Paper ID to unlock
  * @param password - Plaintext password
@@ -359,6 +419,8 @@ export async function unlockPaper(
   unlockDurationHours: number = 24
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    const actorUuid = await resolveActorUuid(userId);
+
     // Get paper details
     const { data: paper, error: fetchError } = await supabase
       .from('exam_papers')
@@ -397,7 +459,7 @@ export async function unlockPaper(
       .update({
         is_locked: false,
         unlocked_at: new Date().toISOString(),
-        unlocked_by: userId,
+        unlocked_by: actorUuid,
         unlock_expires_at: expiresAt.toISOString(),
       })
       .eq('id', examPaperId);
@@ -412,7 +474,7 @@ export async function unlockPaper(
       .from('paper_unlock_logs')
       .update({
         unlocked_at: new Date().toISOString(),
-        unlocked_by: userId,
+        unlocked_by: actorUuid,
         unlock_expires_at: expiresAt.toISOString(),
       })
       .eq('exam_paper_id', examPaperId)
@@ -439,6 +501,8 @@ export async function reLockPaper(
   userId: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    const actorUuid = await resolveActorUuid(userId);
+
     const { error: updateError } = await supabase
       .from('exam_papers')
       .update({
@@ -459,7 +523,7 @@ export async function reLockPaper(
       .from('paper_unlock_logs')
       .update({
         re_locked_at: new Date().toISOString(),
-        re_locked_by: userId,
+        re_locked_by: actorUuid,
       })
       .eq('exam_paper_id', examPaperId)
       .is('re_locked_at', null);

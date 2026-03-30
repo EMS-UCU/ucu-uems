@@ -10647,7 +10647,7 @@ function App() {
                   </p>
                   <div className="h-5 w-px bg-blue-300/60"></div>
                   <h2 className="text-2xl font-bold text-blue-900 sm:text-3xl lg:text-3xl whitespace-nowrap">
-                    {isAdmin ? 'System Administration' : isChiefExaminer ? 'Chief Examiner' : isTeamLead ? 'Team Lead' : isVetter ? 'Vetting' : isSetter ? 'Setter' : isPureLecturer ? 'Teaching & Student Engagement' : workflow.stage.replace(/-/g, ' ')}
+                    {isAdmin ? 'Quality Assurance' : isChiefExaminer ? 'Chief Examiner' : isTeamLead ? 'Team Lead' : isVetter ? 'Vetting' : isSetter ? 'Setter' : isPureLecturer ? 'Teaching & Student Engagement' : workflow.stage.replace(/-/g, ' ')}
                   </h2>
                   <div className="h-5 w-px bg-blue-300/60"></div>
                   <p className="text-sm text-slate-500 font-medium truncate max-w-md">

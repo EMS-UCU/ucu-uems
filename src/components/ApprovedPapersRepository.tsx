@@ -7,6 +7,7 @@ import {
   reLockPaper,
   getPapersNeedingPasswordGeneration,
   generatePasswordForPaper,
+  revealUnlockPasswordForPaper,
   type ApprovedPaper,
 } from '../lib/examServices/repositoryService';
 import { supabase } from '../lib/supabase';
@@ -36,6 +37,13 @@ export default function ApprovedPapersRepository({
   const [totalPages, setTotalPages] = useState(0);
   const [loadingPdf, setLoadingPdf] = useState(false);
   const [expandedPaperId, setExpandedPaperId] = useState<string | null>(null);
+  const [revealingPaperId, setRevealingPaperId] = useState<string | null>(null);
+  const [revealedPasswordData, setRevealedPasswordData] = useState<{
+    paperId: string;
+    courseCode: string;
+    courseName: string;
+    password: string;
+  } | null>(null);
 
   useEffect(() => {
     loadPapers();
@@ -53,6 +61,24 @@ export default function ApprovedPapersRepository({
     return () => {
       clearInterval(refreshInterval);
       clearInterval(unlockInterval);
+    };
+  }, []);
+
+  // Keep repository in sync with Supabase changes (password generation, lock/unlock, approvals)
+  useEffect(() => {
+    const channel = supabase
+      .channel('approved_papers_repository_changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'exam_papers' },
+        () => {
+          void loadPapers();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
     };
   }, []);
 
@@ -442,13 +468,16 @@ export default function ApprovedPapersRepository({
   };
 
   const handleGeneratePasswords = async () => {
-    // Check if there are locked papers without passwords
-    const lockedPapersWithoutPasswords = papers.filter(
-      p => p.is_locked && !p.unlock_password_hash && p.approval_status === 'approved_for_printing'
+    // Check if there are approved papers without passwords.
+    // They may be locked or unlocked (generation now auto-locks eligible papers).
+    const papersWithoutPasswords = papers.filter(
+      (p: any) =>
+        !p.unlock_password_hash &&
+        (p.approval_status === 'approved_for_printing' || p.status === 'approved_for_printing')
     );
 
-    if (lockedPapersWithoutPasswords.length === 0) {
-      alert('No locked papers found that need password generation.');
+    if (papersWithoutPasswords.length === 0) {
+      alert('No approved papers found that need password generation.');
       return;
     }
 
@@ -498,6 +527,34 @@ export default function ApprovedPapersRepository({
     }
   };
 
+  const handleRevealPassword = async (paper: ApprovedPaper) => {
+    const confirmed = window.confirm(
+      `Reveal a new unlock password for ${paper.course_code}?\n\nThis will regenerate the current password and invalidate any previous one.`
+    );
+    if (!confirmed) return;
+
+    setRevealingPaperId(paper.id);
+    try {
+      const result = await revealUnlockPasswordForPaper(paper.id, currentUserId);
+      if (!result.success || !result.password) {
+        alert(`Failed to reveal password: ${result.error || 'Unknown error'}`);
+        return;
+      }
+
+      setRevealedPasswordData({
+        paperId: paper.id,
+        courseCode: paper.course_code,
+        courseName: paper.course_name,
+        password: result.password,
+      });
+      await loadPapers();
+    } catch (error: any) {
+      alert(`Failed to reveal password: ${error?.message || 'Unknown error'}`);
+    } finally {
+      setRevealingPaperId(null);
+    }
+  };
+
   const filteredPapers = papers.filter((paper) => {
     // If search query is empty, show all papers (match everything)
     const matchesSearch = !searchQuery.trim() ||
@@ -510,6 +567,27 @@ export default function ApprovedPapersRepository({
       (filterStatus === 'unlocked' && !paper.is_locked);
 
     return matchesSearch && matchesFilter;
+  }).sort((a, b) => {
+    // Show latest papers first using printing due date/time.
+    // Fallback to created_at when due date/time is missing.
+    const getSortTime = (paper: ApprovedPaper): number => {
+      if (paper.printing_due_date) {
+        const base = new Date(paper.printing_due_date);
+        if (paper.printing_due_time) {
+          const [hours, minutes] = paper.printing_due_time.split(':').map((v) => Number(v));
+          if (Number.isFinite(hours) && Number.isFinite(minutes)) {
+            base.setHours(hours, minutes, 0, 0);
+          }
+        }
+        const dueTime = base.getTime();
+        if (!Number.isNaN(dueTime)) return dueTime;
+      }
+
+      const createdAt = (paper as any).created_at ? new Date((paper as any).created_at).getTime() : 0;
+      return Number.isNaN(createdAt) ? 0 : createdAt;
+    };
+
+    return getSortTime(b) - getSortTime(a);
   });
 
   const formatDate = (dateString?: string) => {
@@ -728,13 +806,23 @@ export default function ApprovedPapersRepository({
 
                 <div className="ml-4 flex flex-col gap-2">
                   {paper.is_locked ? (
-                    <button
-                      type="button"
-                      onClick={() => setSelectedPaper(paper)}
-                      className="rounded-lg bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600"
-                    >
-                      Unlock Paper
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPaper(paper)}
+                        className="rounded-lg bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600"
+                      >
+                        Unlock Paper
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleRevealPassword(paper)}
+                        disabled={revealingPaperId === paper.id}
+                        className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-800 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {revealingPaperId === paper.id ? 'Revealing...' : 'Reveal Password'}
+                      </button>
+                    </>
                   ) : (
                     <>
                       <button
@@ -1361,6 +1449,57 @@ export default function ApprovedPapersRepository({
                 className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
               >
                 Cancel
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* One-time Reveal Modal */}
+      {revealedPasswordData && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"
+          >
+            <h3 className="text-lg font-bold text-blue-900 mb-2">One-time Password Reveal</h3>
+            <p className="text-sm text-slate-600 mb-4">
+              A fresh unlock password has been generated for <strong>{revealedPasswordData.courseCode}</strong>. Copy it now.
+            </p>
+
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 mb-4">
+              <p className="text-xs text-amber-800">
+                This reveal is shown once in this session and is audit-logged. Closing this window hides the password.
+              </p>
+            </div>
+
+            <div className="mb-4 rounded-lg border border-slate-300 bg-slate-50 p-3">
+              <p className="text-xs font-semibold text-slate-500 mb-1">Unlock Password</p>
+              <p className="font-mono text-base break-all text-slate-900">{revealedPasswordData.password}</p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(revealedPasswordData.password);
+                    alert('Password copied to clipboard.');
+                  } catch {
+                    alert('Could not copy automatically. Please copy manually.');
+                  }
+                }}
+                className="flex-1 rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600"
+              >
+                Copy Password
+              </button>
+              <button
+                type="button"
+                onClick={() => setRevealedPasswordData(null)}
+                className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+              >
+                Close
               </button>
             </div>
           </motion.div>
