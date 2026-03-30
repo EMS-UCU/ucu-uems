@@ -18061,19 +18061,6 @@ function RepositoryPapersPanel({
       kicker="Central Exam Repository"
       description="View all papers compiled and submitted by Team Lead. These papers are ready for Chief Examiner AI similarity analysis before vetting."
     >
-      {papersReadyForAnalysis.length > 0 && (
-        <div className="mb-4 flex justify-end">
-          <button
-            type="button"
-            className="rounded-lg bg-red-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-red-700"
-            onClick={async () => {
-              await onDeleteAllPapers(papersReadyForAnalysis.map((paper) => paper.id));
-            }}
-          >
-            Delete All Repository Papers
-          </button>
-        </div>
-      )}
       {papersReadyForAnalysis.length === 0 ? (
         <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
           No papers are currently in the repository for this semester. All papers have been sent to vetting or are in progress.
