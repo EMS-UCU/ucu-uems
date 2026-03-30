@@ -9373,6 +9373,26 @@ function App() {
 
     return [];
   })();
+  const inferredRestrictedVetters = useMemo(() => {
+    const inferred = new Set<string>();
+    (vetterMonitoring || new Map()).forEach((monitoring, vetterId) => {
+      const warnings = monitoring?.warnings || [];
+      const hasRestrictionSignal = warnings.some(
+        (warning) =>
+          warning.severity === 'critical' &&
+          /restricted|session terminated/i.test(warning.message || '')
+      );
+      if (hasRestrictionSignal) {
+        inferred.add(vetterId);
+      }
+    });
+    return inferred;
+  }, [vetterMonitoring]);
+  const effectiveRestrictedVetters = useMemo(() => {
+    const merged = new Set(restrictedVetters);
+    inferredRestrictedVetters.forEach((vetterId) => merged.add(vetterId));
+    return merged;
+  }, [restrictedVetters, inferredRestrictedVetters]);
 
   if (isAuthenticated && isChiefExaminer) {
     roleSpecificPanels.push({
@@ -9472,7 +9492,7 @@ function App() {
             );
           }}
           currentTime={currentTime}
-          restrictedVetters={restrictedVetters}
+          restrictedVetters={effectiveRestrictedVetters}
           onReactivateVetter={(vetterId) => {
             setRestrictedVetters(prev => {
               const newSet = new Set(prev);
@@ -9710,7 +9730,7 @@ function App() {
           moderationEndCountdown={moderationEndCountdown}
           currentUserId={currentUser?.id}
           joinedVetters={joinedVetters}
-          restrictedVetters={restrictedVetters}
+          restrictedVetters={effectiveRestrictedVetters}
           removedFromVettingIds={removedFromVettingIds}
           vetterMonitoring={vetterMonitoring}
           logVetterWarning={logVetterWarning}
@@ -21842,9 +21862,16 @@ function VettingAndAnnotations({
   const hasCustomChecklistPdf = Boolean(customChecklistPdf?.url);
   const hasUploadedChecklist = Boolean(customChecklistPdf) || hasCustomChecklist;
   
-  // Vetters can only see paper/checklist after they've joined.
+  // Vetters can only see paper after they've joined.
+  // Checklist for vetters appears only when Chief has uploaded one.
   // Chief Examiner can see everything while the workflow is not yet fully approved.
   // Once the paper is approved, hide the vetting & annotations layout for everyone.
+  const canViewPaper =
+    workflow?.stage !== 'Approved' &&
+    (isChiefExaminer || (isVetter && vetterHasJoined));
+  const canViewChecklist =
+    canViewPaper &&
+    (isChiefExaminer || hasUploadedChecklist);
   const canViewPaperAndChecklist =
     workflow?.stage !== 'Approved' &&
     (isChiefExaminer || (isVetter && vetterHasJoined && hasUploadedChecklist));
@@ -22923,7 +22950,7 @@ function VettingAndAnnotations({
   ) : null;
 
   const paperChecklistColumns = (() => {
-    if (canViewPaperAndChecklist && selectedPaper) {
+    if (canViewPaper && selectedPaper) {
       // Both vetters and Chief Examiners see paper and checklist side by side
       return (
         <div className="grid gap-6 lg:grid-cols-2">
@@ -22941,7 +22968,13 @@ function VettingAndAnnotations({
               <div className="h-1 w-1 rounded-full bg-indigo-500"></div>
               <h3 className="text-sm font-bold text-slate-700 uppercase tracking-wide">Moderation Checklist</h3>
             </div>
-            {defaultChecklistWindows}
+            {canViewChecklist ? (
+              defaultChecklistWindows
+            ) : (
+              <div className="rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-600">
+                Checklist is not uploaded by the Chief Examiner yet.
+              </div>
+            )}
           </div>
         </div>
       );
