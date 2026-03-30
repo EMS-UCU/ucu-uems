@@ -2900,8 +2900,11 @@ function App() {
     };
   }, [vettingSession, currentUser?.id, currentUser?.roles]);
 
-  // Persist restrictedVetters to Supabase for real-time Chief visibility (cross-browser)
+  // Persist restrictedVetters to Supabase for real-time Chief visibility (cross-browser).
+  // Must run only after the initial moderation_state fetch (same pattern as submission deadlines):
+  // otherwise a Chief with empty localStorage upserts { ids: [] } before load completes and wipes the row.
   useEffect(() => {
+    if (!submissionDeadlinesSyncReady) return;
     const payload = { ids: Array.from(restrictedVetters) };
     supabase
       .from('moderation_state')
@@ -2909,7 +2912,7 @@ function App() {
       .then(({ error }) => {
         if (error) console.warn('Failed to persist restricted_vetters to Supabase:', error.message);
       });
-  }, [restrictedVetters]);
+  }, [restrictedVetters, submissionDeadlinesSyncReady]);
 
   // Persist removed-from-vetting ids so removed papers do not re-appear across devices.
   useEffect(() => {
@@ -2973,10 +2976,12 @@ function App() {
       });
   }, [moderationSchedule]);
 
-  // Real-time subscription: sync vetting_session and moderation_schedule across all browsers/tabs
+  // Real-time subscription: sync moderation_state across all browsers/tabs.
+  // Re-bind after auth changes so channel JWT/RLS context stays current.
   useEffect(() => {
+    if (!authUserId) return;
     const channel = supabase
-      .channel('moderation_state_changes')
+      .channel(`moderation_state_changes:${authUserId}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'moderation_state' },
@@ -3102,13 +3107,43 @@ function App() {
           }
         }
       )
-      .subscribe(() => {
-        // Real-time moderation_state subscription status intentionally not logged to console
+      .subscribe((status) => {
+        // Re-load authoritative state after subscribe in case events were missed while reconnecting.
+        if (status === 'SUBSCRIBED') {
+          void supabase
+            .from('moderation_state')
+            .select('key, value')
+            .in('key', [
+              'vetting_session',
+              'moderation_schedule',
+              'submission_deadlines',
+              'restricted_vetters',
+              'removed_from_vetting_ids',
+              'checklist_comments_live',
+              'forwarded_checklist',
+            ])
+            .then(({ data, error }) => {
+              if (error || !data?.length) return;
+              for (const row of data) {
+                if (row.key === 'restricted_vetters' && row.value && typeof row.value === 'object') {
+                  const ids = (row.value as { ids?: unknown }).ids;
+                  const parsed = Array.isArray(ids) ? ids.map((v) => String(v)) : [];
+                  const next = new Set(parsed);
+                  setRestrictedVetters((prev) => (setEquals(prev, next) ? prev : next));
+                  try {
+                    localStorage.setItem('ucu-restricted-vetters', JSON.stringify(Array.from(next)));
+                  } catch {
+                    /* ignore */
+                  }
+                }
+              }
+            });
+        }
       });
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [authUserId]);
 
   useEffect(() => {
     try {
@@ -4040,12 +4075,17 @@ function App() {
     const restrictionTime = getRestrictedVetterTimestamp(vetterId);
     const notificationTime = notificationTimestamp ? new Date(notificationTimestamp).getTime() : NaN;
     const hasRestriction = restrictedVetters.has(vetterId);
+    const hasOneStrike = oneStrikeVetters.has(vetterId);
     const isFreshNotification =
       Number.isFinite(notificationTime) && Date.now() - notificationTime <= 10 * 60 * 1000;
     const isNewerThanRestriction =
       restrictionTime != null && Number.isFinite(notificationTime) && notificationTime > restrictionTime;
-    const shouldClearRestriction =
-      hasRestriction && (isNewerThanRestriction || (restrictionTime == null && isFreshNotification));
+    const shouldClearRestricted =
+      hasRestriction &&
+      (isNewerThanRestriction || (restrictionTime == null && isFreshNotification));
+    // One-strike is local-only until they try to rejoin; Chief "Reactivate" may not have put them in restrictedVetters in DB yet.
+    const shouldClearOneStrikeOnly = hasOneStrike && isFreshNotification && !hasRestriction;
+    const shouldClearRestriction = shouldClearRestricted || shouldClearOneStrikeOnly;
 
     if (!shouldClearRestriction) {
       if (hasRestriction) {
