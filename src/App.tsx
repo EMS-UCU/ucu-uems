@@ -301,6 +301,7 @@ interface VetterMonitoring {
   vetterName: string;
   joinedAt: number;
   cameraStream: MediaStream | null;
+  cameraActive: boolean;
   warnings: VetterWarning[];
   violations: number;
 }
@@ -313,6 +314,13 @@ type SerializableVetterMonitoring = {
   violations: number;
   cameraActive: boolean;
   updatedAt: string;
+};
+
+const isCameraStreamLive = (stream: MediaStream | null | undefined): boolean => {
+  if (!stream) return false;
+  const tracks = stream.getVideoTracks();
+  if (tracks.length === 0) return false;
+  return tracks.some((track) => track.readyState === 'live' && track.enabled);
 };
 
 interface VettingSessionRecord {
@@ -2617,6 +2625,10 @@ function App() {
                 vetterName: value.vetterName ?? existing?.vetterName ?? 'Vetter',
                 joinedAt: typeof value.joinedAt === 'number' ? value.joinedAt : existing?.joinedAt ?? Date.now(),
                 cameraStream: existing?.cameraStream ?? null,
+                cameraActive:
+                  typeof value.cameraActive === 'boolean'
+                    ? value.cameraActive
+                    : existing?.cameraActive ?? false,
                 warnings: Array.isArray(value.warnings) ? value.warnings as VetterWarning[] : existing?.warnings ?? [],
                 violations: typeof value.violations === 'number' ? value.violations : existing?.violations ?? 0,
               });
@@ -2983,6 +2995,10 @@ function App() {
                   vetterName: value.vetterName ?? existing?.vetterName ?? 'Vetter',
                   joinedAt: typeof value.joinedAt === 'number' ? value.joinedAt : existing?.joinedAt ?? Date.now(),
                   cameraStream: existing?.cameraStream ?? null,
+                  cameraActive:
+                    typeof value.cameraActive === 'boolean'
+                      ? value.cameraActive
+                      : existing?.cameraActive ?? false,
                   warnings: Array.isArray(value.warnings) ? value.warnings as VetterWarning[] : existing?.warnings ?? [],
                   violations: typeof value.violations === 'number' ? value.violations : existing?.violations ?? 0,
                 });
@@ -4615,6 +4631,26 @@ function App() {
       const handleEnded = () => {
         if (alerted) return;
         alerted = true;
+        setVetterMonitoring((prev) => {
+          const next = new Map(prev);
+          const existing = next.get(currentUser.id!);
+          if (!existing) return prev;
+          const updatedEntry: VetterMonitoring = {
+            ...existing,
+            cameraActive: false,
+          };
+          next.set(currentUser.id!, updatedEntry);
+          void persistLiveVetterMonitoring({
+            vetterId: updatedEntry.vetterId,
+            vetterName: updatedEntry.vetterName,
+            joinedAt: updatedEntry.joinedAt,
+            warnings: updatedEntry.warnings,
+            violations: updatedEntry.violations,
+            cameraActive: false,
+            updatedAt: new Date().toISOString(),
+          });
+          return next;
+        });
         alert('Camera disconnected. Please ensure your camera remains active during the session.');
       };
 
@@ -5972,6 +6008,7 @@ function App() {
           vetterName: currentUser.name ?? 'Unknown',
           joinedAt: Date.now(),
           cameraStream,
+          cameraActive: true,
           warnings: reuseExisting ? existing.warnings ?? [] : [],
           violations: preservedViolations,
         };
@@ -6104,6 +6141,7 @@ function App() {
         const updatedEntry: VetterMonitoring = {
           ...existing,
           cameraStream: null,
+          cameraActive: false,
         };
         newMap.set(vetterId, updatedEntry);
         void persistLiveVetterMonitoring({
@@ -6199,7 +6237,7 @@ function App() {
           joinedAt: updatedEntry.joinedAt,
           warnings: updatedEntry.warnings,
           violations: updatedEntry.violations,
-          cameraActive: Boolean(updatedEntry.cameraStream?.active),
+          cameraActive: updatedEntry.cameraActive && isCameraStreamLive(updatedEntry.cameraStream),
           updatedAt: new Date().toISOString(),
         });
       } else {
@@ -6208,6 +6246,7 @@ function App() {
           vetterName: 'Unknown',
           joinedAt: Date.now(),
           cameraStream: null,
+          cameraActive: false,
           warnings: [],
           violations: newCount,
         };
@@ -6408,7 +6447,7 @@ function App() {
           joinedAt: updatedEntry.joinedAt,
           warnings: updatedEntry.warnings,
           violations: updatedEntry.violations,
-          cameraActive: Boolean(updatedEntry.cameraStream?.active),
+          cameraActive: updatedEntry.cameraActive && isCameraStreamLive(updatedEntry.cameraStream),
           updatedAt: new Date().toISOString(),
         });
       } else {
@@ -6418,6 +6457,7 @@ function App() {
           vetterName: vetter.name,
           joinedAt: Date.now(),
           cameraStream: null,
+          cameraActive: false,
           warnings: [warning],
           violations: severity === 'critical' ? 1 : 0,
         };
@@ -23091,7 +23131,7 @@ function VettingAndAnnotations({
                         </div>
 
                         <div className="mb-3 rounded-lg overflow-hidden bg-slate-900 aspect-video relative border-2 border-green-500">
-                          {monitoring.cameraStream && monitoring.cameraStream.active ? (
+                          {(monitoring.cameraActive && isCameraStreamLive(monitoring.cameraStream)) || (!monitoring.cameraStream && monitoring.cameraActive) ? (
                             <>
                               <div className="absolute top-2 left-2 z-10 bg-red-600 text-white text-[0.6rem] px-2 py-1 rounded font-bold flex items-center gap-1">
                                 <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse"></span>
