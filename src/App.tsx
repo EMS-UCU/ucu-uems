@@ -42,6 +42,10 @@ import { elevateToChiefExaminer, appointRole, revokeRole } from './lib/privilege
 import { uploadVettingRecording } from './lib/examServices/recordingService';
 import { syncVettingRecordingToSession } from './lib/examServices/vettingService';
 import { getVettingRecordings } from './lib/examServices/chiefExaminerService';
+import {
+  getApprovedPapersRepository,
+  type ApprovedPaper,
+} from './lib/examServices/repositoryService';
 import { createNotification, getUserNotifications, markNotificationAsRead, markAllNotificationsAsRead, clearAllNotifications } from './lib/examServices/notificationService';
 import ucuLogo from './assets/ucu-logo.png';
 import RecordingReviewPanel from './components/RecordingReviewPanel';
@@ -527,7 +531,7 @@ const rolePrivileges: Record<Role, RolePrivilegeSet> = {
       { id: 'ce-annotations', name: 'View Annotations', description: 'Access all vetting annotations', category: 'Workflow' },
       { id: 'ce-version', name: 'Version Management', description: 'View version history and labels', category: 'Workflow' },
       { id: 'ce-mask', name: 'Mask Footprints', description: 'Mask moderator identification', category: 'Security' },
-      { id: 'ce-ai-similarity', name: 'Similarity Detection', description: 'Compare submitted papers with historical papers to detect similarities', category: 'Academic Integrity' },
+      { id: 'ce-ai-similarity', name: 'Similarity Detection', description: 'Compare Team Lead submissions with the QA Approved Papers Repository before vetting', category: 'Academic Integrity' },
       { id: 'ce-lecturer', name: 'All Lecturer Privileges', description: 'Full access to all lecturer features', category: 'Teaching' },
       { id: 'ce-reports', name: 'System Reports', description: 'Generate system-wide reports', category: 'Reporting' },
       { id: 'ce-audit', name: 'Audit Trail Access', description: 'View complete audit logs', category: 'Administration' },
@@ -17300,6 +17304,23 @@ interface Paper {
   submittedAt: string;
   fileName: string;
   content: string;
+  fileSize?: number;
+}
+
+function mapApprovedPaperToSimilarityPaper(ap: ApprovedPaper): Paper {
+  const fileName = ap.file_name || ap.course_name || 'Exam Paper';
+  return {
+    id: ap.id,
+    courseUnit: ap.course_name || '',
+    courseCode: ap.course_code || '',
+    semester: ap.semester || '',
+    year: ap.academic_year || '',
+    submittedBy: String(ap.team_lead_id || ap.setter_id || ap.chief_examiner_id || 'Unknown'),
+    submittedAt: ap.submitted_at || ap.created_at || '',
+    fileName,
+    content: ap.file_url || fileName,
+    fileSize: ap.file_size,
+  };
 }
 
 interface SimilarityResult {
@@ -17340,6 +17361,44 @@ function AISimilarityDetectionPanel({
   const [similarityResults, setSimilarityResults] = useState<SimilarityResult[]>([]);
   const [showDetails, setShowDetails] = useState<string | null>(null);
   const [scanCompleted, setScanCompleted] = useState(false);
+  /** Benchmark corpus: same query as Quality Assurance → Approved Papers Repository */
+  const [approvedBenchmarkPapers, setApprovedBenchmarkPapers] = useState<Paper[]>([]);
+  const [approvedCorpusLoading, setApprovedCorpusLoading] = useState(true);
+
+  const refreshApprovedCorpus = useCallback(async () => {
+    setApprovedCorpusLoading(true);
+    try {
+      const approved = await getApprovedPapersRepository();
+      const list = approved
+        .filter((ap) => !isChecklist(ap.file_name || ap.course_name || ''))
+        .map(mapApprovedPaperToSimilarityPaper);
+      setApprovedBenchmarkPapers(list);
+    } catch (err) {
+      console.error('Failed to load Approved Papers Repository for similarity:', err);
+    } finally {
+      setApprovedCorpusLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshApprovedCorpus();
+  }, [refreshApprovedCorpus]);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel('ai_similarity_approved_corpus')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'exam_papers' },
+        () => {
+          void refreshApprovedCorpus();
+        }
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [refreshApprovedCorpus]);
 
   // Keep similarity inputs aligned with "Repository Papers" panel visibility rules.
   const analysisReadyRepositoryPapers = useMemo(
@@ -17414,19 +17473,6 @@ function AISimilarityDetectionPanel({
     return paper.submittedBy || 'Unknown';
   };
 
-  // Convert repository papers to Paper format for comparison
-  const allRepositoryPapers: Paper[] = analysisReadyRepositoryPapers.map(paper => ({
-    id: paper.id,
-    courseUnit: paper.courseUnit,
-    courseCode: paper.courseCode,
-    semester: paper.semester,
-    year: paper.year,
-    submittedBy: paper.submittedBy,
-    submittedAt: paper.submittedAt,
-    fileName: paper.fileName,
-    content: paper.content,
-  }));
-
   // Build dropdown options strictly from papers that are currently in repository.
   const courseUnits = useMemo(
     () =>
@@ -17452,16 +17498,16 @@ function AISimilarityDetectionPanel({
 
   // Enhanced Similarity Detection Algorithm
   const detectSimilarity = (
-    submittedPaper: SubmittedPaper, 
-    repositoryPaper: Paper
+    submittedPaper: SubmittedPaper,
+    benchmarkPaper: Paper
   ): SimilarityResult | null => {
     // Skip if comparing paper with itself
-    if (submittedPaper.id === repositoryPaper.id) return null;
+    if (submittedPaper.id === benchmarkPaper.id) return null;
 
     // Get content from submitted paper (try to get from repository or use placeholder)
     const submittedContent = repositoryPapers.find(rp => rp.id === submittedPaper.id)?.content || 
                              `Paper: ${submittedPaper.fileName}`;
-    const repoContent = repositoryPaper.content;
+    const benchmarkContent = benchmarkPaper.content;
 
     // Normalize and tokenize content
     const normalizeText = (text: string): string[] => {
@@ -17473,19 +17519,19 @@ function AISimilarityDetectionPanel({
     };
 
     const submittedWords = normalizeText(submittedContent);
-    const repoWords = normalizeText(repoContent);
+    const benchmarkWords = normalizeText(benchmarkContent);
 
     // Calculate word overlap
     const submittedSet = new Set(submittedWords);
-    const repoSet = new Set(repoWords);
+    const benchmarkSet = new Set(benchmarkWords);
     
     let commonWords = 0;
     submittedSet.forEach(word => {
-      if (repoSet.has(word)) commonWords++;
+      if (benchmarkSet.has(word)) commonWords++;
     });
 
     // Calculate similarity using Jaccard similarity and word frequency
-    const unionSize = new Set([...submittedWords, ...repoWords]).size;
+    const unionSize = new Set([...submittedWords, ...benchmarkWords]).size;
     const jaccardSimilarity = unionSize > 0 ? (commonWords / unionSize) * 100 : 0;
     
     // Also calculate word frequency similarity
@@ -17494,18 +17540,18 @@ function AISimilarityDetectionPanel({
       submittedWordFreq.set(word, (submittedWordFreq.get(word) || 0) + 1);
     });
 
-    const repoWordFreq = new Map<string, number>();
-    repoWords.forEach(word => {
-      repoWordFreq.set(word, (repoWordFreq.get(word) || 0) + 1);
+    const benchmarkWordFreq = new Map<string, number>();
+    benchmarkWords.forEach(word => {
+      benchmarkWordFreq.set(word, (benchmarkWordFreq.get(word) || 0) + 1);
     });
 
     let freqSimilarity = 0;
     let totalFreq = 0;
     submittedWordFreq.forEach((freq, word) => {
-      if (repoWordFreq.has(word)) {
-        const repoFreq = repoWordFreq.get(word) || 0;
-        freqSimilarity += Math.min(freq, repoFreq);
-        totalFreq += Math.max(freq, repoFreq);
+      if (benchmarkWordFreq.has(word)) {
+        const bFreq = benchmarkWordFreq.get(word) || 0;
+        freqSimilarity += Math.min(freq, bFreq);
+        totalFreq += Math.max(freq, bFreq);
       }
     });
     const freqScore = totalFreq > 0 ? (freqSimilarity / totalFreq) * 100 : 0;
@@ -17531,7 +17577,7 @@ function AISimilarityDetectionPanel({
 
     return {
       paperId: submittedPaper.id,
-      historicalPaperId: repositoryPaper.id,
+      historicalPaperId: benchmarkPaper.id,
       similarityScore: Math.round(similarityScore * 10) / 10, // Round to 1 decimal
       matchedSections,
       riskLevel,
@@ -17548,57 +17594,64 @@ function AISimilarityDetectionPanel({
     setSimilarityResults([]);
     setScanCompleted(false);
 
-    // Simulate AI processing with actual comparison
-    setTimeout(() => {
+    try {
+      const approved = await getApprovedPapersRepository();
+      const benchmarkList = approved
+        .filter((ap) => !isChecklist(ap.file_name || ap.course_name || ''))
+        .map(mapApprovedPaperToSimilarityPaper);
+
+      setApprovedBenchmarkPapers(benchmarkList);
+
       const [courseCode] = selectedCourse.split(' - ');
-      
-      // Get submitted papers for this course that exist in the repository (Team Lead submissions only)
-      const papersToScan = submittedPapers.filter(p => {
+
+      // Team Lead submissions registered in Chief Examiner repository workflow
+      const papersToScan = submittedPapers.filter((p) => {
         if (!p.courseCode || p.courseCode !== courseCode) return false;
-        // Only scan papers that exist in the repository
-        return repositoryPapers.some(rp => rp.id === p.id);
+        return repositoryPapers.some((rp) => rp.id === p.id);
       });
-      
-      // Get ALL repository papers for this course (both current and historical)
-      const repositoryPapersForCourse = allRepositoryPapers.filter(p => p.courseCode === courseCode);
+
+      // Benchmark: approved-for-printing papers (same set as QA Approved Papers Repository)
+      const benchmarkForCourse = benchmarkList.filter((p) => p.courseCode === courseCode);
 
       if (papersToScan.length === 0) {
         alert('No submitted papers found for this course unit.');
-        setIsScanning(false);
         return;
       }
 
-      if (repositoryPapersForCourse.length === 0) {
-        alert('No repository papers found for comparison.');
-        setIsScanning(false);
+      if (benchmarkForCourse.length === 0) {
+        alert(
+          'No papers in the Approved Papers Repository (Quality Assurance) for this course unit. Approve papers in QA first, or choose another course.'
+        );
         return;
       }
 
       const results: SimilarityResult[] = [];
-
-      // Compare each submitted paper with all repository papers
-      papersToScan.forEach(submittedPaper => {
-        repositoryPapersForCourse.forEach(repoPaper => {
-          const result = detectSimilarity(submittedPaper, repoPaper);
-          if (result) {
-            results.push(result);
-          }
+      papersToScan.forEach((submittedPaper) => {
+        benchmarkForCourse.forEach((benchmarkPaper) => {
+          const result = detectSimilarity(submittedPaper, benchmarkPaper);
+          if (result) results.push(result);
         });
       });
 
-      // Sort by similarity score (highest first)
       results.sort((a, b) => b.similarityScore - a.similarityScore);
-
       setSimilarityResults(results);
       setScanCompleted(true);
-      setIsScanning(false);
 
       if (results.length === 0) {
         alert('No significant similarities found. All papers appear to be original.');
       } else {
-        alert(`Scan complete! Found ${results.length} similarity match${results.length !== 1 ? 'es' : ''} with similarity scores ranging from ${Math.min(...results.map(r => r.similarityScore)).toFixed(1)}% to ${Math.max(...results.map(r => r.similarityScore)).toFixed(1)}%.`);
+        alert(
+          `Scan complete! Found ${results.length} similarity match${results.length !== 1 ? 'es' : ''} with similarity scores ranging from ${Math.min(...results.map((r) => r.similarityScore)).toFixed(1)}% to ${Math.max(...results.map((r) => r.similarityScore)).toFixed(1)}%.`
+        );
       }
-    }, 2500); // Slightly longer delay to simulate AI processing
+    } catch (err) {
+      console.error('Similarity scan failed:', err);
+      alert(
+        'Could not load the Approved Papers Repository from Supabase. Check your connection and that your role may read approved papers.'
+      );
+    } finally {
+      setIsScanning(false);
+    }
   };
 
   const getRiskColor = (risk: string) => {
@@ -17661,7 +17714,7 @@ function AISimilarityDetectionPanel({
     <SectionCard
       title="Similarity Detection"
       kicker="Academic Integrity Check"
-      description="Compare submitted exam papers with historical papers from previous semesters to detect potential similarities and ensure academic integrity."
+      description="Compare Team Lead submissions against papers in the Approved Papers Repository (Quality Assurance dashboard)—approved for printing / locked archive— to flag potential reuse or similarity before vetting."
     >
       <div className="space-y-4">
         <div className="relative overflow-hidden rounded-2xl border border-white/20 bg-gradient-to-br from-blue-50/80 via-indigo-50/70 to-purple-50/80 backdrop-blur-xl p-6 shadow-2xl shadow-blue-500/10">
@@ -17672,6 +17725,11 @@ function AISimilarityDetectionPanel({
           
           <div className="relative z-10">
             <h3 className="text-sm font-semibold text-slate-800 mb-4">Course Unit Selection</h3>
+            <p className="text-xs text-slate-600 mb-3">
+              {approvedCorpusLoading
+                ? 'Loading Approved Papers Repository (QA)…'
+                : `${approvedBenchmarkPapers.length} approved paper${approvedBenchmarkPapers.length !== 1 ? 's' : ''} available as similarity benchmark.`}
+            </p>
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className="block text-xs text-slate-600 mb-2">Select Course Unit</label>
@@ -17863,7 +17921,7 @@ function AISimilarityDetectionPanel({
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-2">
               {similarityResults.map((result, idx) => {
                 const currentPaper = submittedPapers.find(p => p.id === result.paperId);
-                const historicalPaper = allRepositoryPapers.find(p => p.id === result.historicalPaperId);
+                const historicalPaper = approvedBenchmarkPapers.find((p) => p.id === result.historicalPaperId);
                 
                 const getRiskIcon = (risk: string) => {
                   switch (risk) {
@@ -17928,7 +17986,7 @@ function AISimilarityDetectionPanel({
                       {historicalPaper && (
                         <div className="mb-3 p-2 rounded-lg bg-white/70 backdrop-blur-sm border border-white/60 shadow-sm">
                           <p className="text-[0.65rem] font-bold text-slate-700 mb-1.5 flex items-center gap-1">
-                            <span>📚</span> Matched with Repository Paper
+                            <span>📚</span> Matched with Approved Papers Repository (QA)
                           </p>
                           <div className="space-y-1 text-[0.6rem]">
                             <p className="text-slate-800 font-semibold truncate">{historicalPaper.fileName}</p>
@@ -18060,7 +18118,7 @@ function AISimilarityDetectionPanel({
                             )}
                           </div>
                           <div className="p-2 rounded-lg bg-white/60 border border-slate-200/50">
-                            <p className="font-semibold text-slate-600 mb-0.5">Repository Match</p>
+                            <p className="font-semibold text-slate-600 mb-0.5">QA approved paper</p>
                             <p className="text-slate-800 font-medium">{historicalPaper?.courseCode}</p>
                             <p className="text-slate-600">{historicalPaper?.semester} {historicalPaper?.year}</p>
                             {historicalPaper?.submittedBy && (
@@ -18122,7 +18180,7 @@ function AISimilarityDetectionPanel({
         {!isScanning && !scanCompleted && similarityResults.length === 0 && selectedCourse && (
           <div className="rounded-xl border border-slate-200 bg-white p-5 text-center">
             <p className="text-sm text-slate-600">
-              Click "Run Similarity Scan" to compare submitted papers with historical papers.
+              Click &quot;Run Similarity Scan&quot; to compare submissions with papers in the QA Approved Papers Repository.
             </p>
           </div>
         )}
