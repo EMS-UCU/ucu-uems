@@ -1,7 +1,50 @@
 import { supabase } from '../supabase';
-import type { VettingSession, VettingAssignment, VettingComment } from '../supabase';
+import type { VettingSession, VettingComment } from '../supabase';
 import { addWorkflowEvent } from './workflowService';
 import { createNotification } from './notificationService';
+
+const VETTING_ASSIGNMENTS_LIVE_KEY = 'vetting_assignments_live';
+
+type LiveVettingAssignmentRow = {
+  vetting_session_id: string;
+  vetter_id: string;
+  assigned_by: string;
+};
+
+async function mergeVettingAssignmentsToModerationState(
+  rows: LiveVettingAssignmentRow[]
+): Promise<{ error?: string }> {
+  const { data: existingRow } = await supabase
+    .from('moderation_state')
+    .select('value')
+    .eq('key', VETTING_ASSIGNMENTS_LIVE_KEY)
+    .maybeSingle();
+
+  const raw = existingRow?.value as { assignments?: LiveVettingAssignmentRow[] } | null | undefined;
+  const existing: LiveVettingAssignmentRow[] = Array.isArray(raw?.assignments) ? raw.assignments : [];
+
+  const byKey = new Map<string, LiveVettingAssignmentRow>();
+  for (const a of existing) {
+    byKey.set(`${a.vetting_session_id}:${a.vetter_id}`, a);
+  }
+  for (const a of rows) {
+    byKey.set(`${a.vetting_session_id}:${a.vetter_id}`, a);
+  }
+  const merged = Array.from(byKey.values());
+
+  const { error } = await supabase.from('moderation_state').upsert(
+    {
+      key: VETTING_ASSIGNMENTS_LIVE_KEY,
+      value: { assignments: merged },
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'key' }
+  );
+  if (error) {
+    return { error: error.message };
+  }
+  return {};
+}
 
 // Create a vetting session
 export async function createVettingSession(data: {
@@ -332,16 +375,32 @@ export async function completeVettingSession(
 // Get vetting sessions for a vetter
 export async function getVetterSessions(vetterId: string): Promise<VettingSession[]> {
   try {
-    const { data: assignments } = await supabase
+    const { data: assignments, error: assignmentsError } = await supabase
       .from('vetting_assignments')
       .select('vetting_session_id')
       .eq('vetter_id', vetterId);
 
-    if (!assignments || assignments.length === 0) {
-      return [];
+    let sessionIds: string[] = [];
+    if (!assignmentsError && assignments && assignments.length > 0) {
+      sessionIds = assignments.map((a) => a.vetting_session_id);
+    } else if (assignmentsError) {
+      const { data: live } = await supabase
+        .from('moderation_state')
+        .select('value')
+        .eq('key', VETTING_ASSIGNMENTS_LIVE_KEY)
+        .maybeSingle();
+      const list =
+        (live?.value as { assignments?: LiveVettingAssignmentRow[] } | null)?.assignments ?? [];
+      sessionIds = [
+        ...new Set(
+          list.filter((a) => a.vetter_id === vetterId).map((a) => a.vetting_session_id)
+        ),
+      ];
     }
 
-    const sessionIds = assignments.map((a) => a.vetting_session_id);
+    if (sessionIds.length === 0) {
+      return [];
+    }
 
     const { data: sessions, error } = await supabase
       .from('vetting_sessions')

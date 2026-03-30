@@ -1174,14 +1174,33 @@ const loadChecklistComments = (): ChecklistCommentsMap => {
   try {
     const saved = localStorage.getItem(CHECKLIST_COMMENTS_STORAGE_KEY);
     if (!saved) {
-      return createDemoChecklistComments();
+      return new Map();
     }
     const parsed = JSON.parse(saved) as Record<string, ChecklistComment>;
     return new Map(Object.entries(parsed));
   } catch (error) {
     console.error('Error loading checklist comments:', error);
-    return createDemoChecklistComments();
+    return new Map();
   }
+};
+
+const parseAnnotationsSyncPayload = (value: unknown): Annotation[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry) => entry && typeof entry === 'object')
+    .map((entry: any) => ({
+      id: String(entry.id ?? ''),
+      author: String(entry.author ?? 'Unknown'),
+      comment: String(entry.comment ?? ''),
+      timestamp: String(entry.timestamp ?? new Date().toISOString()),
+    }))
+    .filter((entry) => entry.id && entry.comment);
+};
+
+const parseVettingContextSyncPayload = (value: unknown): string | null => {
+  if (!value || typeof value !== 'object') return null;
+  const id = (value as { examPaperId?: unknown }).examPaperId;
+  return typeof id === 'string' && id.trim() ? id : null;
 };
 
 const serializeChecklistComments = (comments: ChecklistCommentsMap): Record<string, ChecklistComment> => {
@@ -1554,6 +1573,58 @@ const loadCustomChecklistPdf = (): { url: string; name: string; isWordDoc?: bool
     console.error('Error loading custom checklist PDF:', error);
     return null;
   }
+};
+
+const parseChecklistTemplateSyncPayload = (value: unknown): {
+  customChecklist: typeof digitalChecklist | null;
+  customChecklistPdf: { url: string; name: string; isWordDoc?: boolean } | null;
+} | null => {
+  if (!value || typeof value !== 'object') return null;
+  const payload = value as {
+    customChecklist?: unknown;
+    customChecklistPdf?: unknown;
+  };
+
+  let nextChecklist: typeof digitalChecklist | null = null;
+  if (payload.customChecklist && typeof payload.customChecklist === 'object') {
+    const candidate = payload.customChecklist as {
+      courseOutline?: unknown;
+      bloomsTaxonomy?: unknown;
+      compliance?: unknown;
+    };
+    if (
+      Array.isArray(candidate.courseOutline) &&
+      Array.isArray(candidate.bloomsTaxonomy) &&
+      Array.isArray(candidate.compliance)
+    ) {
+      nextChecklist = {
+        courseOutline: candidate.courseOutline.map((v) => String(v)),
+        bloomsTaxonomy: candidate.bloomsTaxonomy.map((v) => String(v)),
+        compliance: candidate.compliance.map((v) => String(v)),
+      };
+    }
+  }
+
+  let nextChecklistPdf: { url: string; name: string; isWordDoc?: boolean } | null = null;
+  if (payload.customChecklistPdf && typeof payload.customChecklistPdf === 'object') {
+    const candidate = payload.customChecklistPdf as {
+      url?: unknown;
+      name?: unknown;
+      isWordDoc?: unknown;
+    };
+    if (typeof candidate.name === 'string' && candidate.name.trim()) {
+      nextChecklistPdf = {
+        url: typeof candidate.url === 'string' ? candidate.url : '',
+        name: candidate.name,
+        isWordDoc: Boolean(candidate.isWordDoc),
+      };
+    }
+  }
+
+  return {
+    customChecklist: nextChecklist,
+    customChecklistPdf: nextChecklistPdf,
+  };
 };
 
 const createId = (() => {
@@ -1991,6 +2062,15 @@ function App() {
   const checklistCommentsChannelRef = useRef<BroadcastChannel | null>(null);
   const checklistCommentsPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastChecklistCommentsPersistJsonRef = useRef<string>('');
+  const [checklistTemplateSyncReady, setChecklistTemplateSyncReady] = useState(false);
+  const checklistTemplatePersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastChecklistTemplatePersistJsonRef = useRef<string>('');
+  const [annotationsSyncReady, setAnnotationsSyncReady] = useState(false);
+  const annotationsPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAnnotationsPersistJsonRef = useRef<string>('');
+  const [vettingContextExamPaperId, setVettingContextExamPaperId] = useState<string | null>(null);
+  const vettingContextPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastVettingContextPersistJsonRef = useRef<string>('');
   const previousInVettingIdsRef = useRef<Set<string>>(new Set());
   const activeChecklist = customChecklist ?? digitalChecklist;
   // Vetting session records - stores completed sessions
@@ -2695,7 +2775,11 @@ function App() {
   useEffect(() => {
     const loadModerationState = async () => {
       setSubmissionDeadlinesSyncReady(false);
+      setChecklistTemplateSyncReady(false);
+      setAnnotationsSyncReady(false);
       hasSeenSubmissionDeadlinesFromSupabaseRef.current = false;
+      let sawVettingAnnotations = false;
+      let sawVettingContext = false;
       try {
         const { data: liveVetterRows, error: liveVetterError } = await supabase
           .from('moderation_state')
@@ -2741,13 +2825,20 @@ function App() {
             'removed_from_vetting_ids',
             'checklist_comments_live',
             'forwarded_checklist',
+            'checklist_template_live',
+            'vetting_annotations_live',
+            'vetting_context_live',
           ]);
 
         if (error) {
           console.warn('Moderation state load failed (table may not exist yet):', error.message);
           return;
         }
-        if (!data || data.length === 0) return;
+        if (!data || data.length === 0) {
+          lastAnnotationsPersistJsonRef.current = '[]';
+          lastVettingContextPersistJsonRef.current = JSON.stringify({ examPaperId: null });
+          return;
+        }
 
         for (const row of data) {
           const value = row.value as Record<string, unknown>;
@@ -2808,6 +2899,27 @@ function App() {
               return isSameChecklistComments(prev, merged) ? prev : merged;
             });
           }
+          if (row.key === 'checklist_template_live') {
+            const parsed = parseChecklistTemplateSyncPayload(value);
+            if (parsed) {
+              setCustomChecklist(parsed.customChecklist);
+              setCustomChecklistPdf(parsed.customChecklistPdf);
+            }
+          }
+          if (row.key === 'vetting_annotations_live') {
+            sawVettingAnnotations = true;
+            const parsed = parseAnnotationsSyncPayload(value);
+            const json = JSON.stringify(parsed);
+            lastAnnotationsPersistJsonRef.current = json;
+            setAnnotations(parsed);
+          }
+          if (row.key === 'vetting_context_live') {
+            sawVettingContext = true;
+            const paperId = parseVettingContextSyncPayload(value);
+            const ctxJson = JSON.stringify({ examPaperId: paperId });
+            lastVettingContextPersistJsonRef.current = ctxJson;
+            setVettingContextExamPaperId(paperId);
+          }
           if (row.key === 'submission_deadlines' && value && typeof value === 'object') {
             // Skip seeded placeholder {}; otherwise an empty object would zero out deadlines after localStorage hydrate.
             if (Object.keys(value as object).length === 0) {
@@ -2836,10 +2948,19 @@ function App() {
             }
           }
         }
+        if (!sawVettingAnnotations) {
+          lastAnnotationsPersistJsonRef.current = '[]';
+        }
+        if (!sawVettingContext) {
+          lastVettingContextPersistJsonRef.current = JSON.stringify({ examPaperId: null });
+          setVettingContextExamPaperId(null);
+        }
       } catch (err) {
         console.error('Error loading moderation state:', err);
       } finally {
         setSubmissionDeadlinesSyncReady(true);
+        setChecklistTemplateSyncReady(true);
+        setAnnotationsSyncReady(true);
       }
     };
     loadModerationState();
@@ -3082,6 +3203,25 @@ function App() {
               return isSameChecklistComments(prev, merged) ? prev : merged;
             });
           }
+          if (row.key === 'checklist_template_live') {
+            const parsed = parseChecklistTemplateSyncPayload(row.value);
+            if (parsed) {
+              setCustomChecklist(parsed.customChecklist);
+              setCustomChecklistPdf(parsed.customChecklistPdf);
+            }
+          }
+          if (row.key === 'vetting_annotations_live') {
+            const parsed = parseAnnotationsSyncPayload(row.value);
+            const json = JSON.stringify(parsed);
+            lastAnnotationsPersistJsonRef.current = json;
+            setAnnotations(parsed);
+          }
+          if (row.key === 'vetting_context_live') {
+            const paperId = parseVettingContextSyncPayload(row.value);
+            const ctxJson = JSON.stringify({ examPaperId: paperId });
+            lastVettingContextPersistJsonRef.current = ctxJson;
+            setVettingContextExamPaperId(paperId);
+          }
           if (row.key.startsWith('vetter_live_') && row.value && typeof row.value === 'object') {
             const value = row.value as Partial<SerializableVetterMonitoring>;
             if (value?.vetterId) {
@@ -3125,6 +3265,9 @@ function App() {
               'removed_from_vetting_ids',
               'checklist_comments_live',
               'forwarded_checklist',
+              'checklist_template_live',
+              'vetting_annotations_live',
+              'vetting_context_live',
             ])
             .then(({ data, error }) => {
               if (error || !data?.length) return;
@@ -3139,6 +3282,23 @@ function App() {
                   } catch {
                     /* ignore */
                   }
+                }
+                if (row.key === 'checklist_template_live') {
+                  const parsed = parseChecklistTemplateSyncPayload(row.value);
+                  if (parsed) {
+                    setCustomChecklist(parsed.customChecklist);
+                    setCustomChecklistPdf(parsed.customChecklistPdf);
+                  }
+                }
+                if (row.key === 'vetting_annotations_live') {
+                  const parsed = parseAnnotationsSyncPayload(row.value);
+                  lastAnnotationsPersistJsonRef.current = JSON.stringify(parsed);
+                  setAnnotations(parsed);
+                }
+                if (row.key === 'vetting_context_live') {
+                  const paperId = parseVettingContextSyncPayload(row.value);
+                  lastVettingContextPersistJsonRef.current = JSON.stringify({ examPaperId: paperId });
+                  setVettingContextExamPaperId(paperId);
                 }
               }
             });
@@ -3165,6 +3325,112 @@ function App() {
       console.error('Error saving custom checklist:', error);
     }
   }, [customChecklist, customChecklistPdf]);
+
+  // Persist checklist template to Supabase for cross-browser/device vetter sync.
+  useEffect(() => {
+    if (!authUserId || !checklistTemplateSyncReady) return;
+
+    const payload = {
+      customChecklist,
+      customChecklistPdf,
+    };
+    const json = JSON.stringify(payload);
+    if (json === lastChecklistTemplatePersistJsonRef.current) return;
+
+    if (checklistTemplatePersistTimerRef.current) {
+      clearTimeout(checklistTemplatePersistTimerRef.current);
+    }
+
+    checklistTemplatePersistTimerRef.current = setTimeout(() => {
+      checklistTemplatePersistTimerRef.current = null;
+      lastChecklistTemplatePersistJsonRef.current = json;
+      void supabase
+        .from('moderation_state')
+        .upsert(
+          { key: 'checklist_template_live', value: payload, updated_at: new Date().toISOString() },
+          { onConflict: 'key' }
+        )
+        .then(({ error }) => {
+          if (error) console.warn('Failed to persist checklist_template_live to Supabase:', error.message);
+        });
+    }, 350);
+
+    return () => {
+      if (checklistTemplatePersistTimerRef.current) {
+        clearTimeout(checklistTemplatePersistTimerRef.current);
+        checklistTemplatePersistTimerRef.current = null;
+      }
+    };
+  }, [authUserId, checklistTemplateSyncReady, customChecklist, customChecklistPdf]);
+
+  // Persist inline vetting annotations for cross-browser sync (same session).
+  useEffect(() => {
+    if (!authUserId || !annotationsSyncReady) return;
+
+    const json = JSON.stringify(annotations);
+    if (json === lastAnnotationsPersistJsonRef.current) return;
+
+    if (annotationsPersistTimerRef.current) {
+      clearTimeout(annotationsPersistTimerRef.current);
+    }
+
+    annotationsPersistTimerRef.current = setTimeout(() => {
+      annotationsPersistTimerRef.current = null;
+      const latest = JSON.stringify(annotations);
+      lastAnnotationsPersistJsonRef.current = latest;
+      void supabase
+        .from('moderation_state')
+        .upsert(
+          { key: 'vetting_annotations_live', value: annotations, updated_at: new Date().toISOString() },
+          { onConflict: 'key' }
+        )
+        .then(({ error }) => {
+          if (error) console.warn('Failed to persist vetting_annotations_live:', error.message);
+        });
+    }, 400);
+
+    return () => {
+      if (annotationsPersistTimerRef.current) {
+        clearTimeout(annotationsPersistTimerRef.current);
+        annotationsPersistTimerRef.current = null;
+      }
+    };
+  }, [authUserId, annotationsSyncReady, annotations]);
+
+  // Persist which exam paper the vetting UI is focused on (multi-paper / cross-device).
+  useEffect(() => {
+    if (!authUserId || !annotationsSyncReady) return;
+
+    const payload = { examPaperId: vettingContextExamPaperId };
+    const json = JSON.stringify(payload);
+    if (json === lastVettingContextPersistJsonRef.current) return;
+
+    if (vettingContextPersistTimerRef.current) {
+      clearTimeout(vettingContextPersistTimerRef.current);
+    }
+
+    vettingContextPersistTimerRef.current = setTimeout(() => {
+      vettingContextPersistTimerRef.current = null;
+      const latest = JSON.stringify({ examPaperId: vettingContextExamPaperId });
+      lastVettingContextPersistJsonRef.current = latest;
+      void supabase
+        .from('moderation_state')
+        .upsert(
+          { key: 'vetting_context_live', value: payload, updated_at: new Date().toISOString() },
+          { onConflict: 'key' }
+        )
+        .then(({ error }) => {
+          if (error) console.warn('Failed to persist vetting_context_live:', error.message);
+        });
+    }, 400);
+
+    return () => {
+      if (vettingContextPersistTimerRef.current) {
+        clearTimeout(vettingContextPersistTimerRef.current);
+        vettingContextPersistTimerRef.current = null;
+      }
+    };
+  }, [authUserId, annotationsSyncReady, vettingContextExamPaperId]);
 
   // Load persisted exam papers from Supabase so they survive refresh/login
   useEffect(() => {
@@ -8550,7 +8816,14 @@ function App() {
     );
 
     setAnnotations([]);
+    setVettingContextExamPaperId(null);
+    lastAnnotationsPersistJsonRef.current = '[]';
+    lastVettingContextPersistJsonRef.current = JSON.stringify({ examPaperId: null });
     setVettingSession(emptyVettingSession);
+  };
+
+  const handleVettingFocusExamPaperChange = (paperId: string | null) => {
+    setVettingContextExamPaperId(paperId);
   };
 
   const handleAddAnnotation = (comment: string) => {
@@ -9942,6 +10215,32 @@ function App() {
               switchingLocked: false,
               lastClosedReason: 'cancelled',
             });
+            setAnnotations([]);
+            setVettingContextExamPaperId(null);
+            lastAnnotationsPersistJsonRef.current = '[]';
+            lastVettingContextPersistJsonRef.current = JSON.stringify({ examPaperId: null });
+            void supabase
+              .from('moderation_state')
+              .upsert(
+                [
+                  {
+                    key: 'vetting_annotations_live',
+                    value: [],
+                    updated_at: new Date().toISOString(),
+                  },
+                  {
+                    key: 'vetting_context_live',
+                    value: { examPaperId: null },
+                    updated_at: new Date().toISOString(),
+                  },
+                ],
+                { onConflict: 'key' }
+              )
+              .then(({ error }) => {
+                if (error) {
+                  console.warn('Failed to clear vetting sync keys in moderation_state:', error.message);
+                }
+              });
             // Clear all joined vetters
             setJoinedVetters(new Set());
             // Preserve monitoring evidence after session close so Chief can review
@@ -9979,6 +10278,9 @@ function App() {
           onApprove={handleApprove}
           onReject={handleReject}
           vettingSessionRecords={vettingSessionRecords}
+          syncedFocusExamPaperId={vettingContextExamPaperId}
+          onFocusExamPaperChange={handleVettingFocusExamPaperChange}
+          vettingFocusSyncReady={annotationsSyncReady}
         />
       ),
     });
@@ -21087,6 +21389,11 @@ interface VettingAndAnnotationsProps {
   onForwardChecklist?: (decision: 'approved' | 'rejected', notes: string) => void;
   onDownloadChecklistPacket?: () => void;
   vettingSessionRecords?: VettingSessionRecord[];
+  /** Supabase-synced exam paper id to focus across devices */
+  syncedFocusExamPaperId?: string | null;
+  onFocusExamPaperChange?: (paperId: string | null) => void;
+  /** When false, do not publish focus (avoids clobbering remote context before moderation_state load). */
+  vettingFocusSyncReady?: boolean;
 }
 
 type ChecklistSectionKey = 'courseOutline' | 'bloomsTaxonomy' | 'compliance';
@@ -21173,6 +21480,9 @@ function VettingAndAnnotations({
   onForwardChecklist,
   onDownloadChecklistPacket,
   vettingSessionRecords = [],
+  syncedFocusExamPaperId = null,
+  onFocusExamPaperChange,
+  vettingFocusSyncReady = true,
 }: VettingAndAnnotationsProps) {
   const [annotationDraft, setAnnotationDraft] = useState('');
   const [forwardDecision, setForwardDecision] = useState<'approved' | 'rejected' | ''>('');
@@ -21806,6 +22116,14 @@ function VettingAndAnnotations({
       return;
     }
     setSelectedPaper((prev) => {
+      if (vettingSession.active && syncedFocusExamPaperId) {
+        const remote = papersToDisplay.find(
+          (p) => p.id === syncedFocusExamPaperId && isPaperInVettingWindow(p)
+        );
+        if (remote) {
+          return remote;
+        }
+      }
       const preferredPaper =
         papersToDisplay.find((p) => p.status === 'in-vetting' || p.status === 'vetted') || papersToDisplay[0];
       if (!prev) {
@@ -21817,7 +22135,13 @@ function VettingAndAnnotations({
       }
       return latestMatch;
     });
-  }, [paperStateSignature, papersToDisplay, isPaperInVettingWindow]);
+  }, [paperStateSignature, papersToDisplay, isPaperInVettingWindow, vettingSession.active, syncedFocusExamPaperId]);
+
+  // Broadcast focused paper to Supabase so all vetters see the same document.
+  useEffect(() => {
+    if (!vettingSession.active || !onFocusExamPaperChange || !vettingFocusSyncReady) return;
+    onFocusExamPaperChange(selectedPaper?.id ?? null);
+  }, [vettingSession.active, selectedPaper?.id, onFocusExamPaperChange, vettingFocusSyncReady]);
 
   // Check if scheduled start time has been reached
   // The countdown becomes null when the scheduled time has been reached
@@ -21974,6 +22298,9 @@ function VettingAndAnnotations({
             onChange={(e) => {
               const paper = papersToDisplay.find((p) => p.id === e.target.value);
               setSelectedPaper(paper || null);
+              if (vettingFocusSyncReady) {
+                onFocusExamPaperChange?.(paper?.id ?? null);
+              }
             }}
             className="rounded-lg border-2 border-blue-200 bg-white px-2 py-1 text-[0.65rem] text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 shadow-sm"
           >
